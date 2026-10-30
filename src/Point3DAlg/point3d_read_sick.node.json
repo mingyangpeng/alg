@@ -1,0 +1,51 @@
+{
+  "node": {
+    "id": "alg.point3d.read_sick",
+    "name": "SICK 扫描读取",
+    "group": "IO",
+    "category": "源",
+    "description": "读取 SICK Ranger3 扫描文件夹（*.dat+*.xml+Scan3DPart*.json）生成点云(mm)，换算参数自动从数据文件读取"
+  },
+  "runtime": "native",
+  "assembly": "Point3DAlg.dll",
+  "method": "Point3DAlg_ComuiReadSick",
+  "inputs": [],
+  "params": [
+    {
+      "name": "folder",
+      "label": "扫描数据文件夹",
+      "type": "path",
+      "default": ""
+    },
+    {
+      "name": "frame",
+      "label": "指定帧(-1=全部)",
+      "type": "int",
+      "default": -1,
+      "min": -1
+    }
+  ],
+  "outputs": [
+    {
+      "name": "点云",
+      "type": "cloud"
+    }
+  ],
+  "source": {
+    "files": [
+      "src/Point3DAlg_comui.cpp",
+      "src/Point3DAlg_SickIO.cpp",
+      "src/Point3DAlg_SickReader.cpp",
+      "src/Point3DAlg_Json.cpp",
+      "src/Point3DAlg_export.h",
+      "src/comui_native_abi.h",
+      "src/include/Point3DAlg_api.h",
+      "src/include/Point3DAlg_SickReader.h",
+      "src/include/Point3DAlg_Json.h",
+      "src/nlohmann/json.hpp"
+    ],
+    "includes": [
+      "src"
+    ]
+  }
+}

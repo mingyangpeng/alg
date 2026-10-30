@@ -1,0 +1,39 @@
+{
+  "node": {
+    "id": "alg.image2d.read",
+    "name": "图像读取",
+    "group": "2D 图像",
+    "category": "源",
+    "description": "读取图像（PNG/TIFF/JPG/JPEG）输出BGRA"
+  },
+  "runtime": "native",
+  "assembly": "Image2DAlg.dll",
+  "method": "Image2DAlg_ComuiRead",
+  "inputs": [],
+  "params": [
+    {
+      "name": "img_path",
+      "label": "图像路径",
+      "type": "path",
+      "default": ""
+    }
+  ],
+  "outputs": [
+    {
+      "name": "image",
+      "type": "image"
+    }
+  ],
+  "source": {
+    "files": [
+      "src/Image2DAlg_comui.cpp",
+      "src/Image2DAlg_api.cpp",
+      "src/Image2DAlg_export.h",
+      "src/comui_native_abi.h",
+      "src/include/Image2DAlg_api.h"
+    ],
+    "includes": [
+      "src"
+    ]
+  }
+}

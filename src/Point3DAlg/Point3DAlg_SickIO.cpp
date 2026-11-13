@@ -10,6 +10,12 @@
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 int Point3DAlg_ReadSickCloud(const char* folder, int frame,
                              const char* recipe_path, const char* common_path,
                              float** out_xyz, int* out_count)
@@ -18,6 +24,25 @@ int Point3DAlg_ReadSickCloud(const char* folder, int frame,
         return -1;
     *out_xyz = nullptr;
     *out_count = 0;
+
+#ifdef _WIN32
+    // ---- 预检：无 .dat → -2；帧号越界 → -3（对齐 api.h 错误码契约；
+    //      此前两类错误在异常里被吞成 -4，调用方无法区分）----
+    {
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA((std::string(folder) + "/*.dat").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE)
+            return -2;
+        int nDat = 0;
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+                ++nDat;
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+        if (frame >= 0 && frame >= nDat)
+            return -3;
+    }
+#endif
 
     try {
         Point3DAlg_SickConfig cfg;
@@ -39,7 +64,7 @@ int Point3DAlg_ReadSickCloud(const char* folder, int frame,
         *out_count = count;
         return 0;
     } catch (const std::exception&) {
-        return -4;   // 文件夹无 .dat / 帧号越界 / 无有效点等，统一错误码
+        return -4;   // 配置/数据错误，统一错误码
     }
 }
 

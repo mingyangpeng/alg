@@ -4,13 +4,20 @@
 // 纯 C++ 实现（无 OpenCV/PCL 依赖）；PNG 保存为自写最小实现（zlib 无压缩存储块）。
 
 #include "include/Point3DAlg_SickReader.h"
-#include "include/Point3DAlg_Json.h"
+#include "CommonAlg/include/CommonAlg_Json.h"   // JSON 封装（CommonAlg）
 
+// OpenCV 仅被可视底图/FOV 标注两个工具函数使用（SaveDepthView/DrawFovBoxes）——
+// SICK 读取主链路（LoadSickConfig/SickReader/SaveCloud/SaveDepth）完全不用。
+// 定义 POINT3DALG_NO_OPENCV 可在无 OpenCV 环境编译（ComUI「导出 C++」工程即走此分支，
+// 这两个函数降级为写错误码，主链路功能不受影响）。
+#ifndef POINT3DALG_NO_OPENCV
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
+#endif
 
 #include <algorithm>
+#include <cctype>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -77,7 +84,35 @@ std::vector<std::string> ListFiles(const std::string& folder, const std::string&
         closedir(d);
     }
 #endif
-    std::sort(out.begin(), out.end());
+    // 自然序：数字段按数值比较（part2 < part10）。字典序会把 part10 排在
+    // part2 之前，破坏 frame 选择与拼接顺序（review P2）。
+    std::sort(out.begin(), out.end(), [](const std::string& A, const std::string& B) {
+        size_t i = 0, j = 0;
+        while (i < A.size() && j < B.size()) {
+            if (std::isdigit((unsigned char)A[i]) && std::isdigit((unsigned char)B[j])) {
+                long long va = 0, vb = 0;
+                size_t i2 = i, j2 = j;
+                while (i2 < A.size() && std::isdigit((unsigned char)A[i2])) {
+                    va = va * 10 + (A[i2] - '0');
+                    ++i2;
+                }
+                while (j2 < B.size() && std::isdigit((unsigned char)B[j2])) {
+                    vb = vb * 10 + (B[j2] - '0');
+                    ++j2;
+                }
+                if (va != vb)
+                    return va < vb;
+                i = i2;
+                j = j2;
+            } else {
+                if (A[i] != B[j])
+                    return (unsigned char)A[i] < (unsigned char)B[j];
+                ++i;
+                ++j;
+            }
+        }
+        return (A.size() - i) < (B.size() - j);
+    });
     return out;
 }
 
@@ -329,16 +364,17 @@ int Point3DAlg_SaveDepth(const char* path, const float* depth, int rows, int col
     if (zmax <= zmin)
         zmax = zmin + 1.0;
 
-    // 16 位深度 PNG（z 线性映射 0..65535，无效点写 0）
+    // 16 位深度 PNG：有效点线性映射 1..65535，0 = 无效点专用
+    // （修复：旧实现 zmin 的点映射为 0，与"无效=0"撞车——读回时 zmin 处变成空洞）
     std::vector<uint16_t> px((size_t)rows * cols);
-    const double k = 65535.0 / (zmax - zmin);
+    const double k = 65534.0 / (zmax - zmin);
     for (long long i = 0; i < (long long)rows * cols; ++i) {
         if (depth[i] == 0.0f) {
             px[(size_t)i] = 0;   // 无效点
             continue;
         }
-        double v = (depth[i] - zmin) * k;
-        if (v < 0) v = 0;
+        double v = 1.0 + (depth[i] - zmin) * k;
+        if (v < 1) v = 1;
         if (v > 65535) v = 65535;
         px[(size_t)i] = (uint16_t)v;
     }
@@ -350,25 +386,31 @@ int Point3DAlg_SaveDepthView(const char* path, const float* depth, int rows, int
 {
     if (!path || !path[0] || !depth || rows <= 0 || cols <= 0)
         return -1;
+#ifndef POINT3DALG_NO_OPENCV
     if (!AutoZRange(depth, (long long)rows * cols, zmin, zmax))
         return -3;   // 无有效点
     if (zmax <= zmin)
         zmax = zmin + 1.0;
 
-    // 8 位可视 PNG：z 线性映射 0..255（低=暗 高=亮），无效点写 0
+    // 8 位可视 PNG：有效点线性映射 1..255（低=暗 高=亮），0 = 无效点专用
+    // （与 SaveDepth 同修：zmin 的点不再与无效点撞值）
     std::vector<uint16_t> px((size_t)rows * cols);
-    const double k = 255.0 / (zmax - zmin);
+    const double k = 254.0 / (zmax - zmin);
     for (long long i = 0; i < (long long)rows * cols; ++i) {
         if (depth[i] == 0.0f) {
             px[(size_t)i] = 0;   // 无效点
             continue;
         }
-        double v = (depth[i] - zmin) * k;
-        if (v < 0) v = 0;
+        double v = 1.0 + (depth[i] - zmin) * k;
+        if (v < 1) v = 1;
         if (v > 255) v = 255;
         px[(size_t)i] = (uint16_t)v;
     }
     return WritePngGray(path, px.data(), rows, cols, 8) ? 0 : -2;
+#else
+    (void)zmin; (void)zmax;
+    return -9;   // 无 OpenCV 构建不支持可视底图导出
+#endif
 }
 
 // FOV 框标注：8 位 RGB 可视图上画彩色框 + FOV 序号（OpenCV 绘制）。
@@ -382,12 +424,13 @@ int Point3DAlg_DrawFovBoxes(const char* path,
 {
     if (!path || !path[0] || !depth || rows <= 0 || cols <= 0)
         return -1;
+#ifndef POINT3DALG_NO_OPENCV
     if (!AutoZRange(depth, (long long)rows * cols, zmin, zmax))
         return -3;   // 无有效点
     if (zmax <= zmin)
         zmax = zmin + 1.0;
 
-    // 8 位可视底图（灰度）：z 线性映射 0..255（低=暗 高=亮），无效点写 0
+    // 8 位可视底图（灰度）：有效点线性映射 1..255（低=暗 高=亮），0 = 无效点专用
     cv::Mat img(rows, cols, CV_8UC3, cv::Scalar(0, 0, 0));
     const double k = 255.0 / (zmax - zmin);
     for (int r = 0; r < rows; ++r) {
@@ -440,6 +483,10 @@ int Point3DAlg_DrawFovBoxes(const char* path,
                     cv::FONT_HERSHEY_SIMPLEX, fontScale, boxColor, thickness, cv::LINE_AA);
     }
     return cv::imwrite(path, img) ? 0 : -2;
+#else
+    (void)zmin; (void)zmax; (void)rects; (void)ids; (void)n;
+    return -9;   // 无 OpenCV 构建不支持 FOV 标注
+#endif
 }
 
 // =====================================================================
@@ -461,14 +508,30 @@ void Point3DAlg_SickReader::LoadRaw(const std::vector<std::string>& folders, int
 
     devices_.clear();
     devices_.reserve(folders.size());
+    intensity_.clear();
+    cloudIntensity_.clear();
+    hasIntensity_ = false;   // 阶段 1 按文件格式检测回填
 
-    // ---- 阶段 1：每相机只读编码器块 + .xml，建 FOV 结构 ----
+    // ---- 阶段 1：每相机只读编码器块 + json 运动表，建 FOV 结构 ----
     // 换行（pass）、方向（蛇形）、行偏移（运动表）、上下裁剪 ROI、左右列范围全部在此确定。
     for (const std::string& folder : folders) {
         Device dev;
         dev.folder = folder;
         ScanDevice(dev, frame);
         devices_.push_back(std::move(dev));
+    }
+
+    // 多相机校验：各文件夹 .dat 数量必须一致——数量不一致说明有一侧丢帧，
+    // 交织与逐帧对应关系会整体错位且无告警，直接拒绝加载。
+    if (devices_.size() > 1) {
+        const size_t n0 = devices_[0].fovs.size();
+        for (size_t i = 1; i < devices_.size(); ++i) {
+            if (devices_[i].fovs.size() != n0)
+                throw std::runtime_error(
+                    "多相机 .dat 数量不一致: " + devices_[0].folder + " 有 " +
+                    std::to_string(n0) + " 个, " + devices_[i].folder + " 有 " +
+                    std::to_string(devices_[i].fovs.size()) + " 个（是否有丢帧？）");
+        }
     }
 
     // 运动表：全机共用一份（Z:/ScanImage/3D/Scan3DPart*.json，同一运动台）。
@@ -491,19 +554,18 @@ void Point3DAlg_SickReader::LoadRaw(const std::vector<std::string>& folders, int
     for (Device& dev : devices_)
         LoadFovImages(dev);
 
-    // 相机 0 的原始数据对外可见（Raw()/Encoder()/Rows() 访问）
+    // 相机 0 元数据对外可见；raw_/enc_ 懒拼合（Raw()/Encoder() 首次调用时，
+    // EnsureRaw0——此前 LoadRaw 立即复制全量，双相机 ~360MB 数据内存翻倍）
     {
         const Device& d0 = devices_[0];
+        rows_ = 0;
+        for (const Fov& f : d0.fovs)
+            rows_ += f.lines;
+        rowY_  = d0.rowY;
+        width_ = kSickWidth;
+        hasIntensity_ = d0.fovs.empty() ? false : d0.fovs.front().hasRef;
         raw_.clear();
         enc_.clear();
-        rows_ = 0;
-        for (const Fov& f : d0.fovs) {
-            raw_.insert(raw_.end(), f.raw.begin(), f.raw.end());
-            enc_.insert(enc_.end(), f.encRow.begin(), f.encRow.end());
-            rows_ += f.lines;
-        }
-        rowY_    = d0.rowY;
-        width_   = kSickWidth;
     }
     // 派生数据失效，待重算
     depth_.clear();
@@ -513,7 +575,36 @@ void Point3DAlg_SickReader::LoadRaw(const std::vector<std::string>& folders, int
     stitchCols_ = 0;
 }
 
-// 阶段 1：只读编码器块 + .xml，建 FOV 结构。
+// 相机 0 原始数据懒拼合（const 访问器内部填充 mutable 缓存）
+void Point3DAlg_SickReader::EnsureRaw0() const
+{
+    if (!raw_.empty() || devices_.empty())
+        return;
+    const Device& d0 = devices_[0];
+    size_t total = 0;
+    for (const Fov& f : d0.fovs)
+        total += f.raw.size();
+    raw_.reserve(total);
+    enc_.reserve((size_t)rows_);
+    for (const Fov& f : d0.fovs) {
+        raw_.insert(raw_.end(), f.raw.begin(), f.raw.end());
+        enc_.insert(enc_.end(), f.encRow.begin(), f.encRow.end());
+    }
+}
+
+const uint16_t* Point3DAlg_SickReader::Raw() const
+{
+    EnsureRaw0();
+    return raw_.data();
+}
+
+const int32_t* Point3DAlg_SickReader::Encoder() const
+{
+    EnsureRaw0();
+    return enc_.data();
+}
+
+// 阶段 1：只读编码器块 + json 运动表，建 FOV 结构。
 // 每个 .dat = 一个 FOV；换行判断（方向翻转/步距断裂）与 Juxin UpdateFovData 一致。
 // 此阶段结束即确定：pass 序号、蛇形方向、拼接图尺寸（列范围）——图像块尚未读取。
 void Point3DAlg_SickReader::ScanDevice(Device& dev, int frame)
@@ -539,10 +630,37 @@ void Point3DAlg_SickReader::ScanDevice(Device& dev, int frame)
             throw std::runtime_error("数据文件打开失败: " + p);
         FSEEK64(f, 0, SEEK_END);
         const long long size = FTELL64(f);
-        const long long rowBytes = (long long)kSickWidth * 2 + kEncRecBytes;
+        // ---- 行距检测：新格式（含强度通道）= 高度 2W + 强度 W + 编码器 20 = 3W+20；
+        //      旧格式 = 高度 2W + 编码器 20 = 2W+20。优先检测新格式（两者整除
+        //      理论上有公倍数歧义，实际文件大小差距悬殊不会误判）----
+        long long rowBytes = (long long)kSickWidth * 3 + kEncRecBytes;   // 新格式 7700
+        bool hasRef = false;
+        if (size % rowBytes != 0) {
+            rowBytes = (long long)kSickWidth * 2 + kEncRecBytes;         // 旧格式 5140
+            if (size % rowBytes != 0) {
+                // 两格式都不整除：取大者试探（保持旧行为，尾行忽略）
+                rowBytes = (long long)kSickWidth * 2 + kEncRecBytes;
+            } else {
+                hasRef = false;
+            }
+        } else {
+            hasRef = true;
+        }
+        // 二义性校验：新格式整除但旧格式也整除时，用编码器块 magic 判别
+        // （新格式编码器块在 3W×lines 处，magic=0x40000000）
+        if (hasRef) {
+            FSEEK64(f, rowBytes * (size / rowBytes) - kEncRecBytes + 4, SEEK_SET);
+            int32_t magic = 0;
+            if (fread(&magic, sizeof(magic), 1, f) == 1 && magic != (int32_t)0x40000000) {
+                hasRef = false;
+                rowBytes = (long long)kSickWidth * 2 + kEncRecBytes;
+            }
+        }
         const long long lines = size / rowBytes;   // 尾部不足一行时忽略
-        FSEEK64(f, lines * (long long)kSickWidth * 2, SEEK_SET);   // 跳过图像块
-        long long encAvail = (size - lines * (long long)kSickWidth * 2) / kEncRecBytes;
+        // 编码器块位置：平面布局 [高度块][强度块（新格式）][编码器块]
+        const long long imgBlockBytes = lines * (long long)kSickWidth * (hasRef ? 3 : 2);
+        FSEEK64(f, imgBlockBytes, SEEK_SET);   // 跳过图像块
+        long long encAvail = (size - imgBlockBytes) / kEncRecBytes;
         if (encAvail > lines)
             encAvail = lines;
         std::vector<int32_t> a((size_t)lines, 0);
@@ -557,6 +675,10 @@ void Point3DAlg_SickReader::ScanDevice(Device& dev, int frame)
         fclose(f);
         if (lines <= 0)
             continue;
+        if (!dev.fovs.empty() && dev.fovs.front().hasRef != hasRef) {
+            throw std::runtime_error("同一文件夹内 .dat 格式不一致（强度通道有无混合）: " + p);
+        }
+        // 记录 FOV 元数据（hasRef/lines 在 FOV 构造时填）
 
         // 尾部 0 值编码器按线性外推补全（与 Juxin ReadSickData chunkFlag=2 一致）
         long long endPos = -1;
@@ -571,12 +693,33 @@ void Point3DAlg_SickReader::ScanDevice(Device& dev, int frame)
                 a[(size_t)i] = a[(size_t)i - 1] + stepEnc;
         }
 
+        // 前导 0 值编码器对称外推（丢首行/预热段）：保持 aMin 不塌到 0——
+        // 此前 aFirst=0 会把拼接列数撑成 aMax/scanStep 的爆炸值且整图错位。
+        // 修复（2026-11-11 review：初版 begPos 从尾向头找"首个非零"恒等于
+        // endPos，外推条件永假——死代码；改从头向尾找，单点时步距取 0 仍补齐）。
+        long long begPos = -1;
+        for (long long i = 0; i < lines; ++i)
+            if (a[(size_t)i] != 0) {
+                begPos = i;
+                break;
+            }
+        if (begPos < 0)
+            throw std::runtime_error("编码器记录全为 0（数据文件损坏或编码器块读取失败）: " + p);
+        if (begPos > 0) {
+            const int32_t stepEnc = (endPos > begPos)
+                ? (int32_t)llround(
+                      (double)(a[(size_t)endPos] - a[(size_t)begPos]) / (double)(endPos - begPos))
+                : 0;
+            for (long long i = begPos - 1; i >= 0; --i)
+                a[(size_t)i] = a[(size_t)i + 1] - stepEnc;
+        }
+
         Fov fov;
         fov.path    = p;
         fov.lines   = lines;
+        fov.hasRef  = hasRef;
         fov.aFirst  = a[0];
         fov.aLast   = a[(size_t)(lines - 1)];
-        fov.down    = fov.aLast < fov.aFirst;   // A 递减 = 蛇形返程段
         fov.encRow  = std::move(a);              // 每行编码器值（拼接写入用）
         dev.fovs.push_back(std::move(fov));
     }
@@ -608,12 +751,10 @@ void Point3DAlg_SickReader::ScanDevice(Device& dev, int frame)
     // ---- 换行判断（与 Juxin UpdateFovData / Sick3DReader groupRows 一致） ----
     // FOV 内逐行：方向翻转或 |dA| 超步距容差 -> 新 pass。
     // FOV 之间：上一 FOV 末行与本 FOV 首行的编码器跳变同样判断。
-    dev.passDown.clear();
     {
         int curPass = 0;
         int prevDir = 0;
         const int32_t* prevA = nullptr;
-        bool passIsDown = false;
         for (Fov& f : dev.fovs) {
             for (long long li = 0; li < f.lines; ++li) {
                 const int32_t a = f.encRow[(size_t)li];
@@ -625,20 +766,15 @@ void Point3DAlg_SickReader::ScanDevice(Device& dev, int frame)
                     if (gap || flip) {
                         ++curPass;
                         prevDir = 0;
-                        passIsDown = false;
                     } else if (ad != 0) {
                         prevDir = ad;
-                        passIsDown = (ad < 0);
                     }
                 }
                 // FOV 归属：首行定 pass（FOV 中间换行罕见，整 FOV 归新 pass 简化处理）
-                if (li == 0) {
+                if (li == 0)
                     f.pass = curPass;
-                    f.down = passIsDown;
-                }
                 prevA = &f.encRow[(size_t)li];
             }
-            dev.passDown.push_back(f.down ? 1 : 0);
         }
         dev.nPass = curPass + 1;
     }
@@ -655,8 +791,10 @@ void Point3DAlg_SickReader::ScanDevice(Device& dev, int frame)
     }
     dev.aMin = aMin;
     dev.aMax = aMax;
+    // 列数按四舍五入：末行编码器落在步距后半段时也能容纳（否则末列会被
+    // col >= stride 守卫静默丢弃）
     dev.stitchCols = (dev.scanStep > 0 && !first)
-        ? (long long)((aMax - aMin) / dev.scanStep) + 1
+        ? (long long)llround((double)(aMax - aMin) / (double)dev.scanStep) + 1
         : 0;
 
     // 每个 FOV 的列范围（ROI：左右边界）。
@@ -730,7 +868,6 @@ void Point3DAlg_SickReader::LoadFovImages(Device& dev)
 
     std::atomic<size_t> next(0);
     std::atomic<int>    fail(0);
-    std::string         failPath;
 
     auto worker = [&]() {
         while (fail.load(std::memory_order_relaxed) == 0) {
@@ -749,6 +886,18 @@ void Point3DAlg_SickReader::LoadFovImages(Device& dev)
                 fclose(fp);
                 fail.store(1, std::memory_order_relaxed);
                 return;
+            }
+            // 强度块（新格式，紧跟全部高度块之后；uint8/px，0 = 无效）
+            if (f.hasRef) {
+                f.refRow.resize((size_t)f.lines * kSickWidth);
+                const long long refBase = (long long)f.lines * (long long)kSickWidth * 2;
+                if (fseek(fp, refBase, SEEK_SET) != 0 ||
+                    fread(f.refRow.data(), 1, (size_t)f.lines * kSickWidth, fp) !=
+                        (size_t)f.lines * kSickWidth) {
+                    fclose(fp);
+                    fail.store(1, std::memory_order_relaxed);
+                    return;
+                }
             }
             fclose(fp);
         }
@@ -796,11 +945,15 @@ void Point3DAlg_SickReader::BuildDeviceDepth(Device& dev)
     for (int raw = 1; raw < 65536; ++raw)   // 0 = 无效点，保持 0
         zLut[(size_t)raw] = (float)((double)raw * cfg_.z_scale + cfg_.z_offset);
 
+    // 强度单机拼接图（与深度同几何：同 rowOff/crop/col 映射；无强度格式为空）
+    const bool hasRef = !dev.fovs.empty() && dev.fovs.front().hasRef;
+    if (hasRef)
+        dev.depthRef.assign((size_t)dev.stitchRows * (size_t)dev.stitchCols, 0);
+
     const long long stride = dev.stitchCols;
     for (const Fov& f : dev.fovs) {
         if (f.raw.empty())
-            continue;
-        const long long rowOff = f.rowOff;
+            continue;        const long long rowOff = f.rowOff;
         for (long long li = 0; li < f.lines; ++li) {   // 扫描方向不裁剪（crop 只作用于轮廓方向）
             // 列号 = (A - aMin)/scanStep（与 Juxin 一致：rotate 90 CCW 数值验证，
             // up 列=原行正向、down flip 后列反向，统一 A 小 → 列小）
@@ -811,7 +964,10 @@ void Point3DAlg_SickReader::BuildDeviceDepth(Device& dev)
             if (col < 0 || col >= stride)
                 continue;
             const uint16_t* rowRaw = &f.raw[(size_t)li * W];
+            const uint8_t* rowRef = hasRef && !f.refRow.empty()
+                ? &f.refRow[(size_t)li * W] : nullptr;
             float* dst = &dev.depth[(size_t)col];
+            uint8_t* dstRef = hasRef ? &dev.depthRef[(size_t)col] : nullptr;
             // 轮廓方向裁剪（行反转后：cropTop 裁 c 大端=顶部，cropBot 裁 c 小端=底部）
             for (int c = f.cropBot; c < W - f.cropTop; ++c) {
                 const uint16_t raw = rowRaw[c];
@@ -824,6 +980,9 @@ void Point3DAlg_SickReader::BuildDeviceDepth(Device& dev)
                 // down 的扫描方向反转由列号统一（Juxin 用 flip 实现，等效）。
                 const long long rr = rowOff + (W - 1 - c);
                 dst[(size_t)rr * (size_t)stride] = z;
+                // 强度同位置写入（raw==0 已 continue；强度 0 保留为无效）
+                if (dstRef && rowRef)
+                    dstRef[(size_t)rr * (size_t)stride] = rowRef[c];
             }
         }
     }
@@ -866,6 +1025,14 @@ void Point3DAlg_SickReader::InterleaveMerge()
         stitchRows_ = dev.stitchRows;
         stitchCols_ = (left <= right) ? (right - left + 1) : 0;
         depth_.assign((size_t)stitchRows_ * (size_t)stitchCols_, 0.0f);
+        intensity_.clear();
+        if (!dev.depthRef.empty()) {
+            intensity_.assign((size_t)stitchRows_ * (size_t)stitchCols_, 0);
+            for (long long r = 0; r < stitchRows_; ++r)
+                memcpy(&intensity_[(size_t)r * (size_t)stitchCols_],
+                       &dev.depthRef[(size_t)r * (size_t)dev.stitchCols + (size_t)left],
+                       (size_t)stitchCols_ * sizeof(uint8_t));
+        }
         for (long long r = 0; r < stitchRows_; ++r)
             memcpy(&depth_[(size_t)r * (size_t)stitchCols_],
                    &dev.depth[(size_t)r * (size_t)dev.stitchCols + (size_t)left],
@@ -922,29 +1089,38 @@ void Point3DAlg_SickReader::InterleaveMerge()
     // 按行批量拷贝（每行内逐列取，避免跨行随机访问）
     const long long totalCols = maxCols * (long long)n;
     std::vector<float> merged((size_t)maxRows * (size_t)totalCols, 0.0f);
+    // 强度交织缓冲（与深度同列映射；任一相机无强度则整图无强度）
+    bool allRef = true;
+    for (size_t d = 0; d < n; ++d)
+        if (devices_[d].depthRef.empty()) allRef = false;
+    std::vector<uint8_t> mergedRef;
+    if (allRef)
+        mergedRef.assign((size_t)maxRows * (size_t)totalCols, 0);
     {
-        // 预生成列映射：merged 列 k -> (源相机 d, 源列 srcCol)，-1 表示无数据
-        std::vector<int>    srcDev((size_t)totalCols, -1);
-        std::vector<long long> srcColOf((size_t)totalCols, -1);
-        for (long long k = 0; k < totalCols; ++k) {
-            const int d = sortedDev[(size_t)(k % (long long)n)];
-            const long long sc = k / (long long)n - offset[(size_t)d];
-            if (sc >= 0 && sc < devices_[(size_t)d].stitchCols) {
-                srcDev[(size_t)k] = d;
-                srcColOf[(size_t)k] = sc;
-            }
-        }
-        for (Device& dev : devices_) {
-            // 每台相机逐行拷贝到 merged（该相机拥有的列）
+        // 每台相机只写自己拥有的列（k % n == rank）：merged 列 k 由
+        // 排序后第 k%n 台相机提供，其源列 = k/n − offset（起始脉冲左补对齐）。
+        // 修复（2026-11-10）：原实现只判 srcDev[k]>=0，每台相机都按自己的行
+        // 写入所有相机的列，循环末尾的相机覆盖其余——多相机合并图整图错列。
+        std::vector<int> rankOf(n);
+        for (size_t r = 0; r < n; ++r)
+            rankOf[(size_t)sortedDev[r]] = (int)r;
+        for (size_t d = 0; d < n; ++d) {
+            const Device& dev = devices_[d];
+            const int rank = rankOf[d];
             for (long long r = 0; r < dev.stitchRows; ++r) {
                 const float* srcRow = &dev.depth[(size_t)r * (size_t)dev.stitchCols];
                 float* dstRow = &merged[(size_t)r * (size_t)totalCols];
-                for (long long k = 0; k < totalCols; ++k)
-                    if (srcDev[(size_t)k] >= 0) {
-                        const float v = srcRow[(size_t)srcColOf[(size_t)k]];
-                        if (v != 0.0f)
-                            dstRow[(size_t)k] = v;
+                const uint8_t* srcRowRef = allRef
+                    ? &devices_[d].depthRef[(size_t)r * (size_t)dev.stitchCols] : nullptr;
+                uint8_t* dstRowRef = allRef ? &mergedRef[(size_t)r * (size_t)totalCols] : nullptr;
+                for (long long k = (long long)rank; k < totalCols; k += (long long)n) {
+                    const long long sc = k / (long long)n - offset[d];
+                    if (sc >= 0 && sc < dev.stitchCols) {
+                        dstRow[(size_t)k] = srcRow[(size_t)sc];
+                        if (dstRowRef && srcRowRef)
+                            dstRowRef[(size_t)k] = srcRowRef[(size_t)sc];
                     }
+                }
             }
         }
     }
@@ -968,6 +1144,14 @@ void Point3DAlg_SickReader::InterleaveMerge()
     stitchRows_ = maxRows;
     stitchCols_ = (left <= right) ? (right - left + 1) : 0;
     depth_.assign((size_t)stitchRows_ * (size_t)stitchCols_, 0.0f);
+    intensity_.clear();
+    if (!mergedRef.empty()) {
+        intensity_.assign((size_t)stitchRows_ * (size_t)stitchCols_, 0);
+        for (long long r = 0; r < stitchRows_; ++r)
+            memcpy(&intensity_[(size_t)r * (size_t)stitchCols_],
+                   &mergedRef[(size_t)r * (size_t)totalCols + (size_t)left],
+                   (size_t)stitchCols_ * sizeof(uint8_t));
+    }
     for (long long r = 0; r < stitchRows_; ++r)
         memcpy(&depth_[(size_t)r * (size_t)stitchCols_],
                &merged[(size_t)r * (size_t)totalCols + (size_t)left],
@@ -989,9 +1173,10 @@ void Point3DAlg_SickReader::InterleaveMerge()
             // 行范围（拼接图行，行反转后 c 大端在顶部）
             const long long y0 = f.rowOff;                       // c=2559 端（顶部）
             const long long y1 = f.rowOff + kSickWidth - 1;      // c=0 端（底部）
-            // 列范围：单机列 -> 交织列 -> 裁剪后最终列
-            const long long k0 = f.colFirst * (long long)n + rank - left;
-            const long long k1 = f.colLast  * (long long)n + rank - left;
+            // 列范围：单机列 + 左补 offset（交织列 k = (offset+sc)*n + rank）→ 裁剪后最终列
+            // 修复（2026-11-10）：原实现漏加 offset[d]，起始脉冲晚于首相机的相机 FOV 框整体左移
+            const long long k0 = (f.colFirst + offset[d]) * (long long)n + rank - left;
+            const long long k1 = (f.colLast + offset[d]) * (long long)n + rank - left;
             const long long x0 = std::max(0LL, std::min(k0, k1));
             const long long x1 = std::min(stitchCols_ - 1, std::max(k0, k1));
             const long long yy0 = std::max(0LL, std::min(y0, y1));
@@ -1021,12 +1206,109 @@ const float* Point3DAlg_SickReader::GetDepth()
     return depth_.data();
 }
 
+// 拼接质量自检结果构造
+Point3DAlg_StitchQualityResult::Point3DAlg_StitchQualityResult()
+    : pairs(0), dh_mean(0.0), dh_sigma(0.0), dh_max_abs(0.0), outlier(0), outlier_ratio(0.0)
+{
+}
+
 // FOV 框信息（最终拼接图坐标，GetDepth 之后调用）
 int Point3DAlg_SickReader::FovBoxes(std::vector<int>& rects, std::vector<int>& ids) const
 {
     rects = fovBoxes_;
     ids   = fovBoxIds_;
     return (int)fovBoxIds_.size();
+}
+
+// 拼接质量自检：相邻 rank 相机的衔接带格级 z 差统计。
+// 实现：重算排序/偏移/左裁剪（与 InterleaveMerge 一致），对每个相邻 rank 对
+// (dL, dR)，全局列 k（k%n == rank[dL]）与 k+1（rank[dR]）是物理同位置的两格
+// （k+1−left 同行相邻）——逐行配对求 z 差。
+bool Point3DAlg_SickReader::StitchQuality(double diff_threshold,
+                                          Point3DAlg_StitchQualityResult& out) const
+{
+    out = Point3DAlg_StitchQualityResult();
+    if (devices_.size() < 2 || depth_.empty() || stitchCols_ <= 0)
+        return false;
+    const size_t n = devices_.size();
+
+    // 重算排序与偏移（与 InterleaveMerge 一致）
+    std::vector<int> sortedDev(n);
+    for (size_t i = 0; i < n; ++i) sortedDev[i] = (int)i;
+    std::sort(sortedDev.begin(), sortedDev.end(), [&](int a, int b) {
+        return devices_[(size_t)a].aMin < devices_[(size_t)b].aMin;
+    });
+    const int32_t minPulse = devices_[(size_t)sortedDev[0]].aMin;
+    std::vector<long long> offset(n, 0);
+    for (size_t i = 0; i < n; ++i) {
+        const Device& d = devices_[i];
+        offset[i] = (d.scanStep > 0)
+            ? (long long)llround((double)(d.aMin - minPulse) / (double)d.scanStep)
+            : 0;
+        if (offset[i] < 0) offset[i] = 0;
+    }
+    std::vector<int> rankOf(n);
+    for (size_t r = 0; r < n; ++r) rankOf[(size_t)sortedDev[r]] = (int)r;
+
+    // 左裁剪 = depth_ 首个非零列（裁剪语义即裁全零列）
+    long long left = 0;
+    for (; left < stitchCols_; ++left) {
+        bool any = false;
+        for (long long r = 0; r < stitchRows_ && !any; ++r)
+            if (depth_[(size_t)r * (size_t)stitchCols_ + (size_t)left] != 0.0f)
+                any = true;
+        if (any) break;
+    }
+    if (left >= stitchCols_)
+        return false;
+
+    // 相邻 rank 对逐一配对
+    double s = 0.0, s2 = 0.0, mx = 0.0;
+    long long nPair = 0, nOver = 0;
+    for (size_t q = 0; q + 1 < n; ++q) {
+        const int dL = sortedDev[q], dR = sortedDev[(size_t)q + 1];
+        const int rankL = q;
+        const long long rowsL = devices_[(size_t)dL].stitchRows;
+        const long long rowsR = devices_[(size_t)dR].stitchRows;
+        const long long rowsMin = std::min(rowsL, rowsR);
+        // 全局列 k（depth_ 坐标）满足 k + left ≡ rankL (mod n)：k = rankL − left (mod n)
+        // 枚举 m：k_merged = m*n + rankL（merged 坐标），k_depth = k_merged − left
+        for (long long m = 0;; ++m) {
+            const long long kMerged = m * (long long)n + rankL;
+            const long long kDepth = kMerged - left;
+            if (kDepth >= stitchCols_)
+                break;
+            if (kDepth < 0)
+                continue;
+            for (long long r = 0; r < rowsMin; ++r) {
+                const float zL = depth_[(size_t)r * (size_t)stitchCols_ + (size_t)kDepth];
+                if (zL == 0.0f)
+                    continue;
+                const long long scR = kMerged / (long long)n - offset[(size_t)dR];
+                if (scR < 0 || scR >= devices_[(size_t)dR].stitchCols)
+                    continue;
+                const float zR = devices_[(size_t)dR].depth[(size_t)r * (size_t)devices_[(size_t)dR].stitchCols + (size_t)scR];
+                if (zR == 0.0f)
+                    continue;
+                const double d = (double)zL - (double)zR;
+                s += d;
+                s2 += d * d;
+                if (std::fabs(d) > mx) mx = std::fabs(d);
+                if (std::fabs(d) > diff_threshold) ++nOver;
+                ++nPair;
+            }
+        }
+    }
+    if (nPair == 0)
+        return false;
+
+    out.pairs = nPair;
+    out.dh_mean = s / (double)nPair;
+    out.dh_sigma = std::sqrt(std::max(0.0, s2 / (double)nPair - out.dh_mean * out.dh_mean));
+    out.dh_max_abs = mx;
+    out.outlier = nOver;
+    out.outlier_ratio = (double)nOver / (double)nPair;
+    return true;
 }
 
 const float* Point3DAlg_SickReader::GetCloud(int* out_count)

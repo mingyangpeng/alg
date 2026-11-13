@@ -1,6 +1,7 @@
 # 构建产物
 build/
 output/
+Testing/
 
 # 编辑器配置
 .vscode/
@@ -19,3 +20,8 @@ output/
 *.tmp
 #pcl1.9.1的库太大，跳过
  
+# Python 工具
+__pycache__/
+*.pyc
+regist_T*.txt
+regist_truth.txt

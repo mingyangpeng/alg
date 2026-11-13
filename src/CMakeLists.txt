@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+﻿cmake_minimum_required(VERSION 3.16)
 
 # =============================================================================
 # 通用配置：第三方库查找、动态库导出设置、编译选项、部署文件收集
@@ -53,24 +53,22 @@ else()
 endif()
 
 # -----------------------------------------------------------------------------
-# 导出宏生成辅助函数
+# 导出宏设置辅助函数
+# 机制：源码树静态头 AlgExport.h 定义 <MODULE>_EXPORT 属性宏；
+#       编译本 DLL 时定义 <MODULE>_BUILD_DLL → dllexport，外部使用 → dllimport。
+#       不再使用 GenerateExportHeader（少一个生成步骤、少一处构建产物）。
 # -----------------------------------------------------------------------------
 function(setup_export_macro target_name)
-    include(GenerateExportHeader)
-    string(TOUPPER "${target_name}" TARGET_UPPER)   # 宏名全大写，与各 _api.h 的 <TARGET>_EXPORT 用法一致
-    generate_export_header(${target_name}
-        BASE_NAME ${target_name}
-        EXPORT_MACRO_NAME ${TARGET_UPPER}_EXPORT
-        EXPORT_FILE_NAME ${CMAKE_CURRENT_BINARY_DIR}/include/${target_name}_export.h
-        STATIC_DEFINE ${TARGET_UPPER}_STATIC
-    )
+    string(TOUPPER "${target_name}" TARGET_UPPER)   # 与各头文件的 <TARGET>_EXPORT 用法一致
 
-    target_compile_definitions(${target_name} PRIVATE ${target_name}_EXPORTS)
+    # 编译本库：定义 <MODULE>_BUILD_DLL，属性宏展开为 dllexport
+    target_compile_definitions(${target_name} PRIVATE ${TARGET_UPPER}_BUILD_DLL)
 
     target_include_directories(${target_name}
         PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
-            $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src>   # AlgExport.h 所在目录
     )
 endfunction()
 
@@ -112,6 +110,10 @@ function(link_third_party target_name)
         target_link_libraries(${target_name} PUBLIC ${PCL_LIBRARIES})
         target_include_directories(${target_name} PRIVATE ${PCL_INCLUDE_DIRS})
         target_compile_options(${target_name} PRIVATE ${PCL_CXX_FLAGS})
+        if(MSVC)
+            # PCL 模板展开段数超 COFF 对象格式限制（Debug 无优化时更甚），必须 /bigobj
+            target_compile_options(${target_name} PRIVATE /bigobj)
+        endif()
     endif()
 
     if(ARG_JSON)
@@ -127,7 +129,8 @@ endfunction()
 # 部署文件收集：复制 JSON、源码交付物（src/）到 output/
 # -----------------------------------------------------------------------------
 function(setup_deployment target_name)
-    # 复制当前目录下的 *.json 文件到 output/
+    # 复制当前目录下的 *.json 文件到 output/（算子参数/配置，非 ComUI 声明）
+    # ComUI 节点声明由 integration/comui 的 deploy_comui_nodes() 单独负责。
     file(GLOB JSON_FILES ${CMAKE_CURRENT_SOURCE_DIR}/*.json)
     if(JSON_FILES)
         add_custom_command(TARGET ${target_name} POST_BUILD
@@ -135,29 +138,6 @@ function(setup_deployment target_name)
             ${JSON_FILES}
             $<TARGET_FILE_DIR:${target_name}>
             COMMENT "Copy JSON files to output directory"
-        )
-    endif()
-
-    # 复制源码交付物到 output/src/（ComUI「导出 C++」按 node.json source.files 引用）：
-    # *.cpp / *_api.h / *_export.h（构建生成）/ comui_native_abi.h
-    # 注意：copy_if_different 不展开通配符，必须用 GLOB 展开后的文件列表
-    file(GLOB SOURCE_FILES
-        ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h
-        ${CMAKE_CURRENT_BINARY_DIR}/include/*_export.h
-        ${CMAKE_SOURCE_DIR}/comui_native_abi.h
-    )
-    if(SOURCE_FILES)
-        add_custom_command(TARGET ${target_name} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E make_directory
-            $<TARGET_FILE_DIR:${target_name}>/src/include
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${SOURCE_FILES}
-            $<TARGET_FILE_DIR:${target_name}>/src
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${SOURCE_FILES}
-            $<TARGET_FILE_DIR:${target_name}>/src/include
-            COMMENT "Copy operator sources to output/src (C++ export delivery)"
         )
     endif()
 endfunction()
@@ -170,6 +150,7 @@ function(collect_third_party_runtime_dlls)
     if(NOT MSVC)
         return()
     endif()
+    # 注意：本函数无参数；各 copy_*_dlls 目标在下方用 add_dependencies 逐一挂到汇总目标上
 
     set(DEPLOY_DIR ${CMAKE_BINARY_DIR}/output/$<CONFIG>)
 
@@ -187,9 +168,10 @@ function(collect_third_party_runtime_dlls)
         add_custom_target(copy_opencv_dlls DEPENDS ${DEPLOY_DIR}/opencv_copied.stamp)
     endif()
 
-    # PCL DLLs
+    # PCL DLLs（含 3rdParty：OpenNI2 被 pcl_io 直接依赖，缺失会导致整链加载失败）
     file(GLOB PCL_DLLS ${THIRD_PARTY_DIR}/PCL-1.9.1/bin/*.dll
-                      ${THIRD_PARTY_DIR}/PCL-1.9.1/*.dll)
+                      ${THIRD_PARTY_DIR}/PCL-1.9.1/*.dll
+                      ${THIRD_PARTY_DIR}/PCL-1.9.1/3rdParty/OpenNI2/Redist/*.dll)
     if(PCL_DLLS)
         add_custom_command(OUTPUT ${DEPLOY_DIR}/pcl_copied.stamp
             COMMAND ${CMAKE_COMMAND} -E make_directory ${DEPLOY_DIR}
@@ -228,10 +210,7 @@ function(collect_third_party_runtime_dlls)
 
     # 汇总目标
     if(TARGET copy_opencv_dlls OR TARGET copy_pcl_dlls OR TARGET copy_boost_dlls OR TARGET copy_geos_dlls)
-        add_custom_target(deploy_runtime_dlls
-            DEPENDS ${ARGN}
-            ${ARGN}
-        )
+        add_custom_target(deploy_runtime_dlls)
         if(TARGET copy_opencv_dlls)
             add_dependencies(deploy_runtime_dlls copy_opencv_dlls)
         endif()
@@ -250,6 +229,13 @@ endfunction()
 # -----------------------------------------------------------------------------
 # 包含子项目
 # -----------------------------------------------------------------------------
+# 包含子项目（顺序：基础模块在前，业务层依赖它们）
+# ComUI 集成层（仅提供适配源与 node.json，不建 target）——必须先于算法模块，
+# 算法模块要用它导出的 COMUI_ADAPTER_* 变量
+add_subdirectory(${CMAKE_SOURCE_DIR}/integration/comui comui_integration)
+
+add_subdirectory(CommonAlg)
+add_subdirectory(ShapelyAlg)
 add_subdirectory(Image2DAlg)
 add_subdirectory(Point3DAlg)
-add_subdirectory(ShapelyAlg)
+add_subdirectory(BusinessAlg)

@@ -47,7 +47,7 @@ comdll/algo/<你的名称>/
     "description": "Gamma 校正：亮部/暗部非线性调整"   // 悬停提示
   },
 
-  "runtime": "dotnet",               // ★ 当前仅支持 dotnet（native 请包一层 C# 壳，导出规则见 §5）
+  "runtime": "native",               // ★ dotnet（C# 反射，规则见 §3）或 native（C++ DLL，统一 C ABI 见 §5.5）
   "assembly": "YourAlgo.dll",        // ★ 相对本 JSON 所在目录
   "type": "YourNs.Filters",          // ★ 类型全名（也可写短名，按 FullName/Name 回退匹配）
   "method": "Gamma",                 // ★ 入口方法名（public/nonpublic、静态/实例均可）

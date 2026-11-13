@@ -1,24 +1,52 @@
-﻿// Point3DAlg_test.cpp —— SICK 读取测试入口（控制台 exe，参数写死在代码内）
+﻿// Point3DAlg_test.cpp —— SICK 读取测试入口（控制台 exe，数据目录可经命令行传参）
 // 流程：读 json 配置 → 创建 SickReader 对象 → 生成点云 → 保存点云(PLY)/深度图(16位+可视8位)。
-// 改测试数据就改下面的 kFolder / kFrame / 输出路径。
+// 用法：Point3DAlg_test.exe [相机1目录] [相机2目录 ...]（每个目录含 *.dat；缺省 = 内置双相机路径）
+// 退出码：0=通过  1=配置读取失败  2=保存失败  3=处理异常  77=SKIP（数据目录不存在或无 .dat）
 
 #include "include/Point3DAlg_SickReader.h"
 
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <windows.h>   // FindFirstFileA（数据目录 .dat 探测）
 
-// ---------------- 测试参数（写死，按需修改） ----------------
+// ---------------- 测试参数（缺省值，可用命令行参数覆盖） ----------------
+// 用法：Point3DAlg_test.exe [相机1目录] [相机2目录 ...]
+//   缺省相机目录 = Z:/ScanImage/3D、3D-2；输出文件写到**当前工作目录**
+//   （2026-11-11 去掉硬编码 D:/pmy/alg/output——换机器/换构建目录不再写失败）
 static const char* kFolders[] = { "Z:/ScanImage/3D", "Z:/ScanImage/3D-2" };   // 各相机扫描文件夹
 static const int   kDeviceCount = 2;                                          // 相机数（1=单相机）
 static const int   kFrame  = -1;                   // 指定帧（>=0），<0 = 全部帧
-static const char* kOutCloud    = "D:/pmy/alg/output/sick_cloud.ply";    // 点云输出（PLY 二进制）
-static const char* kOutDepth    = "D:/pmy/alg/output/sick_depth.png";    // 深度图输出（16 位 PNG）
-static const char* kOutDepthView = "D:/pmy/alg/output/sick_depth_view.png";  // 深度图可视输出（8 位 PNG）
-static const char* kOutDepthFov  = "D:/pmy/alg/output/sick_depth_fov.png";   // FOV 标注图（框+序号）
+static const char* kOutCloud     = "sick_cloud.ply";        // 点云输出（PLY 二进制，cwd）
+static const char* kOutDepth     = "sick_depth.png";        // 深度图输出（16 位 PNG，cwd）
+static const char* kOutDepthView = "sick_depth_view.png";   // 深度图可视输出（8 位 PNG，cwd）
+static const char* kOutDepthFov  = "sick_depth_fov.png";    // FOV 标注图（框+序号，cwd）
 
-int main()
+int main(int argc, char* argv[])
 {
+    // ---- 0. 数据目录参数化（argv[1..] = 各相机扫描目录，缺省用内置路径） ----
+    std::vector<std::string> folders;
+    if (argc > 1) {
+        for (int i = 1; i < argc; ++i)
+            folders.push_back(argv[i]);
+    } else {
+        folders.assign(kFolders, kFolders + kDeviceCount);
+    }
+
+    // 数据目录不存在或没有任何 .dat → 打印 SKIP 返回 77（ctest 惯例的跳过码），
+    // 不进入后续流程（LoadRaw 会因读不到数据抛异常/挂死）。
+    for (const std::string& f : folders) {
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA((f + "/*.dat").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) {
+            std::printf("SKIP: 扫描数据目录不存在或无 .dat 文件: %s\n", f.c_str());
+            std::printf("      （用法: Point3DAlg_test.exe <相机1目录> [相机2目录 ...]，缺省 %s）\n",
+                        kFolders[0]);
+            return 77;
+        }
+        FindClose(h);
+    }
+
     // ---- 1. 读 json 配置（提取不到必需值报错退出） ----
     Point3DAlg_SickConfig cfg;
     char err[512] = { 0 };
@@ -34,8 +62,7 @@ int main()
     // ---- 2. 创建对象（构造时接收 SICK 相关参数）→ 加载原始图像（多相机） ----
     try {
         Point3DAlg_SickReader reader(cfg);
-        std::vector<std::string> folders(kFolders, kFolders + kDeviceCount);
-        std::printf("加载: %d 相机, frame=%d\n", kDeviceCount, kFrame);
+        std::printf("加载: %d 相机, frame=%d\n", (int)folders.size(), kFrame);
         for (const std::string& f : folders)
             std::printf("  %s\n", f.c_str());
         auto t0 = std::chrono::steady_clock::now();

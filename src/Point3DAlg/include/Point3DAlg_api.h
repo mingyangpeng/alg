@@ -1,7 +1,7 @@
 ﻿#ifndef POINT3DALG_API_H
 #define POINT3DALG_API_H
 
-#include "Point3DAlg_export.h"
+#include "AlgExport.h"
 
 #ifdef __cplusplus
 extern "C" {

@@ -1,7 +1,7 @@
 # ComUI 插件开发说明
 
 面向插件开发人员（UI 面板 / 算法 / 节点算子三类交付物）。第三方算法厂商接入算子库的专项规则见 [THIRD_PARTY_OPS.md](THIRD_PARTY_OPS.md)。契约层代码在 `src/ComUI.Sdk/`，
-本文与其同步；架构全貌见 [ARCHITECTURE.md](ARCHITECTURE.md)，交互组件复用规则见 [CONVENTIONS.md](CONVENTIONS.md)。
+本文与其同步；架构全貌见 [ARCHITECTURE.md](ARCHITECTURE.md)，交互组件复用规则见 [CONVENTIONS.md](CONVENTIONS.md)。**路径说明**：本文宿主侧路径（`comdll/`、`src/ComUI.Sdk/`、`src/Plugins/`、`tests/`、`tools/`、`config/` 等）与所链 ARCHITECTURE/CONVENTIONS/BUGS.md 均在宿主仓库 `D:/pmy/Com_UI`；本仓库（alg）为算法侧（5 个算法 DLL + 6 个 node.json，见 `integration/comui/`）。
 
 ## 0. 总览：三类交付物
 
@@ -161,11 +161,11 @@ public sealed class DemoView : UserControl
     { "name": "mode",   "label": "模式", "type": "enum", "default": "ICP", "options": ["ICP", "NDT"] }
   ],
   "inputs": [],                      // 从总线取最新帧（name 对应方法参数名）
-  "outputs": [ { "name": "图像", "topic": "image/stitched" } ]   // 返回值属性 → 发布到主题
+  "outputs": [ { "from": "图像", "topic": "image/stitched" } ]   // 返回值属性（点分路径，如 "Image"、"Result.Image"）→ 发布到主题
 }
 ```
 
-参数类型：`number / int / text / bool / enum / path`。执行在后台线程，宿主提供取消/进度。
+参数类型：`number / int / text / bool / enum / path`。执行在后台线程，取消仅在节点间生效（`CancellationToken` 为预留位，见 [THIRD_PARTY_OPS.md §6.5](THIRD_PARTY_OPS.md#6-执行模型)）。
 需要自定义生命周期/命令注册时才手写 `IAlgoPlugin`（`GetCommands` 返回 `AlgoCommand` 列表，显示在「算法配方」侧边栏）。`runtime: "native"`（C++ DLL）已支持即插即用——统一 C ABI 见 [THIRD_PARTY_OPS.md §5.5](THIRD_PARTY_OPS.md#55-统一-c-abi调用契约v1)。
 
 ## 5. 节点算子（流水线节点）

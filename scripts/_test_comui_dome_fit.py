@@ -7,7 +7,9 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # GBK 控制台打 µ/中文
 
-DLL_DIR = r"D:\pmy\alg\build\output\Release"
+# DLL directory: argv[1] overrides; default = canonical <repo>/build/output/Release
+DLL_DIR = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "build", "output", "Release")
 os.add_dll_directory(DLL_DIR)
 
 # ---- ABI 结构（comui_native_abi.h，MSVC 默认 8 字节对齐）----

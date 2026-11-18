@@ -8,7 +8,7 @@
     python -I scripts/make_delivery_checklist.py [交付目录]
 
 退出码：
-    0  必备项齐全（5 算法 DLL + 9 node.json + pcl_*_release.dll 20 个）
+    0  必备项齐全（5 算法 DLL + node.json 全清单 + pcl_*_release.dll 20 个）
     1  有必备项缺失（明细见输出"核对"段）
     2  用法错误 / 目录不存在
 """
@@ -23,7 +23,18 @@ ALG_DLLS = [
     "Point3DAlg.dll",
     "BusinessAlg.dll",
 ]
-NODE_JSONS = [
+
+
+def _source_node_jsons():
+    """以 integration/comui/*.node.json 为权威清单（新增节点自动纳入，避免本清单与节点源脱节）；
+    源目录不可用时回退到 46 节点时期的内置名单。"""
+    src = Path(__file__).resolve().parents[1] / "integration" / "comui"
+    if src.is_dir():
+        return sorted(p.name for p in src.glob("*.node.json"))
+    return NODE_JSONS_FALLBACK
+
+
+NODE_JSONS_FALLBACK = [
     "business_region_ratio.node.json",
     "business_bump_ng_check.node.json",
     "image2d_absdiff.node.json",
@@ -71,6 +82,7 @@ NODE_JSONS = [
     "point3d_region_plane.node.json",
     "point3d_voxel.node.json",
 ]
+NODE_JSONS = _source_node_jsons()
 TEST_TOOL_EXES = [
     "CommonAlg_test.exe",
     "ShapelyAlg_test.exe",
@@ -223,9 +235,9 @@ def main(argv):
         out.append("- **[齐全]** 算法 DLL ×5 全部在位")
     if miss_node:
         problems.append("node.json 缺失: %s" % ", ".join(miss_node))
-        out.append("- **[缺失]** node.json ×6 中缺 %d 个：%s" % (len(miss_node), ", ".join(miss_node)))
+        out.append("- **[缺失]** node.json ×%d 中缺 %d 个：%s" % (len(NODE_JSONS), len(miss_node), ", ".join(miss_node)))
     else:
-        out.append("- **[齐全]** node.json ×6 全部在位：%s" % ", ".join(NODE_JSONS))
+        out.append("- **[齐全]** node.json ×%d 全部在位（以 integration/comui 实际清单为权威）" % len(NODE_JSONS))
     out.append("- **[跳过]** algo_free 导出验证：%s —— 需 dumpbin /exports 做二进制级验证，"
                "脚本不实现，按 T9 审计结论（3/3 均有 algo_free）视为通过" % "、".join(ALGO_FREE_DLLS))
     if len(pcl_rel) != PCL_RELEASE_EXPECTED:

@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 rem ============================================================
 rem  Image2DAlg one-shot verification (read-only).
-rem  Usage:  scripts\verify_image2d.cmd
+rem  Usage:  scripts\verify_image2d.cmd [build_dir]   (default: build)
 rem  Checks: test exe / dumpbin exports / dumpbin dependents /
 rem          ctest / delivery checklist
 rem  ASCII-only output on purpose (avoid console codepage issues).
@@ -10,7 +10,9 @@ rem ============================================================
 
 for %%I in ("%~dp0..") do set "ROOT=%%~fI"
 cd /d "%ROOT%"
-set "OUT=%ROOT%\build\output\Release"
+set "BUILDDIR=%~1"
+if "%BUILDDIR%"=="" set "BUILDDIR=build"
+set "OUT=%ROOT%\%BUILDDIR%\output\Release"
 set "TMPD=%TEMP%\verify_image2d"
 if not exist "%TMPD%" mkdir "%TMPD%" >nul 2>&1
 
@@ -32,7 +34,7 @@ rem ------------------------------------------------------------
 echo.
 echo [1] run Image2DAlg_test.exe
 if not exist "%OUT%\Image2DAlg_test.exe" (
-    echo     SKIP (missing exe)
+    echo     SKIP - missing exe
     set "FAILED=1"
     goto :exports
 )
@@ -40,8 +42,14 @@ pushd "%OUT%"
 Image2DAlg_test.exe > "%TMPD%\test.log" 2>&1
 set "TEXIT=%ERRORLEVEL%"
 popd
-for /f %%c in ('findstr /c:"[PASS]" "%TMPD%\test.log" ^| find /c /v ""') do set "NPASS=%%c"
-for /f %%c in ('findstr /c:"[FAIL]" "%TMPD%\test.log" ^| find /c /v ""') do set "NFAIL=%%c"
+rem Count with findstr as the for /f child (one process, terminates on its own).
+rem NEVER use plain `find` here: when invoked from Git Bash the PATH contains
+rem MSYS find (GNU), which treats /c as a path and recurses the whole drive.
+rem Also avoid pipes inside for /f (fragile under this console host).
+set "NPASS=0"
+set "NFAIL=0"
+for /f %%c in ('findstr /c:"[PASS]" "%TMPD%\test.log"') do set /a NPASS+=1
+for /f %%c in ('findstr /c:"[FAIL]" "%TMPD%\test.log"') do set /a NFAIL+=1
 echo     exit   = !TEXIT!
 echo     PASS   = !NPASS!
 echo     FAIL   = !NFAIL!
@@ -54,20 +62,25 @@ rem ------------------------------------------------------------
 :exports
 echo.
 echo [2] dumpbin /exports
+rem Locate dumpbin: PATH first, then vswhere -> MSVC toolchain dir (no PATH dependency).
+rem NOTE 1: this file must stay ASCII-only (cmd reads it in OEM codepage; UTF-8 bytes
+rem         can swallow the following CRLF under GBK and desync the parser).
+rem NOTE 2: ProgramFiles(x86) contains a ')' - never expand it inside a ( ) block;
+rem         use delayed expansion at statement level only.
 set "DUMPBIN="
 where dumpbin >nul 2>&1 && for /f "delims=" %%i in ('where dumpbin') do if not defined DUMPBIN set "DUMPBIN=%%i"
+if not defined DUMPBIN set "VSWHERE=!ProgramFiles(x86)!\Microsoft Visual Studio\Installer\vswhere.exe"
+if not defined DUMPBIN if exist "!VSWHERE!" for /f "usebackq delims=" %%i in (`"!VSWHERE!" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2^>nul`) do set "VSPATH=%%i"
+if not defined DUMPBIN if defined VSPATH for /d %%d in ("!VSPATH!\VC\Tools\MSVC\*") do if exist "%%d\bin\Hostx64\x64\dumpbin.exe" set "DUMPBIN=%%d\bin\Hostx64\x64\dumpbin.exe"
 if not defined DUMPBIN (
-    for /f "usebackq delims=" %%i in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem -Path 'C:\Program Files\Microsoft Visual Studio','C:\Program Files (x86)\Microsoft Visual Studio' -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue ^| Select-Object -First 1 -ExpandProperty FullName"`) do set "DUMPBIN=%%i"
-)
-if not defined DUMPBIN (
-    echo     SKIP (dumpbin not found)
+    echo     SKIP - dumpbin not found
     set "FAILED=1"
     goto :dependents
 )
 echo     dumpbin = !DUMPBIN!
 "!DUMPBIN!" /nologo /exports "%OUT%\Image2DAlg.dll" > "%TMPD%\exports.txt" 2>&1
 set "MISSING="
-for %%s in (Image2DAlg_ToGray Image2DAlg_Gamma Image2DAlg_Threshold Image2DAlg_Blur Image2DAlg_Morphology Image2DAlg_Canny Image2DAlg_Resize Image2DAlg_Crop Image2DAlg_Rotate Image2DAlg_Enhance Image2DAlg_ConnectedComponents Image2DAlg_AnalyzeContours Image2DAlg_MatchTemplate Image2DAlg_FreeBlobs Image2DAlg_FreeContours) do (
+for %%s in (Image2DAlg_ToGray Image2DAlg_Gamma Image2DAlg_Threshold Image2DAlg_Blur Image2DAlg_Morphology Image2DAlg_Canny Image2DAlg_Resize Image2DAlg_Crop Image2DAlg_Rotate Image2DAlg_Enhance Image2DAlg_ConnectedComponents Image2DAlg_AnalyzeContours Image2DAlg_MatchTemplate Image2DAlg_FreeBlobs Image2DAlg_FreeContours Image2DAlg_FastFeatures Image2DAlg_ComputeDescriptors Image2DAlg_MatchFeatures Image2DAlg_EstimateAffinePartial Image2DAlg_FindHomography Image2DAlg_SolvePnP Image2DAlg_ComuiFeatureAlign) do (
     findstr /c:"%%s" "%TMPD%\exports.txt" >nul 2>&1
     if errorlevel 1 (set "MISSING=!MISSING! %%s") else (echo     OK   %%s)
 )
@@ -81,7 +94,7 @@ rem ------------------------------------------------------------
 echo.
 echo [3] dumpbin /dependents
 if not defined DUMPBIN (
-    echo     SKIP (dumpbin not found)
+    echo     SKIP - dumpbin not found
     goto :ctest
 )
 "!DUMPBIN!" /nologo /dependents "%OUT%\Image2DAlg.dll" > "%TMPD%\dependents.txt" 2>&1
@@ -94,7 +107,7 @@ rem ------------------------------------------------------------
 :ctest
 echo.
 echo [4] ctest
-ctest --test-dir "%ROOT%\build" -C Release --output-on-failure > "%TMPD%\ctest.log" 2>&1
+ctest --test-dir "%ROOT%\%BUILDDIR%" -C Release --output-on-failure > "%TMPD%\ctest.log" 2>&1
 set "CEXIT=%ERRORLEVEL%"
 echo     exit = !CEXIT!
 findstr /c:"tests passed" "%TMPD%\ctest.log"
@@ -105,7 +118,7 @@ if not "!CEXIT!"=="0" set "FAILED=1"
 rem ------------------------------------------------------------
 echo.
 echo [5] delivery checklist
-python -I "%ROOT%\scripts\make_delivery_checklist.py" > "%TMPD%\check.txt" 2>&1
+python -I "%ROOT%\scripts\make_delivery_checklist.py" "%OUT%" > "%TMPD%\check.txt" 2>&1
 set "PEXIT=%ERRORLEVEL%"
 echo     exit = !PEXIT!
 if not "!PEXIT!"=="0" set "FAILED=1"

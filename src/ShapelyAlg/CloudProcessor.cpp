@@ -1681,7 +1681,8 @@ int CloudProcessor<PointT>::segmentPlanesMulti(const CloudConstPtr& src,
 template <typename PointT>
 bool CloudProcessor<PointT>::registICP_PointToPoint(const CloudConstPtr& source, const CloudConstPtr& target,
                                                     double max_dist, float out_transform[16],
-                                                    const float* init_transform)
+                                                    const float* init_transform,
+                                                    int max_iteration)
 {
     if (!source || !target)
         return false;
@@ -1689,6 +1690,8 @@ bool CloudProcessor<PointT>::registICP_PointToPoint(const CloudConstPtr& source,
     icp.setInputSource(source);
     icp.setInputTarget(target);
     icp.setMaxCorrespondenceDistance((float)max_dist);
+    if (max_iteration > 0)
+        icp.setMaximumIterations(max_iteration);
     pcl::PointCloud<PointT> aligned;
     if (init_transform) {
         Eigen::Matrix4f init;
@@ -2008,6 +2011,61 @@ bool CloudProcessor<PointT>::registInformationMatrix(const CloudConstPtr& source
         for (int c = 0; c < 6; ++c)
             out_information[r * 6 + c] = M(r, c);
     return true;
+}
+
+template <typename PointT>
+bool CloudProcessor<PointT>::registMultiscaleICP(const CloudConstPtr& source, const CloudConstPtr& target,
+                                                 const std::vector<double>& voxel_sizes,
+                                                 const std::vector<int>& iters,
+                                                 double max_dist_factor, float out_transform[16],
+                                                 const float* init_transform)
+{
+    if (!source || !target || source->empty() || target->empty())
+        return false;
+    const double factor = max_dist_factor > 0.0 ? max_dist_factor : 1.5;
+
+    // 金字塔由粗到细：每级对原始点云独立下采样（Open3D multiscale_icp 语义），
+    // 上一级 final 作下一级 init（PCL align(init) 的 final 已含 init，直接链式传递）。
+    bool haveInit = init_transform != nullptr;
+    float initBuf[16] = { 0 };
+    if (init_transform)
+        std::copy(init_transform, init_transform + 16, initBuf);
+
+    // 空金字塔 = 原始云上的单级 ICP（对应距离 = factor；factor<=0 无法确定距离，拒绝）
+    if (voxel_sizes.empty()) {
+        if (!(max_dist_factor > 0.0))
+            return false;
+        float singleT[16];
+        if (!registICP_PointToPoint(source, target, factor, singleT,
+                                    haveInit ? initBuf : nullptr))
+            return false;
+        std::copy(singleT, singleT + 16, out_transform);
+        return true;
+    }
+
+    for (size_t lv = 0; lv < voxel_sizes.size(); ++lv) {
+        const double voxel = voxel_sizes[lv];
+        if (!(voxel > 0.0))
+            return false;
+        const int it = lv < iters.size() ? iters[lv]
+                                         : (iters.empty() ? 0 : iters.back());
+        CloudPtr srcDown = filterVoxelGrid(source, voxel);
+        CloudPtr tgtDown = filterVoxelGrid(target, voxel);
+        if (!srcDown || !tgtDown || srcDown->empty() || tgtDown->empty())
+            return false;
+        float levelT[16];
+        if (!registICP_PointToPoint(srcDown, tgtDown, factor * voxel, levelT,
+                                    haveInit ? initBuf : nullptr, it))
+            return false;
+        // 下一级以本级结果为初值；末级结果即最终变换（行主序 float[16]）
+        if (lv == voxel_sizes.size() - 1) {
+            std::copy(levelT, levelT + 16, out_transform);
+            return true;
+        }
+        std::copy(levelT, levelT + 16, initBuf);
+        haveInit = true;
+    }
+    return false;
 }
 
 // ---------------- tree ----------------

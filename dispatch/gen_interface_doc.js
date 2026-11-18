@@ -383,8 +383,8 @@ body.push(makeTable(
 ));
 
 body.push(h2("4.2  配准算法层（Point3DAlg_Regist.h，编入 Point3DAlg.dll）"));
-body.push(p("手动配准节点的算法本体为纯函数层，宿主不直接调用；6 种配准策略枚举如下（ComUI 参数 strategy 即此值）。"));
-body.push(tableTitle("表 4-2  配准策略（strategy 参数 1–6）"));
+body.push(p("手动配准节点的算法本体为纯函数层，宿主不直接调用；7 种配准策略枚举如下（ComUI 参数 strategy 即此值）。"));
+body.push(tableTitle("表 4-2  配准策略（strategy 参数 1–7）"));
 body.push(makeTable(
   ["值", "策略", "特点"],
   [
@@ -394,6 +394,7 @@ body.push(makeTable(
     ["4", "FPFH + RANSAC", "无需初值，慢"],
     ["5", "NDT", "大初始偏差稳健"],
     ["6", "PCA 主轴粗配准", "极快，给 ICP 找初值"],
+    ["7", "多尺度 ICP（multiscale_icp）", "voxel 金字塔粗→细逐级配准（粗级对应距离 3×max_corr 覆盖大初值偏差，细级 0.3×max_corr 精修）；初值偏差超出单级对应半径时明显优于策略 1"],
   ],
   [10, 30, 60]
 ));
@@ -431,7 +432,7 @@ body.push(makeTable(
     ["节点 id / 分组", "alg.point3d.manual_regist（3D 点云 / 处理）"],
     ["DLL / method", "Point3DAlg.dll / Point3DAlg_ComuiManualRegist"],
     ["输入", "源点云 + 目标点云（两片 cloud，按声明顺序）"],
-    ["参数 1", "strategy（int，默认 1，范围 1–6）：配准策略，见表 4-2"],
+    ["参数 1", "strategy（int，默认 1，范围 1–7）：配准策略，见表 4-2"],
     ["参数 2", "init_transform（text）：16 值逗号分隔行主序 4×4 初值矩阵，默认单位阵"],
     ["参数 3", "max_distance（number，默认 0.0，≥0）：对应点最大搜索距离"],
     ["参数 4", "max_iteration（int，默认 60，≥1）：最大迭代次数"],

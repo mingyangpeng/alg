@@ -1,6 +1,6 @@
 ﻿# Image2DAlg —— 通用 2D 模块
 
-`src/Image2DAlg` 是面向 ComUI 宿主的通用 2D 算法库：图像读取、通用处理、测量/缺陷检测，以及标定接口类（`Image2DAlg_Calib`）。当前版本 **1.14.0**（49 个通用算子：处理 16 + 测量 33）。
+`src/Image2DAlg` 是面向 ComUI 宿主的通用 2D 算法库：图像读取、通用处理、测量/缺陷检测，以及标定接口类（`Image2DAlg_Calib`）。当前版本 **2.0.0**（55 个通用算子：处理 16 + 特征 3 + 测量 36）。
 
 ## 定位与依赖
 
@@ -45,6 +45,7 @@ ComUI 适配层在 `integration/comui/Image2DAlg_comui.cpp`，节点声明在 `i
 | `Image2DAlg_ToGray(in, out)` | 1 | BGR(A) → 灰度 |
 | `Image2DAlg_Gamma(in, gamma, out)` | 同输入 | LUT `255*(v/255)^(1/gamma)`，gamma 钳制 ≥ 0.05 |
 | `Image2DAlg_Threshold(in, mode, thresh, maxval, block, C, out)` | 1 | mode：0 固定二值 / 1 反二值 / 2 OTSU / 3 自适应均值 / 4 自适应高斯 |
+| `Image2DAlg_Binarize(in, mode, thresh, thresh2, maxval, mid, block, C, invert, out)` | 1 | 统一二值化：mode 0~4 同 Threshold；5 TRUNC / 6 TOZERO / 7 TOZERO_INV；8 双阈值区间内前景（low≤v≤high）/ 9 双阈值区间外前景 / 10 双阈值三值化（low/high/mid）；`invert` 非 0 对结果取反 |
 | `Image2DAlg_Blur(in, method, ksize, sigma1, sigma2, out)` | 同输入 | method：0 高斯 / 1 中值 / 2 双边；ksize 自动补奇 |
 | `Image2DAlg_Morphology(in, op, shape, ksize, iterations, out)` | 同输入 | op：0 erode / 1 dilate / 2 open / 3 close / 4 gradient / 5 tophat / 6 blackhat；shape：0 矩形 / 1 十字 / 2 椭圆 |
 | `Image2DAlg_Canny(in, t1, t2, out)` | 1 | Canny 边缘（0/255） |
@@ -84,6 +85,7 @@ ComUI 适配层在 `integration/comui/Image2DAlg_comui.cpp`，节点声明在 `i
 | `Image2DAlg_FitCircleRobust(xy, count, threshold, max_iters, seed, &fit, &inliers, &n)` | 圆拟合 RANSAC 抗外点（毛刺/粘连场景），配 `FreeInliers` |
 | `Image2DAlg_FitEllipse(xy, count, &fit)` | 椭圆拟合（≥5 点），返回 `EllipseFit{cx, cy, width, height, angle}`（全轴长；宽高顺序随 OpenCV 角度约定） |
 | `Image2DAlg_FitEllipsesFromBinary(in, min_area, max_area, min_axis, max_axis, &fits, &count)` | 多目标椭圆拟合（椭圆焊盘/异形孔）：二值逐外轮廓 fitEllipse + 全轴长过滤；配 `FreeEllipses` |
+| `Image2DAlg_FitLinesFromBinary(in, min_area, max_area, min_length, &lines, &count)` | 多目标直线拟合（板边/边缘线）：二值逐外轮廓 fitLine DIST_L2 + 覆盖跨度过滤；配 `FreeLineFits` |
 | `Image2DAlg_FitRect(xy, count, &fit)` | 最小外接旋转矩形，返回 `RectFit{cx, cy, width, height, angle}` |
 | `Image2DAlg_FitPoly(xy, count, degree, &fit)` | 多项式拟合 y=Σcoef[i]·x^i（degree 1~5，SVD），返回 `PolyFit{coef[6], degree, rms}`——边缘直线度/翘曲趋势 |
 | `Image2DAlg_HoughLinesP(in, rho, theta_deg, threshold, min_len, max_gap, &lines, &count)` | 概率霍夫直线（线段端点 `Line4[]`），配 `FreeLines` |

@@ -491,6 +491,31 @@
 
 ### T38 候选池（监督/用户决策后开工，MAIN 暂不擅自领取）：a) BusinessAlg GLOB 补 _test.cpp 排除（T36 附带发现）——**已由 MAIN 在 T39 中清掉（2026-11-10）**；b) node.json 6→7 与 checklist 脚本 TEST_TOOL_EXES 同步（等 DomeFit 收尾——DomeFit.cpp 03:30 仍在编辑，继续挂起）；c) RegistTool 键位真机复核（T27 遗留）。
 
+### T55 Image2DAlg v2.1.0：FromBinary 拟合收尾 + 轮廓/点云可视化节点（用户指令"继续"）—— [DONE]
+背景：FromBinary 族圆/椭圆/矩形已有，缺直线；轮廓可视化（宿主 3D 工作台看轮廓）依赖点集导出接口的节点化。
+1. 库层 FitLinesFromBinary+FreeLineFits；2. 节点 fit_lines/fit_rects/contour_cloud；3. 测试；4. 版本 2.1.0 + 文档。
+结果：完成（MAIN，2026-11-18）。
+- 库层 +2 导出 +2 Free（版本 2.0.0→**2.1.0**，dumpbin `Image2DAlg_` 前缀 **109 符号** = 基础 5+处理 16+特征 3+测量/拟合/匹配 41+Free 15+Comui 32）：`FitLinesFromBinary`（二值逐外轮廓 fitLine DIST_L2 + **覆盖跨度过滤**（轮廓点在方向上投影极差）+ RMS 直线度）+`FreeLineFits`；`ContourCloud` 无新库层——节点直接复用既有 `ContourPoints`（导出 z=0 云，rgb=NULL）。
+- 节点 +3（node.json 总数 43→**46**，image2d **35**，Comui 入口 32→**35**）：`fit_lines`（线标注+消息 c/dir/rms）、`fit_rects`（旋转矩形 4 边标注+消息 c/size/ang）、`contour_cloud`（**无图像输出**，z=0 点云供宿主 3D 工作台查看轮廓，消息 contours/points）。checklist 脚本 NODE_JSONS 43→46。
+- 测试 323→**329 check**（+6：FitLinesFromBinary 双线段位置/RMS/过滤/错误路径）。**直跑 329 PASS / 0 FAIL**。
+- **自抓节点真 bug 1 个**：`ComuiContourCloud` 初版 `np = points / 2` 把点数砍半（out_points 语义是点个数非 float 数）——4 角点只进 2 点；修正 `np = points` 后 ctypes 验证 4 角点全进。另修适配层释放调用错误（offsets 是 int 数组却走 FreeContourPoints 强转）。
+- 验证：构建 0 error；ctest **12/12 全过**；checklist 退出码 0（46/46 部署一致）；ctypes 七批累计 **48/48**；BOM/行尾全保持（过程中 heredoc 转义二次翻车——带引号 heredoc 
+ 不转义、python 转义链必须用文件中转而非内嵌，已入档）。
+- 文档：模块 README 版本 2.1.0/56 算子（处理 16+特征 3+测量 37）+FromBinary 对称补全说明；根 README 索引 55→56 算子、节点 43→46；HOST_VERIFY 速查表 32→35 节点（+3 行）。
+- 遗畔：无（FromBinary 族圆/椭圆/矩形/直线四元齐全；剩 #6 docx v1.4【用户工具链】、#7 Calib 联动【等用户】）。
+
+### T54 Image2DAlg v2.0.0：特征点族 + ORB 特征对位 + 多边形/旋转矩形拟合（用户指令"添加各种2维几何图的拟合算法，特征点查找算法 匹配算法等"）—— [DONE]
+背景：模板匹配组合矩阵已满（v1.10），但特征点查找（Harris/Shi-Tomasi/亚像素）与特征匹配对位（ORB——大形变/旋转/亮度鲁棒）是空档；拟合族缺多边形逼近与多目标旋转矩形。
+1. 库层特征点 3+Free；2. ORBAlign；3. ApproxPolyDP/FitRectsFromBinary；4. 测试；5. 节点 harris_corners/orb_align；6. 版本 2.0.0 + 文档。
+结果：完成（MAIN，2026-11-17；代码 11-13 落盘，中途被用户 CloudProcessor/ImageProcessor 编辑窗多次阻塞后自愈）。
+- 库层 +6 导出 +3 Free（版本 1.15.0→**2.0.0**，dumpbin `Image2DAlg_` 前缀 **104 符号** = 基础 5+处理 16+测量 39+Free 15+Comui 29；1.15.0 Binarize 为并行会话所加，本批叠加）：`HarrisCorners`（响应相对阈值 + dilate 3x3 局部极大 NMS + 按响应降序 + 可选 cornerSubPix ±0.5px）、`GoodFeatures`（Shi-Tomasi，内置 NMS）、`CornerSubPix`（梯度法细化，失败位置保持原值）、`ApproxPolyDP`（Douglas-Peucker，ε 内删冗余顶点——矩形轮廓→4 角点）、`FitRectsFromBinary`+`FreeRectFits`（多目标旋转矩形）、`ORBAlign`+`FreeOrbMatches`（**ORB 特征 + BFMatcher Hamming knn + Lowe 0.7 比率 + estimateAffine2D RANSAC 仿射**——in1→in2 的 2x3 矩阵 + 匹配点对 + 内点数；大形变/旋转/亮度鲁棒，弥补模板匹配小形变局限）。Point2f 结构通用化（角点/特征点/多边形顶点）。
+- 适配层 +2 入口：`ComuiHarrisCorners`（角点十字标注 + 消息 count/坐标）、`ComuiORBAlign`（2 输入基准图/待对位图，图 2 匹配点十字标注，消息 `inliers/m[6]/matches`）。node.json 总数 43→**45**（image2d 31）：`image2d_harris_corners` / `image2d_orb_align`；checklist 脚本 NODE_JSONS 43→45（**含并行会话的 image2d_binarize**）。
+- 测试 278→**323 check**（+45）：Harris 4 角全覆盖/亚像素、GoodFeatures、CornerSubPix 硬边图收敛/平坦保持、ApproxPolyDP 矩形 4 角/ε=0 共线剔除/错误路径、FitRects 双矩形/过滤、ORBAlign 种子化 randu 纹理平移 (5,7) → 仿射精确/47 内点/错误路径。**直跑 323 PASS / 0 FAIL**。
+- **自抓实现/测试 bug 3 个（ctypes 诊断定位）**：①**ORB 默认 edgeThreshold=31 在 64x64 图上可用区只剩 2x2 → kp<4 恒 -2**——改 `ORB::create(n, 1.2f, 8, 8)` 自适应收紧（修复后 47 匹配 47 内点、仿射≈平移 (5,7)）；②测试 ApproxPolyDP 传 pn（float 数 72）当点数（36）→ 越界读垃圾——pn/2 修正；③**测试 double free**：CornerSubPix 的 -3 路径不写 out，refined2 未置空二次 FreePoint2f → 释放后置空（win_size 用例改走 isharp）；另 CornerSubPix 测试改用硬边图（模糊图角点弥散 cornerSubPix 漂移 >1.5px）。main() 加 `setvbuf(stdout, NULL, _IONBF, 0)`（无缓冲输出——本次定位崩溃点靠它，长期保留）。
+- 验证：构建 0 error；dumpbin 104；ctest **12/12 全过**（用户 Point3DAlg 全复绿）；checklist 退出码 0（45/45 部署一致）；BOM/行尾全保持。
+- 文档：模块 README 版本 2.0.0/55 算子（处理 16+特征 3+测量 36）+特征点/拟合/ORB 3 段；根 README 索引 55 算子+节点 45；HOST_VERIFY 速查表"图像链路 31 节点"（+2 行）。
+- 遗畔：无（特征点族闭环；接口清单新增方向已全量落地，剩 #7 Calib 联动等用户收尾）。
+
 ### T53 Image2DAlg v1.14.0：图像统计族 RegionStats/Histogram/CompareHist + 监控节点（开发清单新增，用户指令"继续"）—— [DONE]
 背景：封装 ImageProcessor 17/22 节（meanStdDev/minMaxLoc/calcHist8U/compareHist）为批次灰度一致性监控接口 + 节点。
 1. 库层 3 导出；2. 节点 region_stats；3. 测试；4. 版本 1.14.0 + 文档。

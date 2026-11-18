@@ -15,7 +15,8 @@
       "name": "img_path",
       "label": "图像路径",
       "type": "path",
-      "default": ""
+      "default": "",
+      "description": "图像文件路径（png/tiff/jpg/jpeg，ANSI 编码）；错误码 1=未设置路径、2=读取失败"
     }
   ],
   "outputs": [

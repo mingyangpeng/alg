@@ -7,9 +7,9 @@
 >
 > 部署方式见 `docs/THIRD_PARTY_OPS.md` §8：宿主 `comdll/algo/<名称>/` 下放
 > DLL + node.json（依赖同目录），F5 重载；本仓库构建产物在
-> `build/output/Release/`（5 个算法 DLL + 40 个 node.json 均已部署）。
+> `build/output/Release/`（5 个算法 DLL + 43 个 node.json 均已部署）。
 
-## 〇、图像链路 29 节点速查（T41/T44/T45/T47/T48/T49/T50/T53 八批，参数以 node.json 为准）
+## 〇、图像链路 32 节点速查（T41/T44/T45/T47/T48/T49/T50/T53/T54 九批，参数以 node.json 为准）
 
 前 2 个（read/gamma）见下文第二节；其余 27 个 image2d 节点（dll=`Image2DAlg.dll`，
 method 前缀 `Image2DAlg_Comui`，输入 1 张 BGRA 图、absdiff/match_template_ex/find_matches/
@@ -45,6 +45,9 @@ find_matches_ex/match_template_masked 需 2~3 张；输出 BGRA（region_stats �
 | alg.image2d.fit_ellipses | ComuiFitEllipses | min_area max_area min_axis max_axis | 多目标椭圆拟合：椭圆标注；消息 `count=N;[i]c/axis/ang` |
 | alg.image2d.match_template_subpix | ComuiMatchTemplateSubPix | method（2 输入） | 亚像素对位（±0.5px）：中心十字标注；消息 `score/at` |
 | alg.image2d.region_stats | ComuiRegionStats | roi_x roi_y roi_w roi_h(0=全图) | 无图像输出；消息 `mean/stddev/min/max`（批次一致性监控） |
+| alg.image2d.fit_lines | ComuiFitLines | min_area max_area min_length(0不限) | 输入二值语义图；拟合线标注（绿线）；消息 `count=N;[i]c/dir/rms` |
+| alg.image2d.fit_rects | ComuiFitRects | min_area max_area(0不限) | 输入二值语义图；旋转矩形标注；消息 `count=N;[i]c/size/ang` |
+| alg.image2d.contour_cloud | ComuiContourCloud | external_only min_area | **无图像输出**；z=0 轮廓点云（宿主 3D 工作台查看）；消息 `contours/points` |
 
 联调要点：CC/AC/FitCircles 三类测量节点消息走 error 字段返回成功结果（manual_regist
 先例，宿主当前仅 rc≠0 时读取——见"待真机确认"第 1 条）；错误路径均为 UTF-8 中文。
@@ -77,7 +80,7 @@ T9（node.json↔C 接口一致性审计）6/6 通过：method↔导出表逐字
 
 公共前置：
 
-1. 复制 `build/output/Release/` 下 5 个算法 DLL + 6 个 node.json 到宿主
+1. 复制 `build/output/Release/` 下 5 个算法 DLL + 43 个 node.json 到宿主
    `comdll/algo/`（连同第三方运行时 DLL，宿主只在本目录解析）；
    覆盖 DLL 前先退出宿主（不随 F5 卸载），改 node.json 可 F5 生效。
 2. F5 重载，底部日志应出现 6 条 `算子(JSON)已注册: <名称> <<id>> ← <文件>`；

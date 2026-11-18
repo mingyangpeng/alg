@@ -15,14 +15,16 @@
       "name": "folder",
       "label": "扫描数据文件夹",
       "type": "path",
-      "default": ""
+      "default": "",
+      "description": "扫描数据文件夹（*.dat + *.xml + Scan3DPart*.json）；mm 换算参数自动从数据文件读取"
     },
     {
       "name": "frame",
       "label": "指定帧(-1=全部)",
       "type": "int",
       "default": -1,
-      "min": -1
+      "min": -1,
+      "description": "指定帧号（<0 = 全部帧合并）"
     }
   ],
   "outputs": [

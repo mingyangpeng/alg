@@ -1636,4 +1636,1433 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiContourCloud(const AlgoCInput* in, AlgoCOu
     return 0;
 }
 
+// ---------------- 点集输入/输出辅助（下方点集类节点共用） ----------------
+
+// 输入点云 xyz（交错）-> 扁平 xy [x0,y0,x1,y1,...]（2D 点集语义，z 分量忽略）。
+// malloc，配 free；失败返回 NULL。
+static float* FlattenCloudXy(const AlgoCCloud& c) {
+    float* xy = (float*)malloc(sizeof(float) * (size_t)c.count * 2);
+    if (!xy) return nullptr;
+    for (int i = 0; i < c.count; ++i) {
+        xy[i * 2]     = c.xyz[i * 3];
+        xy[i * 2 + 1] = c.xyz[i * 3 + 1];
+    }
+    return xy;
+}
+
+// 扁平 xy -> z=0 输出点云（AlgoCCloudOut，xyz=交错坐标，rgb=NULL）。
+// malloc，配 algo_free；失败返回 NULL。
+static AlgoCCloudOut* AllocCloudOutZ0(const float* xy, int count) {
+    float* xyz = (float*)malloc(sizeof(float) * (size_t)count * 3);
+    if (!xyz) return nullptr;
+    for (int i = 0; i < count; ++i) {
+        xyz[i * 3]     = xy[i * 2];
+        xyz[i * 3 + 1] = xy[i * 2 + 1];
+        xyz[i * 3 + 2] = 0.0f;
+    }
+    AlgoCCloudOut* arr = (AlgoCCloudOut*)malloc(sizeof(AlgoCCloudOut));
+    if (!arr) { free(xyz); return nullptr; }
+    arr->count = count;
+    arr->xyz = xyz;
+    arr->rgb = NULL;
+    return arr;
+}
+
+// ---------------- 算子入口：Shi-Tomasi 角点检测（node.json: alg.image2d.good_features） ----------------
+// 参数（按声明顺序）：
+//   max_corners    int     默认 100  [1,10000]  最大角点数（按质量降序保留）
+//   quality_level  number  默认 0.01 (0,1]     质量系数（相对最强角点响应的比例）
+//   min_distance   number  默认 10   [1,10000] 角点最小间距（像素，内置 NMS 去重）
+//   subpix         int     默认 1    [0,1]     亚像素细化
+// 输出：输入图克隆叠加角点绿色十字标注（同 Harris 画法）。
+// 消息通道："count=N; [i](x,y); ..."（900 字节截断；无检出 count=0 属正常）。
+// 错误码：1 输入未连线；2 检测失败/内存不足；3 参数非法。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiGoodFeatures(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 1 || !in->images) { out->error = "输入未连线"; return 1; }
+    int max_corners = 100, subpix = 1;
+    double quality_level = 0.01, min_distance = 10.0;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) max_corners = p->i;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) quality_level = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 1)) min_distance = p->d;
+    if (const AlgoCParam* p = FindParam(in, 1, 1)) subpix = p->i;
+
+    Image2DAlg_Image input = CoreInputFrom(in->images[0]);
+    Image2DAlg_Point2f* corners = NULL;
+    int count = 0;
+    const int rc = Image2DAlg_GoodFeatures(&input, max_corners, quality_level, min_distance,
+                                           subpix, &corners, &count);
+    if (rc == -3) { out->error = "角点检测失败（max_corners>=1、quality_level∈(0,1]、min_distance>=1）"; return 3; }
+    if (rc != 0) { out->error = "角点检测失败"; return 2; }
+
+    cv::Mat vis(in->images[0].height, in->images[0].width, CV_8UC4,
+                (void*)in->images[0].bgra);
+    cv::Mat drawn = vis.clone();
+    for (int i = 0; i < count; ++i) {
+        const cv::Point c((int)std::lround(corners[i].x), (int)std::lround(corners[i].y));
+        cv::line(drawn, c + cv::Point(-4, 0), c + cv::Point(4, 0), cv::Scalar(0, 255, 0, 255), 1);
+        cv::line(drawn, c + cv::Point(0, -4), c + cv::Point(0, 4), cv::Scalar(0, 255, 0, 255), 1);
+    }
+
+    static char msg[900];
+    int pos = snprintf(msg, sizeof(msg), "count=%d", count);
+    for (int i = 0; i < count && pos < (int)sizeof(msg) - 48; ++i)
+        pos += snprintf(msg + pos, sizeof(msg) - (size_t)pos,
+                        "; [%d](%.1f,%.1f)", i, corners[i].x, corners[i].y);
+    Image2DAlg_FreePoint2f(corners);
+
+    const size_t n = (size_t)drawn.rows * drawn.cols * 4;
+    uint8_t* px = (uint8_t*)malloc(n);
+    if (!px) { out->error = "内存不足"; return 2; }
+    memcpy(px, drawn.data, n);
+    out->images = AllocImageOut(drawn.cols, drawn.rows, px);
+    if (!out->images) { free(px); out->error = "内存不足"; return 2; }
+    out->imageCount = 1;
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：角点亚像素细化（node.json: alg.image2d.corner_sub_pix） ----------------
+// 输入：images[0]=图像，clouds[0]=初始角点（如 good_features/harris_corners 消息坐标
+//       或 contour_cloud 轮廓点云；点集 xy 取自 xyz，z 分量忽略；count >= 1）。
+// 参数（按声明顺序）：
+//   win_size  int  默认 11  [3,51]  亚像素搜索窗口边长（典型 5~11）
+// 输出：标注图（输入克隆叠加细化后角点绿色十字）+ 细化点集点云（z=0，供下游拟合/逼近）。
+// 消息通道："count=N; [i](x,y); ..."（细化后坐标，900 字节截断；细化失败位置保持原值）。
+// 错误码：1 输入未连线；2 细化失败/内存不足；3 参数非法。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiCornerSubPix(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 1 || !in->images) { out->error = "输入未连线（图像）"; return 1; }
+    if (in->cloudCount < 1 || !in->clouds || !in->clouds[0].xyz) {
+        out->error = "需要点集输入（初始角点）"; return 1;
+    }
+    int win_size = 11;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) win_size = p->i;
+
+    const AlgoCCloud* src = &in->clouds[0];
+    if (src->count < 1) { out->error = "初始角点为空"; return 2; }
+
+    Image2DAlg_Point2f* pts =
+        (Image2DAlg_Point2f*)malloc(sizeof(Image2DAlg_Point2f) * (size_t)src->count);
+    if (!pts) { out->error = "内存不足"; return 2; }
+    for (int i = 0; i < src->count; ++i) {
+        pts[i].x = src->xyz[i * 3];
+        pts[i].y = src->xyz[i * 3 + 1];
+    }
+
+    Image2DAlg_Image input = CoreInputFrom(in->images[0]);
+    Image2DAlg_Point2f* refined = NULL;
+    const int count = src->count;
+    const int rc = Image2DAlg_CornerSubPix(&input, pts, count, win_size, &refined);
+    free(pts);
+    if (rc == -3) { out->error = "亚像素细化失败（点数 >= 1，win_size >= 3）"; return 3; }
+    if (rc != 0) { out->error = "亚像素细化失败"; return 2; }
+
+    // 细化点集 -> z=0 点云输出（先组点云，再画标注图/组消息并释放 refined，最后出图像）
+    float* xy = (float*)malloc(sizeof(float) * (size_t)count * 2);
+    if (!xy) { Image2DAlg_FreePoint2f(refined); out->error = "内存不足"; return 2; }
+    for (int i = 0; i < count; ++i) {
+        xy[i * 2]     = refined[i].x;
+        xy[i * 2 + 1] = refined[i].y;
+    }
+    out->clouds = AllocCloudOutZ0(xy, count);
+    free(xy);
+    if (!out->clouds) { Image2DAlg_FreePoint2f(refined); out->error = "内存不足"; return 2; }
+    out->cloudCount = 1;
+
+    // 标注图：输入克隆叠加细化后角点绿色十字（同 Harris 画法），并在释放前组消息
+    cv::Mat vis(in->images[0].height, in->images[0].width, CV_8UC4,
+                (void*)in->images[0].bgra);
+    cv::Mat drawn = vis.clone();
+    for (int i = 0; i < count; ++i) {
+        const cv::Point c((int)std::lround(refined[i].x), (int)std::lround(refined[i].y));
+        cv::line(drawn, c + cv::Point(-4, 0), c + cv::Point(4, 0), cv::Scalar(0, 255, 0, 255), 1);
+        cv::line(drawn, c + cv::Point(0, -4), c + cv::Point(0, 4), cv::Scalar(0, 255, 0, 255), 1);
+    }
+
+    static char msg[900];
+    int pos = snprintf(msg, sizeof(msg), "count=%d", count);
+    for (int i = 0; i < count && pos < (int)sizeof(msg) - 48; ++i)
+        pos += snprintf(msg + pos, sizeof(msg) - (size_t)pos,
+                        "; [%d](%.2f,%.2f)", i, refined[i].x, refined[i].y);
+    Image2DAlg_FreePoint2f(refined);
+
+    const size_t n = (size_t)drawn.rows * drawn.cols * 4;
+    uint8_t* px = (uint8_t*)malloc(n);
+    if (!px) {
+        free(out->clouds[0].xyz); free(out->clouds);
+        out->clouds = NULL; out->cloudCount = 0;
+        out->error = "内存不足"; return 2;
+    }
+    memcpy(px, drawn.data, n);
+    out->images = AllocImageOut(drawn.cols, drawn.rows, px);
+    if (!out->images) {
+        free(px);
+        free(out->clouds[0].xyz); free(out->clouds);
+        out->clouds = NULL; out->cloudCount = 0;
+        out->error = "内存不足"; return 2;
+    }
+    out->imageCount = 1;
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：轮廓顶点逼近（node.json: alg.image2d.approx_poly_dp） ----------------
+// 输入：clouds[0]=轮廓点集（xy 取自 xyz，z 分量忽略；count >= 3）。
+// 参数（按声明顺序）：
+//   epsilon  number  默认 3  [0,10000]  Douglas-Peucker 容差（像素；0 = 仅去除共线冗余）
+//   closed   int     默认 1  [0,1]      闭合轮廓（findContours 输出）
+// 输出：逼近后多边形顶点点云（z=0，供形状判定/下游拟合节点）。
+// 消息通道："count=N; [i](x,y); ..."（顶点坐标，900 字节截断）。
+// 错误码：1 输入未连线；2 点集不足/内存不足；3 参数非法（epsilon<0 或逼近过度退化）。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiApproxPolyDP(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->cloudCount < 1 || !in->clouds || !in->clouds[0].xyz) {
+        out->error = "输入未连线（轮廓点集）"; return 1;
+    }
+    double epsilon = 3.0;
+    int closed = 1;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) epsilon = p->d;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) closed = p->i;
+
+    const AlgoCCloud* src = &in->clouds[0];
+    if (src->count < 3) { out->error = "轮廓点集至少需要 3 个点"; return 2; }
+
+    float* xy = FlattenCloudXy(*src);
+    if (!xy) { out->error = "内存不足"; return 2; }
+    float* out_xy = NULL;
+    int out_count = 0;
+    const int rc = Image2DAlg_ApproxPolyDP(xy, src->count, epsilon, closed, &out_xy, &out_count);
+    free(xy);
+    if (rc == -3) { out->error = "顶点逼近失败（点数 >= 3、epsilon >= 0；epsilon 过大退化 <3 顶点）"; return 3; }
+    if (rc != 0) { out->error = "顶点逼近失败"; return 2; }
+
+    static char msg[900];
+    int pos = snprintf(msg, sizeof(msg), "count=%d", out_count);
+    for (int i = 0; i < out_count && pos < (int)sizeof(msg) - 48; ++i)
+        pos += snprintf(msg + pos, sizeof(msg) - (size_t)pos,
+                        "; [%d](%.1f,%.1f)", i, out_xy[i * 2], out_xy[i * 2 + 1]);
+
+    out->clouds = AllocCloudOutZ0(out_xy, out_count);   // 顶点 -> z=0 点云
+    Image2DAlg_FreeContourPoints(out_xy, NULL);         // 该缓冲登记用 FreeContourPoints 释放
+    if (!out->clouds) { out->error = "内存不足"; return 2; }
+    out->cloudCount = 1;
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：形状相似度（node.json: alg.image2d.match_shapes） ----------------
+// 输入 2 个点集：clouds[0]=轮廓 A，clouds[1]=轮廓 B（各 >= 3 点；xy 取自 xyz，z 分量忽略）。
+// 参数（按声明顺序）：
+//   method  int  默认 1  [1,3]  1/2/3 = cv::CONTOURS_MATCH_I1~I3（常用 1）
+// 输出：无端口（outputs 为空）；Hu 矩距离并入消息通道（region_stats 先例）：
+//   "score=%.6f method=%d"（越小越相似，0 = 完全一致）。
+// 错误码：1 输入不足（需 2 个点集）；2 点集不足；3 参数非法（method 越界）。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiMatchShapes(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->cloudCount < 2 || !in->clouds || !in->clouds[1].xyz) {
+        out->error = "需要 2 个点集输入（轮廓 A/轮廓 B）"; return 1;
+    }
+    int method = 1;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) method = p->i;
+
+    const AlgoCCloud* a = &in->clouds[0];
+    const AlgoCCloud* b = &in->clouds[1];
+    if (a->count < 3 || b->count < 3) { out->error = "两组点集各至少需要 3 个点"; return 2; }
+
+    float* xy1 = FlattenCloudXy(*a);
+    float* xy2 = xy1 ? FlattenCloudXy(*b) : NULL;
+    if (!xy2) { free(xy1); out->error = "内存不足"; return 2; }
+    double score = 0.0;
+    const int rc = Image2DAlg_MatchShapes(xy1, a->count, xy2, b->count, method, &score);
+    free(xy1);
+    free(xy2);
+    if (rc == -3) { out->error = "形状匹配失败（各点集 >= 3 点，method 1~3）"; return 3; }
+    if (rc != 0) { out->error = "形状匹配失败"; return 2; }
+
+    static char msg[128];
+    snprintf(msg, sizeof(msg), "score=%.6f method=%d", score, method);
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：单目标圆拟合（node.json: alg.image2d.fit_circle） ----------------
+// 输入：clouds[0]=点集（xy 取自 xyz，z 分量忽略；count >= 3）。参数：无。
+// 输出：无端口（outputs 为空）；结果并入消息通道，形态与 fit_circles 一致：
+//   "count=1; [0]c=(cx,cy) r=R rms=RMS"
+//   （Kåsa 代数法 + SVD；共线/重合等退化输入报错，结合 rms 判断拟合质量）。
+// 错误码：1 输入未连线；2 点集不足/内存不足；3 拟合失败（点数不足/退化）。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiFitCircle(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->cloudCount < 1 || !in->clouds || !in->clouds[0].xyz) {
+        out->error = "输入未连线（点集）"; return 1;
+    }
+    const AlgoCCloud* src = &in->clouds[0];
+    if (src->count < 3) { out->error = "圆拟合至少需要 3 个点"; return 2; }
+
+    float* xy = FlattenCloudXy(*src);
+    if (!xy) { out->error = "内存不足"; return 2; }
+    Image2DAlg_CircleFit st = {};
+    const int rc = Image2DAlg_FitCircle(xy, src->count, &st);
+    free(xy);
+    if (rc == -3) { out->error = "圆拟合失败（点数不足或共线/重合退化）"; return 3; }
+    if (rc != 0) { out->error = "圆拟合失败"; return 2; }
+
+    static char msg[160];
+    snprintf(msg, sizeof(msg), "count=1; [0]c=(%.2f,%.2f) r=%.2f rms=%.3f",
+             st.cx, st.cy, st.r, st.rms);
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：单目标直线拟合（node.json: alg.image2d.fit_line） ----------------
+// 输入：clouds[0]=点集（xy 取自 xyz，z 分量忽略；count >= 2）。参数：无。
+// 输出：无端口（outputs 为空）；结果并入消息通道，形态与 fit_lines 一致：
+//   "count=1; [0]c=(x0,y0) dir=(vx,vy) rms=R"（DIST_L2 最小二乘）。
+// 错误码：1 输入未连线；2 点集不足/内存不足；3 拟合失败（点数不足）。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiFitLine(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->cloudCount < 1 || !in->clouds || !in->clouds[0].xyz) {
+        out->error = "输入未连线（点集）"; return 1;
+    }
+    const AlgoCCloud* src = &in->clouds[0];
+    if (src->count < 2) { out->error = "直线拟合至少需要 2 个点"; return 2; }
+
+    float* xy = FlattenCloudXy(*src);
+    if (!xy) { out->error = "内存不足"; return 2; }
+    Image2DAlg_LineFit st = {};
+    const int rc = Image2DAlg_FitLine(xy, src->count, &st);
+    free(xy);
+    if (rc == -3) { out->error = "直线拟合失败（点数不足）"; return 3; }
+    if (rc != 0) { out->error = "直线拟合失败"; return 2; }
+
+    static char msg[160];
+    snprintf(msg, sizeof(msg), "count=1; [0]c=(%.1f,%.1f) dir=(%.3f,%.3f) rms=%.3f",
+             st.x0, st.y0, st.vx, st.vy, st.rms);
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：FAST 角点检测（node.json: alg.image2d.fast_features） ----------------
+// 参数（按声明顺序）：
+//   threshold  int  默认 20  [1,255]  圆周连续像素比较的灰度差阈值（典型 10~40）
+//   nonmax     int  默认 1   [0,1]    3x3 非极大值抑制开关（1 = 开启去重）
+// 输出：标注图（输入克隆叠加角点绿色十字，同 Harris 画法）+ 点集点云（z=0，
+//       供下游 corner_sub_pix/拟合类节点取用，corner_sub_pix 双输出同款）。
+// 消息通道："count=N; [i](x,y); ..."（900 字节截断；无检出 count=0 属正常）。
+// 错误码：1 输入未连线；2 检测失败/内存不足；3 参数非法（threshold <= 0）。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiFastFeatures(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 1 || !in->images) { out->error = "输入未连线"; return 1; }
+    int threshold = 20, nonmax = 1;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) threshold = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 1)) nonmax = p->i;
+
+    Image2DAlg_Image input = CoreInputFrom(in->images[0]);
+    Image2DAlg_Point2f* corners = NULL;
+    int count = 0;
+    const int rc = Image2DAlg_FastFeatures(&input, threshold, nonmax, &corners, &count);
+    if (rc == -3) { out->error = "FAST 检测失败（threshold 需 > 0）"; return 3; }
+    if (rc != 0) { out->error = "FAST 检测失败"; return 2; }
+
+    // 点集 -> z=0 点云输出（corner_sub_pix 同款：先组点云，失败路径回收 corners）
+    float* xy = (float*)malloc(sizeof(float) * (size_t)(count > 0 ? count : 1) * 2);
+    if (!xy) { Image2DAlg_FreePoint2f(corners); out->error = "内存不足"; return 2; }
+    for (int i = 0; i < count; ++i) {
+        xy[i * 2]     = corners[i].x;
+        xy[i * 2 + 1] = corners[i].y;
+    }
+    out->clouds = AllocCloudOutZ0(xy, count);
+    free(xy);
+    if (!out->clouds) { Image2DAlg_FreePoint2f(corners); out->error = "内存不足"; return 2; }
+    out->cloudCount = 1;
+
+    // 标注图：输入克隆叠加角点绿色十字（同 Harris 画法），并在释放前组消息
+    cv::Mat vis(in->images[0].height, in->images[0].width, CV_8UC4,
+                (void*)in->images[0].bgra);
+    cv::Mat drawn = vis.clone();
+    for (int i = 0; i < count; ++i) {
+        const cv::Point c((int)std::lround(corners[i].x), (int)std::lround(corners[i].y));
+        cv::line(drawn, c + cv::Point(-4, 0), c + cv::Point(4, 0), cv::Scalar(0, 255, 0, 255), 1);
+        cv::line(drawn, c + cv::Point(0, -4), c + cv::Point(0, 4), cv::Scalar(0, 255, 0, 255), 1);
+    }
+
+    static char msg[900];
+    int pos = snprintf(msg, sizeof(msg), "count=%d", count);
+    for (int i = 0; i < count && pos < (int)sizeof(msg) - 48; ++i)
+        pos += snprintf(msg + pos, sizeof(msg) - (size_t)pos,
+                        "; [%d](%.1f,%.1f)", i, corners[i].x, corners[i].y);
+    Image2DAlg_FreePoint2f(corners);
+
+    const size_t n = (size_t)drawn.rows * drawn.cols * 4;
+    uint8_t* px = (uint8_t*)malloc(n);
+    if (!px) {
+        free(out->clouds[0].xyz); free(out->clouds);
+        out->clouds = NULL; out->cloudCount = 0;
+        out->error = "内存不足"; return 2;
+    }
+    memcpy(px, drawn.data, n);
+    out->images = AllocImageOut(drawn.cols, drawn.rows, px);
+    if (!out->images) {
+        free(px);
+        free(out->clouds[0].xyz); free(out->clouds);
+        out->clouds = NULL; out->cloudCount = 0;
+        out->error = "内存不足"; return 2;
+    }
+    out->imageCount = 1;
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：特征对位（node.json: alg.image2d.feature_align） ----------------
+// 一站式特征链路（ORBAlign 泛化版）：内部串联 FastFeatures → ComputeDescriptors ×2 →
+// MatchFeatures → EstimateAffinePartial / FindHomography——描述子为二进制块无法在
+// 节点间流转（ABI v1 只有 image/cloud/消息通道），故检测/描述/匹配不拆节点。
+// 输入 2 张图像：images[0]=基准图（in1），images[1]=待对位图（in2）。
+// 参数（按声明顺序）：
+//   type             int     默认 0   [0,3]     0=ORB 1=BRISK 2=AKAZE 3=SIFT
+//   n_features       int     默认 500 [50,2000]  仅 ORB 有效（同 ORBAlign）；其他类型忽略
+//   ratio            number  默认 0.7 [0.1,0.9]  Lowe 比率测试系数
+//   motion           int     默认 0   [0,1]      0=部分仿射 4DOF（旋转+等比缩放+平移，工业对位推荐）
+//                                           1=单应 8DOF（平面/大视角透视）
+//   ransac_threshold number  默认 3   [0.1,100]  RANSAC 重投影阈值（像素）
+//   fast_threshold   int     默认 20  [1,255]    内部 FAST 检测的灰度差阈值
+// 输出：待对位图克隆叠加匹配连线（两图同尺寸时）+ 匹配点十字（orb_align 画法）。
+// 消息通道："inliers=N matches=M m=[..6 值..]" / "h=[..9 值..]"（in1 → in2 方向）。
+// 错误码：1 输入不足；2 特征/匹配/几何估计不足（-2，平坦图属正常）；3 参数非法。
+
+// FAST 检出 + 剔除贴边关键点：核心层 ORB compute 对贴边点（邻域不足）会整批
+// 判 -2，一站式节点与 ORBAlign 一致在入口消化（fast_features 节点输出仍忠实
+// 于 C API 原始结果，不受影响）。剔除边距取 8px（核心层 ORB edgeThreshold 同值）。
+// 保留口径：坐标 x,y ∈ [8, w-1-8]/[8, h-1-8]——关键点四周都有完整 8px 邻域，
+// 两侧对称（左右各留 8、上下各留 8），与核心层描述子计算的可算范围严格一致。
+// 原地压缩实现（不二次分配）：kept 直接覆写 *out_pts 前段，块所有权仍归
+// FreePoint2f，调用方失败路径只需一次 FreePoint2f。
+static int DetectTrimmedFast(const Image2DAlg_Image* img, int fast_threshold,
+                             Image2DAlg_Point2f** out_pts, int* out_count) {
+    const int margin = 8;
+    const int rc = Image2DAlg_FastFeatures(img, fast_threshold, 1, out_pts, out_count);
+    if (rc != 0 || !*out_pts || *out_count <= 0) return rc;
+    const int w = img->width, h = img->height;
+    int kept = 0;
+    for (int i = 0; i < *out_count; ++i) {
+        const float x = (*out_pts)[i].x, y = (*out_pts)[i].y;
+        if (x >= (float)margin && y >= (float)margin &&
+            x <= (float)(w - 1 - margin) && y <= (float)(h - 1 - margin)) {
+            (*out_pts)[kept++] = (*out_pts)[i];   // 原地压缩（分配块仍归 FreePoint2f 释放）
+        }
+    }
+    *out_count = kept;
+    return 0;
+}
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiFeatureAlign(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 2 || !in->images || !in->images[1].bgra) {
+        out->error = "需要 2 个图像输入（基准图/待对位图）";
+        return 1;
+    }
+    int type = 0, n_features = 500, motion = 0, fast_threshold = 20;
+    double ratio = 0.7, ransac_threshold = 3.0;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) type = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 1)) n_features = p->i;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) ratio = p->d;
+    if (const AlgoCParam* p = FindParam(in, 1, 2)) motion = p->i;
+    if (const AlgoCParam* p = FindParam(in, 0, 1)) ransac_threshold = p->d;
+    if (const AlgoCParam* p = FindParam(in, 1, 3)) fast_threshold = p->i;
+    if (type < 0 || type > 3) { out->error = "type 仅支持 0=ORB/1=BRISK/2=AKAZE/3=SIFT"; return 3; }
+    if (motion != 0 && motion != 1) {
+        out->error = "motion 仅支持 0=部分仿射(4DOF)/1=单应(8DOF)"; return 3;
+    }
+
+    Image2DAlg_Image i1 = CoreInputFrom(in->images[0]);
+    Image2DAlg_Image i2 = CoreInputFrom(in->images[1]);
+
+    // 两侧各自 FAST 检出（非极大值抑制开启）+ 贴边剔除
+    Image2DAlg_Point2f* pts1 = NULL; int n1 = 0;
+    Image2DAlg_Point2f* pts2 = NULL; int n2 = 0;
+    int rc = DetectTrimmedFast(&i1, fast_threshold, &pts1, &n1);
+    if (rc == -3) { out->error = "FAST 阈值非法（fast_threshold 需 > 0）"; return 3; }
+    if (rc != 0) { out->error = "基准图特征检测失败"; return 2; }
+    rc = DetectTrimmedFast(&i2, fast_threshold, &pts2, &n2);
+    if (rc == -3) {
+        Image2DAlg_FreePoint2f(pts1);
+        out->error = "FAST 阈值非法（fast_threshold 需 > 0）"; return 3;
+    }
+    if (rc != 0) { Image2DAlg_FreePoint2f(pts1); out->error = "待对位图特征检测失败"; return 2; }
+    if (n1 == 0 || n2 == 0) {
+        Image2DAlg_FreePoint2f(pts1);
+        Image2DAlg_FreePoint2f(pts2);
+        out->error = "特征不足（平坦图或 fast_threshold 过高，属正常）"; return 2;
+    }
+
+    Image2DAlg_Descriptors d1 = {}, d2 = {};
+    rc = Image2DAlg_ComputeDescriptors(&i1, pts1, n1, type, n_features, &d1);
+    if (rc == -2) {
+        Image2DAlg_FreePoint2f(pts1); Image2DAlg_FreePoint2f(pts2);
+        out->error = "基准图描述子计算失败（关键点贴边或图像过小）"; return 2;
+    }
+    if (rc == -3) {
+        Image2DAlg_FreePoint2f(pts1); Image2DAlg_FreePoint2f(pts2);
+        out->error = "描述子类型非法（type 0~3）"; return 3;
+    }
+    if (rc != 0) {
+        Image2DAlg_FreePoint2f(pts1); Image2DAlg_FreePoint2f(pts2);
+        out->error = "基准图描述子计算失败"; return 2;
+    }
+    rc = Image2DAlg_ComputeDescriptors(&i2, pts2, n2, type, n_features, &d2);
+    if (rc != 0) {
+        Image2DAlg_FreeDescriptors(&d1);
+        Image2DAlg_FreePoint2f(pts1); Image2DAlg_FreePoint2f(pts2);
+        out->error = (rc == -2) ? "待对位图描述子计算失败（关键点贴边或图像过小）"
+                                : "待对位图描述子计算失败";
+        return 2;
+    }
+
+    Image2DAlg_OrbMatch* matches = NULL;
+    int count = 0;
+    rc = Image2DAlg_MatchFeatures(&d1, &d2, pts1, pts2, ratio, &matches, &count);
+    Image2DAlg_FreeDescriptors(&d1);
+    Image2DAlg_FreeDescriptors(&d2);
+    Image2DAlg_FreePoint2f(pts1);
+    Image2DAlg_FreePoint2f(pts2);
+    if (rc == -2) { out->error = "匹配不足（< 2 对，弱纹理图属正常）"; return 2; }
+    if (rc == -3) { out->error = "匹配失败（ratio 须在 (0,1)）"; return 3; }
+    if (rc != 0) { out->error = "匹配失败"; return 2; }
+
+    double m6[6] = { 0 }, h9[9] = { 0 };
+    int inliers = 0;
+    rc = (motion == 0)
+        ? Image2DAlg_EstimateAffinePartial(matches, count, ransac_threshold, m6, &inliers)
+        : Image2DAlg_FindHomography(matches, count, ransac_threshold, h9, &inliers);
+    if (rc == -2) {
+        Image2DAlg_FreeOrbMatches(matches);
+        out->error = "几何估计失败（匹配对数不足或分布退化）"; return 2;
+    }
+    if (rc == -3) {
+        Image2DAlg_FreeOrbMatches(matches);
+        out->error = "几何估计失败（ransac_threshold 需 > 0）"; return 3;
+    }
+    if (rc != 0) {
+        Image2DAlg_FreeOrbMatches(matches);
+        out->error = "几何估计失败"; return 2;
+    }
+
+    // 标注图：待对位图克隆 + 匹配连线（x1/y1 为基准图坐标，两图同尺寸时可在
+    // 待对位图系内连线展示位移；尺寸不同退化为仅画匹配点十字——orb_align 画法）
+    cv::Mat vis(in->images[1].height, in->images[1].width, CV_8UC4,
+                (void*)in->images[1].bgra);
+    cv::Mat drawn = vis.clone();
+    const bool same_size = in->images[0].width == in->images[1].width &&
+                           in->images[0].height == in->images[1].height;
+    for (int i = 0; i < count; ++i) {
+        const cv::Point a((int)std::lround(matches[i].x1), (int)std::lround(matches[i].y1));
+        const cv::Point b((int)std::lround(matches[i].x2), (int)std::lround(matches[i].y2));
+        if (same_size)
+            cv::line(drawn, a, b, cv::Scalar(0, 255, 0, 255), 1, cv::LINE_AA);
+        cv::line(drawn, b + cv::Point(-4, 0), b + cv::Point(4, 0), cv::Scalar(0, 255, 0, 255), 1);
+        cv::line(drawn, b + cv::Point(0, -4), b + cv::Point(0, 4), cv::Scalar(0, 255, 0, 255), 1);
+    }
+
+    static char msg[256];
+    if (motion == 0)
+        snprintf(msg, sizeof(msg),
+                 "inliers=%d matches=%d m=[%.4f %.4f %.4f; %.4f %.4f %.4f]",
+                 inliers, count, m6[0], m6[1], m6[2], m6[3], m6[4], m6[5]);
+    else
+        snprintf(msg, sizeof(msg),
+                 "inliers=%d matches=%d h=[%.4f %.4f %.4f; %.4f %.4f %.4f; %.4f %.4f %.4f]",
+                 inliers, count, h9[0], h9[1], h9[2], h9[3], h9[4], h9[5],
+                 h9[6], h9[7], h9[8]);
+    Image2DAlg_FreeOrbMatches(matches);
+
+    const size_t n = (size_t)drawn.rows * drawn.cols * 4;
+    uint8_t* px = (uint8_t*)malloc(n);
+    if (!px) { out->error = "内存不足"; return 2; }
+    memcpy(px, drawn.data, n);
+    out->images = AllocImageOut(drawn.cols, drawn.rows, px);
+    if (!out->images) { free(px); out->error = "内存不足"; return 2; }
+    out->imageCount = 1;
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：对应点变换估计（node.json: alg.image2d.estimate_transform） ----------------
+// 输入 2 个点集：clouds[0]=对应点 A（in1 侧），clouds[1]=对应点 B（in2 侧）——
+// 两组数量必须相等（一一对应），xy 取自 xyz（z 分量忽略，fit_circle 点集同款约定）。
+// 给已有外部对应点的调用方独立复用几何估计（与 feature_align 的内部链路解耦）。
+// 参数（按声明顺序）：
+//   motion           int     默认 0  [0,1]     0=部分仿射 4DOF / 1=单应 8DOF
+//   ransac_threshold number  默认 3  [0.1,100] RANSAC 重投影阈值（像素）
+// 输出：无端口（outputs 为空）；变换矩阵与内点数并入消息通道（match_shapes 同款）：
+//   "inliers=N pairs=M m=[..6 值..]" / "h=[..9 值..]"（A → B 方向）。
+// 错误码：1 输入不足（需 2 个点集）；2 点集为空/数量不等/几何估计失败（-2）；
+//         3 参数非法（motion 越界 / ransac_threshold <= 0）。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiEstimateTransform(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->cloudCount < 2 || !in->clouds || !in->clouds[1].xyz) {
+        out->error = "需要 2 个点集输入（对应点 A/对应点 B）"; return 1;
+    }
+    int motion = 0;
+    double ransac_threshold = 3.0;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) motion = p->i;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) ransac_threshold = p->d;
+    if (motion != 0 && motion != 1) {
+        out->error = "motion 仅支持 0=部分仿射(4DOF)/1=单应(8DOF)"; return 3;
+    }
+
+    const AlgoCCloud* a = &in->clouds[0];
+    const AlgoCCloud* b = &in->clouds[1];
+    if (a->count <= 0 || !a->xyz) { out->error = "对应点 A 为空"; return 2; }
+    if (b->count <= 0 || !b->xyz) { out->error = "对应点 B 为空"; return 2; }
+    if (a->count != b->count) { out->error = "两组对应点数量必须相等（一一对应）"; return 2; }
+
+    Image2DAlg_OrbMatch* matches =
+        (Image2DAlg_OrbMatch*)malloc(sizeof(Image2DAlg_OrbMatch) * (size_t)a->count);
+    if (!matches) { out->error = "内存不足"; return 2; }
+    for (int i = 0; i < a->count; ++i) {
+        matches[i].x1 = a->xyz[i * 3];
+        matches[i].y1 = a->xyz[i * 3 + 1];
+        matches[i].x2 = b->xyz[i * 3];
+        matches[i].y2 = b->xyz[i * 3 + 1];
+        matches[i].distance = 0.0;
+    }
+
+    double m6[6] = { 0 }, h9[9] = { 0 };
+    int inliers = 0;
+    const int rc = (motion == 0)
+        ? Image2DAlg_EstimateAffinePartial(matches, a->count, ransac_threshold, m6, &inliers)
+        : Image2DAlg_FindHomography(matches, a->count, ransac_threshold, h9, &inliers);
+    free(matches);
+    if (rc == -2) { out->error = "几何估计失败（点数不足 3/4 或共线退化）"; return 2; }
+    if (rc == -3) { out->error = "几何估计失败（ransac_threshold 需 > 0）"; return 3; }
+    if (rc != 0) { out->error = "几何估计失败"; return 2; }
+
+    static char msg[256];
+    if (motion == 0)
+        snprintf(msg, sizeof(msg),
+                 "inliers=%d pairs=%d m=[%.4f %.4f %.4f; %.4f %.4f %.4f]",
+                 inliers, a->count, m6[0], m6[1], m6[2], m6[3], m6[4], m6[5]);
+    else
+        snprintf(msg, sizeof(msg),
+                 "inliers=%d pairs=%d h=[%.4f %.4f %.4f; %.4f %.4f %.4f; %.4f %.4f %.4f]",
+                 inliers, a->count, h9[0], h9[1], h9[2], h9[3], h9[4], h9[5],
+                 h9[6], h9[7], h9[8]);
+    out->error = msg;
+    return 0;
+}
+
 } // extern "C"
+
+// =====================================================================
+// 2.2.0 新增族接入（2026-11-19，7 个入口，追加在文件尾部）：
+//   alg.image2d.blob_detect       —— BlobDetect（+FreeBlobFeatures）
+//   alg.image2d.detect_and_match  —— DetectAndMatch（一站式检测+描述+匹配）
+//   alg.image2d.optical_flow_lk   —— CalcOpticalFlowPyrLK（out_status 入口内预分配）
+//   alg.image2d.ecc_align         —— FindTransformECC（m 方向=模板坐标取 input(m·x)）
+//   alg.image2d.phase_correlate   —— PhaseCorrelate（b 相对 a 位移）
+//   alg.image2d.stereo_match      —— StereoMatch（out_disparity 入口内预分配）
+//   alg.image2d.solve_pnp         —— SolvePnP（点集×2 + camera_matrix text 先例）
+// 本段只做参数组装、错误码映射与消息拼装，不新增算法；text 多值参数沿用
+// manual_regist init_transform 的承载先例（ParseDoubleList 同款解析）。
+// =====================================================================
+
+// solve_pnp 的 cv::Rodrigues：calib3d 在 opencv_world440 内全含，主库
+// Image2DAlg_Ops.cpp 已包含同一头文件，无新增链接依赖。
+#include <opencv2/calib3d.hpp>
+
+// 逗号分隔 double 列表解析（Point3DAlg_comui.cpp ParseDoubleList 同款实现，
+// 两份拷贝行为必须保持一致——宿主 marshal 无参数名，文本参数格式即契约）：
+//   NULL/空串            -> 0（可选参数缺省口径，如 solve_pnp 无畸变）
+//   连续/首尾分隔符       -> 跳过（"1,,2," 与 "1,2" 等价；容错宿主/人工拼接尾巴）
+//   非数字 token          -> -1（如 "1,2,abc"——数量校验前先报坏值，rc=3）
+//   值个数超 max_n        -> -1（数量不符统一 -1，由调用方换算成 rc=3，
+//                            保证 camera_matrix 9 值 / dist_coeffs 4/5/8/12/14
+//                            等校验不越界读 vals）
+// 返回值 n：实际解析个数，供调用方做"数量必须恰好 N"校验。
+static int ParseDoubleList(const char* text, double* vals, int max_n) {
+    if (!text || !text[0]) return 0;
+    int n = 0;
+    const char* p = text;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' ||
+               *p == ',' || *p == ';' || *p == '[' || *p == ']') ++p;
+        if (!*p) break;
+        char* end = nullptr;
+        const double v = strtod(p, &end);
+        if (end == p) return -1;   // 非数字 token
+        if (n >= max_n) return -1; // 超出容量（数量不符）
+        vals[n++] = v;
+        p = end;
+    }
+    return n;
+}
+
+extern "C" {
+
+// ---------------- 算子入口：斑点检测（node.json: alg.image2d.blob_detect） ----------------
+// 参数（按声明顺序）：
+//   min_area        number  默认 100 [0,1e7]  面积过滤下限（像素²；<=0 = 无下限）
+//   max_area        number  默认 0   [0,1e7]  面积过滤上限（<=0 = 不设上限）
+//   min_circularity number  默认 0   [0,1]    最小圆度（<=0 显式关闭圆度过滤）
+//   min_convexity   number  默认 0   [0,1]    最小凸性（<=0 显式关闭凸性过滤）
+// 输出：输入图克隆叠加斑点绿色圆周标注（cx,cy,r）。
+// 消息通道："count=N; [i]c=(cx,cy) r=R; ..."（900 字节截断；无检出 count=0 属正常）。
+// 边界：快速定位（多阈值聚合+形状过滤）；精密测量接 fit_circles（逐轮廓最小二乘）。
+// 错误码：1 输入未连线；2 检测失败/内存不足；3 参数/通道不支持。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiBlobDetect(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 1 || !in->images) { out->error = "输入未连线"; return 1; }
+    double min_area = 100.0, max_area = 0.0, min_circ = 0.0, min_conv = 0.0;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) min_area = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 1)) max_area = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 2)) min_circ = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 3)) min_conv = p->d;
+
+    Image2DAlg_Image input = CoreInputFrom(in->images[0]);
+    Image2DAlg_BlobFeature* blobs = NULL;
+    int count = 0;
+    const int rc = Image2DAlg_BlobDetect(&input, min_area, max_area, min_circ, min_conv,
+                                         &blobs, &count);
+    if (rc == -3) { out->error = "斑点检测失败（通道不支持）"; return 3; }
+    if (rc != 0) { out->error = "斑点检测失败"; return 2; }
+
+    cv::Mat vis(in->images[0].height, in->images[0].width, CV_8UC4,
+                (void*)in->images[0].bgra);
+    cv::Mat drawn = vis.clone();
+    for (int i = 0; i < count; ++i)
+        cv::circle(drawn, cv::Point2f(blobs[i].x, blobs[i].y), blobs[i].radius,
+                   cv::Scalar(0, 255, 0, 255), 1, cv::LINE_AA);
+
+    static char msg[900];
+    int pos = snprintf(msg, sizeof(msg), "count=%d", count);
+    for (int i = 0; i < count && pos < (int)sizeof(msg) - 64; ++i)
+        pos += snprintf(msg + pos, sizeof(msg) - (size_t)pos,
+                        "; [%d]c=(%.1f,%.1f) r=%.1f", i, blobs[i].x, blobs[i].y, blobs[i].radius);
+    Image2DAlg_FreeBlobFeatures(blobs);
+
+    const size_t n = (size_t)drawn.rows * drawn.cols * 4;
+    uint8_t* px = (uint8_t*)malloc(n);
+    if (!px) { out->error = "内存不足"; return 2; }
+    memcpy(px, drawn.data, n);
+    out->images = AllocImageOut(drawn.cols, drawn.rows, px);
+    if (!out->images) { free(px); out->error = "内存不足"; return 2; }
+    out->imageCount = 1;
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：一站式检测匹配（node.json: alg.image2d.detect_and_match） ----------------
+// DetectAndMatch = 检测（detectAndCompute）+ 描述 + 匹配（BFMatcher kNN + Lowe 比率）
+// 一站完成，复用 OrbMatch 结构——给不想管理描述子生命周期的调用方。
+// 与 feature_align 的边界：feature_align（FAST 检出 → 任意 type 描述子 → 匹配 →
+// RANSAC 几何估计，输出变换矩阵）；本节点泛化检测器但不做几何估计、不输出矩阵，
+// 需要矩阵时接 feature_align，或把匹配对交 estimate_transform 二次求解。
+// 输入 2 张图像：images[0]=基准图（in1），images[1]=待对位图（in2）。
+// 参数（按声明顺序）：
+//   type        int     默认 0   [0,3]      0=ORB 1=BRISK 2=AKAZE 3=SIFT
+//   n_features  int     默认 500 [50,2000]  仅 ORB（<=0 取默认 500）/SIFT（<=0 不限）有效；
+//                                           BRISK/AKAZE 无上限参数，忽略
+//   ratio       number  默认 0.7 [0.1,0.9]  Lowe 比率测试系数
+// 输出：待对位图克隆叠加匹配连线（两图同尺寸时）+ 匹配点十字（feature_align 画法）。
+// 消息通道："count=N type=K; [i](x1,y1)->(x2,y2) d=D; ..."（900 字节截断）。
+// 错误码：1 输入不足；2 特征/匹配不足（-2，平坦图属正常）；3 参数非法。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiDetectAndMatch(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 2 || !in->images || !in->images[1].bgra) {
+        out->error = "需要 2 个图像输入（基准图/待对位图）";
+        return 1;
+    }
+    int type = 0, n_features = 500;
+    double ratio = 0.7;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) type = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 1)) n_features = p->i;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) ratio = p->d;
+    if (type < 0 || type > 3) { out->error = "type 仅支持 0=ORB/1=BRISK/2=AKAZE/3=SIFT"; return 3; }
+    if (ratio <= 0.0 || ratio >= 1.0) { out->error = "ratio 须在 (0,1)（典型 0.7~0.8）"; return 3; }
+
+    Image2DAlg_Image i1 = CoreInputFrom(in->images[0]);
+    Image2DAlg_Image i2 = CoreInputFrom(in->images[1]);
+    Image2DAlg_OrbMatch* matches = NULL;
+    int count = 0;
+    const int rc = Image2DAlg_DetectAndMatch(&i1, &i2, type, n_features, ratio,
+                                             &matches, &count);
+    if (rc == -2) { out->error = "特征/匹配不足（任一图无检出或比率测试后 < 2 对，平坦图属正常）"; return 2; }
+    if (rc == -3) { out->error = "检测匹配失败（type 0~3、ratio∈(0,1)）"; return 3; }
+    if (rc != 0) { out->error = "检测匹配失败"; return 2; }
+
+    cv::Mat vis(in->images[1].height, in->images[1].width, CV_8UC4,
+                (void*)in->images[1].bgra);
+    cv::Mat drawn = vis.clone();
+    const bool same_size = in->images[0].width == in->images[1].width &&
+                           in->images[0].height == in->images[1].height;
+    for (int i = 0; i < count; ++i) {
+        const cv::Point a((int)std::lround(matches[i].x1), (int)std::lround(matches[i].y1));
+        const cv::Point b((int)std::lround(matches[i].x2), (int)std::lround(matches[i].y2));
+        if (same_size)
+            cv::line(drawn, a, b, cv::Scalar(0, 255, 0, 255), 1, cv::LINE_AA);
+        cv::line(drawn, b + cv::Point(-4, 0), b + cv::Point(4, 0), cv::Scalar(0, 255, 0, 255), 1);
+        cv::line(drawn, b + cv::Point(0, -4), b + cv::Point(0, 4), cv::Scalar(0, 255, 0, 255), 1);
+    }
+
+    static char msg[900];
+    int pos = snprintf(msg, sizeof(msg), "count=%d type=%d", count, type);
+    for (int i = 0; i < count && pos < (int)sizeof(msg) - 96; ++i)
+        pos += snprintf(msg + pos, sizeof(msg) - (size_t)pos,
+                        "; [%d](%.1f,%.1f)->(%.1f,%.1f) d=%.1f",
+                        i, matches[i].x1, matches[i].y1, matches[i].x2, matches[i].y2,
+                        matches[i].distance);
+    Image2DAlg_FreeOrbMatches(matches);
+
+    const size_t n = (size_t)drawn.rows * drawn.cols * 4;
+    uint8_t* px = (uint8_t*)malloc(n);
+    if (!px) { out->error = "内存不足"; return 2; }
+    memcpy(px, drawn.data, n);
+    out->images = AllocImageOut(drawn.cols, drawn.rows, px);
+    if (!out->images) { free(px); out->error = "内存不足"; return 2; }
+    out->imageCount = 1;
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：LK 光流跟踪（node.json: alg.image2d.optical_flow_lk） ----------------
+// 金字塔 LK 光流（cv::calcOpticalFlowPyrLK）：视频/序列帧间点跟踪。
+// 输入：images[0]=前帧，images[1]=后帧（尺寸须一致），clouds[0]=初始点（xy，z 忽略，>=1 点）。
+// 参数（按声明顺序）：
+//   win_size   int  默认 21 [5,101]  搜索窗边长（<=0 -> -3；偶数核心层自动 +1）
+//   max_level  int  默认 3  [0,10]  金字塔层数（<0 -> -3）
+// out_status 数组在入口内 malloc 预分配（count 字节，C API 一级指针契约——
+// 本库不分配该缓冲），统计 tracked/lost 后 free。
+// 输出：跟踪成功的点集点云（z=0，corner_sub_pix 同款；失败点位置无意义，不输出）。
+// 消息通道："tracked=N lost=M total=K; [i](x,y); ..."（900 字节截断）。
+// 错误码：1 输入未连线（2 图 + 1 点集）；2 初始点为空/跟踪失败/内存不足；3 参数非法。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiOpticalFlowLk(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 2 || !in->images || !in->images[1].bgra) {
+        out->error = "需要 2 个图像输入（前帧/后帧）"; return 1;
+    }
+    if (in->cloudCount < 1 || !in->clouds || !in->clouds[0].xyz) {
+        out->error = "需要点集输入（初始点）"; return 1;
+    }
+    int win_size = 21, max_level = 3;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) win_size = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 1)) max_level = p->i;
+    if (win_size <= 0 || max_level < 0) {
+        out->error = "参数非法（win_size 须 > 0，max_level 须 >= 0）"; return 3;
+    }
+
+    const AlgoCCloud* src = &in->clouds[0];
+    const int count = src->count;
+    if (count < 1) { out->error = "初始点为空"; return 2; }
+
+    Image2DAlg_Point2f* pts = (Image2DAlg_Point2f*)malloc(sizeof(Image2DAlg_Point2f) * (size_t)count);
+    unsigned char* status = (unsigned char*)malloc((size_t)count);   // out_status 调用方预分配
+    if (!pts || !status) { free(pts); free(status); out->error = "内存不足"; return 2; }
+    for (int i = 0; i < count; ++i) {
+        pts[i].x = src->xyz[i * 3];
+        pts[i].y = src->xyz[i * 3 + 1];
+    }
+
+    Image2DAlg_Image prev = CoreInputFrom(in->images[0]);
+    Image2DAlg_Image next = CoreInputFrom(in->images[1]);
+    Image2DAlg_Point2f* tracked = NULL;
+    const int rc = Image2DAlg_CalcOpticalFlowPyrLK(&prev, &next, pts, count,
+                                                   win_size, max_level, &tracked, status);
+    free(pts);
+    if (rc == -3) {
+        free(status);
+        out->error = "光流跟踪失败（win_size/max_level 非法、两帧尺寸须一致或初始点为空）";
+        return 3;
+    }
+    if (rc != 0) { free(status); out->error = "光流跟踪失败"; return 2; }
+
+    int tracked_n = 0;
+    for (int i = 0; i < count; ++i)
+        if (status[i]) ++tracked_n;
+
+    // 仅跟踪成功的点 -> z=0 点云输出（corner_sub_pix 同款：先组点云再释放 tracked）
+    float* xy = (float*)malloc(sizeof(float) * (size_t)(tracked_n > 0 ? tracked_n : 1) * 2);
+    if (!xy) {
+        free(status); Image2DAlg_FreePoint2f(tracked);
+        out->error = "内存不足"; return 2;
+    }
+    int k = 0;
+    for (int i = 0; i < count; ++i) {
+        if (!status[i]) continue;
+        xy[k * 2]     = tracked[i].x;
+        xy[k * 2 + 1] = tracked[i].y;
+        ++k;
+    }
+    out->clouds = AllocCloudOutZ0(xy, tracked_n);
+    free(xy);
+    if (!out->clouds) {
+        free(status); Image2DAlg_FreePoint2f(tracked);
+        out->error = "内存不足"; return 2;
+    }
+    out->cloudCount = 1;
+
+    static char msg[900];
+    int pos = snprintf(msg, sizeof(msg), "tracked=%d lost=%d total=%d",
+                       tracked_n, count - tracked_n, count);
+    k = 0;
+    for (int i = 0; i < count && pos < (int)sizeof(msg) - 48; ++i) {
+        if (!status[i]) continue;
+        pos += snprintf(msg + pos, sizeof(msg) - (size_t)pos,
+                        "; [%d](%.1f,%.1f)", k, tracked[i].x, tracked[i].y);
+        ++k;
+    }
+    free(status);
+    Image2DAlg_FreePoint2f(tracked);
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：ECC 图像对齐（node.json: alg.image2d.ecc_align） ----------------
+// ECC 迭代最大化增强相关系数（cv::findTransformECC）：亚像素精度、对光照变化较稳。
+// 输入 2 张图像：images[0]=模板图（templ），images[1]=待配准图（input，尺寸须一致）。
+// 参数（按声明顺序）：
+//   motion    int     默认 1    [0,2]       0=平移(2x3) 1=仿射(2x3) 2=单应(3x3)
+//                                           （注意与 cv::MOTION_* 原生枚举不同——
+//                                           本 API 未暴露欧氏模型）
+//   max_iters int     默认 50   [1,500]     迭代上限
+//   epsilon   number  默认 1e-5 [1e-9,0.1]  收敛阈值（相邻迭代相关系数增量）
+// 输出：无端口（outputs 为空）；m 方向 = 模板坐标 x 处取 input(m·x)——即
+//   warpAffine(input, m, WARP_INVERSE_MAP) 可将 input 对齐到 templ（单应接
+//   WarpPerspective 同理），矩阵与相关系数并入消息通道（region_stats 先例）：
+//   "motion=K corr=%.4f m=[..6 或 9 值..]"。
+// 错误码：1 输入不足；2 不收敛/相关性不足（-2，两图无结构/形变过大属正常，可重试）；
+//         3 参数非法（motion/迭代/epsilon 越界或两图尺寸不一致）。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiEccAlign(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 2 || !in->images || !in->images[1].bgra) {
+        out->error = "需要 2 个图像输入（模板图/待配准图）"; return 1;
+    }
+    int motion = 1, max_iters = 50;
+    double epsilon = 1e-5;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) motion = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 1)) max_iters = p->i;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) epsilon = p->d;
+    if (motion < 0 || motion > 2) {
+        out->error = "motion 仅支持 0=平移(2x3)/1=仿射(2x3)/2=单应(3x3)"; return 3;
+    }
+    if (max_iters < 1 || epsilon <= 0.0) {
+        out->error = "参数非法（max_iters >= 1，epsilon > 0）"; return 3;
+    }
+
+    Image2DAlg_Image tpl = CoreInputFrom(in->images[0]);
+    Image2DAlg_Image inp = CoreInputFrom(in->images[1]);
+    double m[9] = { 0 };
+    double corr = 0.0;
+    const int rc = Image2DAlg_FindTransformECC(&tpl, &inp, motion, max_iters, epsilon,
+                                               m, &corr);
+    if (rc == -2) { out->error = "ECC 不收敛或相关性不足（两图无结构/形变过大，属正常可重试）"; return 2; }
+    if (rc == -3) { out->error = "ECC 对齐失败（motion 0~2、max_iters>=1、epsilon>0、两图尺寸须一致）"; return 3; }
+    if (rc != 0) { out->error = "ECC 对齐失败"; return 2; }
+
+    static char msg[400];
+    if (motion == 2)
+        snprintf(msg, sizeof(msg),
+                 "motion=2 corr=%.4f m=[%.6f %.6f %.6f; %.6f %.6f %.6f; %.6f %.6f %.6f] "
+                 "(模板坐标取 input(m·x)，WARP_INVERSE_MAP)",
+                 corr, m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]);
+    else
+        snprintf(msg, sizeof(msg),
+                 "motion=%d corr=%.4f m=[%.6f %.6f %.6f; %.6f %.6f %.6f] "
+                 "(模板坐标取 input(m·x)，WARP_INVERSE_MAP)",
+                 motion, corr, m[0], m[1], m[2], m[3], m[4], m[5]);
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：相位相关平移估计（node.json: alg.image2d.phase_correlate） ----------------
+// FFT 频域互功率谱相位斜率（cv::phaseCorrelate）：对光照/亮度变化极稳、亚像素精度。
+// 输入 2 张图像：images[0]=基准图（a），images[1]=平移后图（b，尺寸须一致）。
+// 参数：无。
+// 输出：无端口（outputs 为空）；平移量与峰值响应并入消息通道（region_stats 先例）：
+//   "dx=%.3f dy=%.3f response=%.4f（b 相对 a 位移；response>0.3 可信）"。
+// 注：不启用窗口函数（cv 默认 noArray），强边缘效应场景先接模糊节点平滑。
+// 错误码：1 输入不足；2 计算失败；3 两图尺寸不一致。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiPhaseCorrelate(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 2 || !in->images || !in->images[1].bgra) {
+        out->error = "需要 2 个图像输入（基准图/平移后图）"; return 1;
+    }
+    Image2DAlg_Image a = CoreInputFrom(in->images[0]);
+    Image2DAlg_Image b = CoreInputFrom(in->images[1]);
+    double dx = 0.0, dy = 0.0, response = 0.0;
+    const int rc = Image2DAlg_PhaseCorrelate(&a, &b, &dx, &dy, &response);
+    if (rc == -3) { out->error = "相位相关失败（两图尺寸须一致）"; return 3; }
+    if (rc != 0) { out->error = "相位相关失败"; return 2; }
+
+    static char msg[160];
+    snprintf(msg, sizeof(msg), "dx=%.3f dy=%.3f response=%.4f（b 相对 a 位移；response>0.3 可信）",
+             dx, dy, response);
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：双目立体匹配（node.json: alg.image2d.stereo_match） ----------------
+// SGBM 半全局块匹配输出视差图（cv::StereoSGBM；配合 Image2DAlg_Calib.h 的立体
+// 校正结果可转深度）。
+// 输入 2 张图像：images[0]=左图，images[1]=右图（已校正灰度语义图，尺寸须一致；
+// 视差约定 = xL - xR >= 0）。
+// 参数（按声明顺序）：
+//   min_disparity   int  默认 0  [-128,128]  视差起点（可为负，通常 0）
+//   num_disparity   int  默认 64 [16,512]    视差搜索数（须为 16 的倍数，否则 -3）
+//   block_size      int  默认 11 [3,51]      匹配块边长（奇数，偶数自动补奇；
+//                                           P1/P2 按 8/32·block² 自动设定）
+// out_disparity 容器在入口内预分配（width/height 同左图、1 通道、malloc data 配
+// Image2DAlg_FreeImage——沿用 ToGray 的容器约定，核心层不新增 Free 函数）。
+// 输出：视差灰度图转 BGRA（像素值 = 整数视差，8U=/16 定标；无效视差 -> 0）。
+// 消息通道："min=K num=N block=B（像素值=整数视差，0=无效；左图 x<num 条带不可靠）"。
+// 错误码：1 输入不足；2 匹配失败/内存不足；3 参数非法（num 非 16 倍数、尺寸不一致）。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiStereoMatch(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 2 || !in->images || !in->images[1].bgra) {
+        out->error = "需要 2 个图像输入（左图/右图）"; return 1;
+    }
+    int min_disp = 0, num_disp = 64, block = 11;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) min_disp = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 1)) num_disp = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 2)) block = p->i;
+    if (num_disp <= 0 || num_disp % 16 != 0) {
+        out->error = "num_disparity 须为 16 的倍数且 > 0"; return 3;
+    }
+
+    Image2DAlg_Image left = CoreInputFrom(in->images[0]);
+    Image2DAlg_Image right = CoreInputFrom(in->images[1]);
+    Image2DAlg_Image disp = {};   // 一级指针契约：调用方预分配容器（w/h 同左图、1 通道）
+    disp.width = in->images[0].width;
+    disp.height = in->images[0].height;
+    disp.channels = 1;
+    disp.data = (unsigned char*)malloc((size_t)disp.width * (size_t)disp.height);
+    if (!disp.data) { out->error = "内存不足"; return 2; }
+
+    const int rc = Image2DAlg_StereoMatch(&left, &right, min_disp, num_disp, block, &disp);
+    if (rc == -3) {
+        Image2DAlg_FreeImage(&disp);
+        out->error = "立体匹配失败（num 须为 16 的倍数、两图尺寸须一致、out 容器不匹配）";
+        return 3;
+    }
+    if (rc != 0) { Image2DAlg_FreeImage(&disp); out->error = "立体匹配失败"; return 2; }
+
+    out->images = MakeBgraOut(disp);   // 1 通道视差 -> BGRA 显示
+    Image2DAlg_FreeImage(&disp);
+    if (!out->images) { out->error = "内存不足"; return 2; }
+    out->imageCount = 1;
+
+    static char msg[160];
+    snprintf(msg, sizeof(msg),
+             "min=%d num=%d block=%d（像素值=整数视差，0=无效；左图 x<num 条带不可靠）",
+             min_disp, num_disp, block);
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：2D-3D 位姿估计（node.json: alg.image2d.solve_pnp） ----------------
+// solvePnP（默认迭代法 SOLVEPNP_ITERATIVE）：已知 3D 物点与 2D 投影 + 相机内参求位姿。
+// 输入 2 个点集：clouds[0]=3D 物点（xyz），clouds[1]=2D 像点（xy，z 忽略）——
+// 数量相等、一一对应，各 >= 4 点（3 点欠定）。
+// 结构化参数沿用 manual_regist init_transform 的 text 承载先例：
+//   camera_matrix  内参 3x3 行主序 9 值逗号分隔：fx,0,cx,0,fy,cy,0,0,1
+//   dist_coeffs    畸变系数（可选，空 = 无畸变）：4/5/8/12/14 值逗号分隔
+// 输出：无端口（outputs 为空）；rvec/tvec 与 Rodrigues 旋转矩阵并入消息通道
+// （cv::Rodrigues 在入口内做——calib3d 随 world440 全含，主库同款）：
+//   "rvec=(...) tvec=(...) R=[..9 值..]（世界系→相机系）"。
+// 错误码：1 输入不足；2 点集为空/数量不等/点数不足（<4）/求解失败（-2 退化配置）；
+//         3 参数非法（矩阵文本解析失败 / 畸变系数个数不支持）。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiSolvePnp(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->cloudCount < 2 || !in->clouds || !in->clouds[1].xyz) {
+        out->error = "需要 2 个点集输入（3D 物点/2D 像点）"; return 1;
+    }
+    const AlgoCCloud* obj = &in->clouds[0];
+    const AlgoCCloud* img = &in->clouds[1];
+    if (obj->count <= 0 || !obj->xyz) { out->error = "3D 物点为空"; return 2; }
+    if (img->count <= 0 || !img->xyz) { out->error = "2D 像点为空"; return 2; }
+    if (obj->count != img->count) { out->error = "两组点集数量必须相等（一一对应）"; return 2; }
+    if (obj->count < 4) { out->error = "PnP 至少需要 4 个对应点（3 点欠定）"; return 2; }
+
+    double cam[9] = { 0 };
+    const AlgoCParam* pc_ = FindParam(in, 2, 0);
+    int n_cam = pc_ ? ParseDoubleList(pc_->s, cam, 9) : 0;
+    if (n_cam < 0) { out->error = "camera_matrix 含非数值内容（需逗号分隔数字）"; return 3; }
+    if (n_cam != 9) {
+        out->error = "camera_matrix 需 9 个数值（fx,0,cx,0,fy,cy,0,0,1，逗号分隔）";
+        return 3;
+    }
+
+    double dist[14] = { 0 };
+    int dist_n = 0;
+    const AlgoCParam* pd = FindParam(in, 2, 1);
+    if (pd && pd->s && pd->s[0]) {
+        dist_n = ParseDoubleList(pd->s, dist, 14);
+        if (dist_n < 0) { out->error = "dist_coeffs 含非数值内容（需逗号分隔数字）"; return 3; }
+        if (dist_n != 4 && dist_n != 5 && dist_n != 8 && dist_n != 12 && dist_n != 14) {
+            out->error = "dist_coeffs 支持 4/5/8/12/14 个值（逗号分隔；空 = 无畸变）";
+            return 3;
+        }
+    }
+
+    const int count = obj->count;
+    double* obj3 = (double*)malloc(sizeof(double) * (size_t)count * 3);
+    Image2DAlg_Point2f* pts2 =
+        (Image2DAlg_Point2f*)malloc(sizeof(Image2DAlg_Point2f) * (size_t)count);
+    if (!obj3 || !pts2) { free(obj3); free(pts2); out->error = "内存不足"; return 2; }
+    for (int i = 0; i < count; ++i) {
+        obj3[i * 3]     = obj->xyz[i * 3];
+        obj3[i * 3 + 1] = obj->xyz[i * 3 + 1];
+        obj3[i * 3 + 2] = obj->xyz[i * 3 + 2];
+        pts2[i].x = img->xyz[i * 3];
+        pts2[i].y = img->xyz[i * 3 + 1];
+    }
+
+    double rvec[3] = { 0 }, tvec[3] = { 0 };
+    const int rc = Image2DAlg_SolvePnP(obj3, pts2, count, cam,
+                                       dist_n > 0 ? dist : NULL, dist_n, rvec, tvec);
+    free(obj3);
+    free(pts2);
+    if (rc == -2) { out->error = "PnP 求解失败（点数不足或退化配置）"; return 2; }
+    if (rc != 0) { out->error = "PnP 求解失败"; return 2; }
+
+    // Rodrigues：旋转向量 -> 3x3 旋转矩阵（行主序）。
+    // 这是本入口唯一在适配层直接调用的 OpenCV 函数（其余都经 src/ C API 的
+    // try/catch 内壳）——cv::Mat 分配/Rodrigues 本体可能抛 cv::Exception，
+    // 异常穿透 extern "C" 边界进 ctypes 属未定义行为（宿主进程直接崩溃），
+    // 故就地捕获并按"求解失败"口径（rc=2）落地，正常路径行为不变。
+    cv::Mat R;
+    try {
+        const cv::Mat rv(3, 1, CV_64F, rvec);
+        cv::Rodrigues(rv, R);
+    } catch (const cv::Exception&) {
+        out->error = "PnP 求解失败（旋转向量换算旋转矩阵异常）";
+        return 2;
+    }
+
+    static char msg[400];
+    snprintf(msg, sizeof(msg),
+             "rvec=(%.6f, %.6f, %.6f) tvec=(%.6f, %.6f, %.6f) "
+             "R=[%.6f %.6f %.6f; %.6f %.6f %.6f; %.6f %.6f %.6f]（世界系→相机系）",
+             rvec[0], rvec[1], rvec[2], tvec[0], tvec[1], tvec[2],
+             R.at<double>(0, 0), R.at<double>(0, 1), R.at<double>(0, 2),
+             R.at<double>(1, 0), R.at<double>(1, 1), R.at<double>(1, 2),
+             R.at<double>(2, 0), R.at<double>(2, 1), R.at<double>(2, 2));
+    out->error = msg;
+    return 0;
+}
+
+} // extern "C"（2.2.0 追加段）
+
+// =====================================================================
+// 2.3.0 缺口族接入（2026-11-19，5 个入口，追加在文件尾部）：
+//   alg.image2d.warp_affine            —— WarpAffine（矩阵 text 参数，ParseDoubleList）
+//   alg.image2d.warp_perspective       —— WarpPerspective（9 值 text，同上）
+//   alg.image2d.find_matches_roi       —— FindAllMatchesROI（ROI 版多目标模板匹配）
+//   alg.image2d.match_template_pyramid —— MatchTemplatePyramid（Ex 的金字塔提速版）
+//   alg.image2d.convexity_defects      —— ConvexityDefects（轮廓凸性缺陷，点集入/点集出）
+// 本段为覆盖矩阵审计选出的 A 类缺口（ABI 可行且有真实管线价值），只做参数
+// 组装、错误码映射与消息拼装，不新增算法；矩阵 text 沿用 solve_pnp
+// camera_matrix 的承载先例（ParseDoubleList 同款解析）。
+// =====================================================================
+
+extern "C" {
+
+// ---------------- 算子入口：仿射变换（node.json: alg.image2d.warp_affine） ----------------
+// M 为前向映射（src→dst；cv::warpAffine 默认按 M 的逆采样，M 可直接取 estimate_transform / feature_align 消息里的
+// m=[...]（in1→in2 方向）或 cv::getRotationMatrix2D 等外部来源——
+// 宿主无消息自动接线时由用户把 6 值抄进 text 参数。
+// 参数（按声明顺序）：
+//   m              text  默认 "1,0,0,0,1,0"  2x3 行主序 6 值逗号分隔（非 6 值 → 3）
+//   out_width      int   默认 0  [0,10000]  输出画布宽（<=0 = 同输入宽）
+//   out_height     int   默认 0  [0,10000]  输出画布高（<=0 = 同输入高）
+//   interpolation  int   默认 1  [0,4]      0 近邻/1 线性/2 立方/3 面积/4 Lanczos4
+// 输出：BGRA（通道保持，越出源图部分填 0）。消息通道："out=WxH interp=K"。
+// 错误码：1 输入未连线；2 变换失败；3 矩阵非 6 个数值。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiWarpAffine(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 1 || !in->images) { out->error = "输入未连线"; return 1; }
+    int out_w = 0, out_h = 0, interp = 1;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) out_w = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 1)) out_h = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 2)) interp = p->i;
+
+    double m[6] = { 1, 0, 0, 0, 1, 0 };
+    const AlgoCParam* pm = FindParam(in, 2, 0);
+    const int n = pm ? ParseDoubleList(pm->s, m, 6) : 6;   // 缺省 = 恒等矩阵
+    if (n < 0) { out->error = "仿射矩阵 m 含非数值内容（需 2x3 行主序 6 个逗号分隔数字）"; return 3; }
+    if (n != 6) { out->error = "仿射矩阵 m 需 6 个数值（2x3 行主序，逗号分隔）"; return 3; }
+
+    if (out_w <= 0) out_w = in->images[0].width;    // 0 = 同输入尺寸（核心层要求 > 0）
+    if (out_h <= 0) out_h = in->images[0].height;
+
+    Image2DAlg_Image input = CoreInputFrom(in->images[0]);
+    Image2DAlg_Image result = {};
+    const int rc = Image2DAlg_WarpAffine(&input, m, out_w, out_h, interp, &result);
+    if (rc == -3) { out->error = "仿射变换失败（输出画布尺寸需 > 0）"; return 3; }
+    if (rc != 0) { out->error = "仿射变换失败"; return 2; }
+
+    out->images = MakeBgraOut(result);
+    Image2DAlg_FreeImage(&result);
+    if (!out->images) { out->error = "内存不足"; return 2; }
+    out->imageCount = 1;
+
+    static char msg[96];
+    snprintf(msg, sizeof(msg), "out=%dx%d interp=%d", out_w, out_h, interp);
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：透视变换（node.json: alg.image2d.warp_perspective） ----------------
+// dst(x,y) = 齐次投影 src(M·[x,y,1]ᵀ)。矩阵来源：estimate_transform（motion=1）
+// 消息里的 h=[...]（3x3 行主序，h[8] 归一为 1，可直接使用）或
+// cv::getPerspectiveTransform 等外部来源。
+// 参数（按声明顺序）：
+//   m              text  默认 "1,0,0,0,1,0,0,0,1"  3x3 行主序 9 值逗号分隔（非 9 值 → 3）
+//   out_width      int   默认 0  [0,10000]  输出画布宽（<=0 = 同输入宽）
+//   out_height     int   默认 0  [0,10000]  输出画布高（<=0 = 同输入高）
+//   interpolation  int   默认 1  [0,4]      同 warp_affine
+// 输出：BGRA（通道保持，越出源图部分填 0）。消息通道："out=WxH interp=K"。
+// 错误码：1 输入未连线；2 变换失败；3 矩阵非 9 个数值。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiWarpPerspective(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 1 || !in->images) { out->error = "输入未连线"; return 1; }
+    int out_w = 0, out_h = 0, interp = 1;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) out_w = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 1)) out_h = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 2)) interp = p->i;
+
+    double m[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    const AlgoCParam* pm = FindParam(in, 2, 0);
+    const int n = pm ? ParseDoubleList(pm->s, m, 9) : 9;   // 缺省 = 恒等矩阵
+    if (n < 0) { out->error = "透视矩阵 m 含非数值内容（需 3x3 行主序 9 个逗号分隔数字）"; return 3; }
+    if (n != 9) { out->error = "透视矩阵 m 需 9 个数值（3x3 行主序，逗号分隔）"; return 3; }
+
+    if (out_w <= 0) out_w = in->images[0].width;
+    if (out_h <= 0) out_h = in->images[0].height;
+
+    Image2DAlg_Image input = CoreInputFrom(in->images[0]);
+    Image2DAlg_Image result = {};
+    const int rc = Image2DAlg_WarpPerspective(&input, m, out_w, out_h, interp, &result);
+    if (rc == -3) { out->error = "透视变换失败（输出画布尺寸需 > 0）"; return 3; }
+    if (rc != 0) { out->error = "透视变换失败"; return 2; }
+
+    out->images = MakeBgraOut(result);
+    Image2DAlg_FreeImage(&result);
+    if (!out->images) { out->error = "内存不足"; return 2; }
+    out->imageCount = 1;
+
+    static char msg[96];
+    snprintf(msg, sizeof(msg), "out=%dx%d interp=%d", out_w, out_h, interp);
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：多目标模板匹配 ROI（node.json: alg.image2d.find_matches_roi） ----------------
+// find_matches 的 ROI 版：仅在 ROI 内提取多目标（NMS 在 ROI 内进行），命中左上角
+// 平移回全图坐标系——限区搜索既省时又屏蔽区外干扰；模板大于 ROI → 3。
+// 输入 2 张图像：images[0]=搜索图，images[1]=模板。
+// 参数（按声明顺序）：
+//   roi_x/roi_y      int     默认 0  [0,100000]  ROI 左上角
+//   roi_w/roi_h      int     默认 0  [0,100000]  ROI 尺寸（<=0 = 全图，同 find_matches）
+//   method           int     默认 5  [0,5]       cv::TemplateMatchModes
+//   score_threshold  number  默认 0.8 [0,1]      SQDIFF 系 = "得分<=阈值"命中，其余 = ">="
+//   max_matches      int     默认 10 [1,100]     最多输出数
+//   nms_radius       int     默认 5  [0,100]     非极大值抑制半径（像素，ROI 内）
+// 输出：搜索图克隆叠加各命中位置的模板外框（绿色）。
+// 消息通道："count=N; [i](x,y) score=S; ..."（左上角全图坐标，按得分从优到劣）。
+// 错误码：1 输入不足；2 匹配失败；3 参数非法/ROI 与图像无交集/模板大于 ROI。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiFindMatchesRoi(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 2 || !in->images || !in->images[1].bgra) {
+        out->error = "需要 2 个图像输入（搜索图/模板）";
+        return 1;
+    }
+    int rx = 0, ry = 0, rw = 0, rh = 0, method = 5, max_matches = 10, nms = 5;
+    double thr = 0.8;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) rx = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 1)) ry = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 2)) rw = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 3)) rh = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 4)) method = p->i;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) thr = p->d;
+    if (const AlgoCParam* p = FindParam(in, 1, 5)) max_matches = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 6)) nms = p->i;
+
+    Image2DAlg_Image img = CoreInputFrom(in->images[0]);
+    Image2DAlg_Image tpl = CoreInputFrom(in->images[1]);
+    Image2DAlg_Match* matches = NULL;
+    int count = 0;
+    const int rc = Image2DAlg_FindAllMatchesROI(&img, rx, ry, rw, rh, &tpl, method,
+                                                thr, max_matches, nms, &matches, &count);
+    if (rc == -3) { out->error = "匹配失败（参数非法、ROI 与图像无交集或模板大于 ROI）"; return 3; }
+    if (rc != 0) { out->error = "匹配失败"; return 2; }
+
+    cv::Mat vis(in->images[0].height, in->images[0].width, CV_8UC4,
+                (void*)in->images[0].bgra);
+    cv::Mat drawn = vis.clone();
+    for (int i = 0; i < count; ++i)
+        cv::rectangle(drawn, cv::Rect((int)matches[i].x, (int)matches[i].y,
+                                      in->images[1].width, in->images[1].height),
+                      cv::Scalar(0, 255, 0, 255), 1);
+
+    static char msg[900];
+    int pos = snprintf(msg, sizeof(msg), "count=%d", count);
+    for (int i = 0; i < count && pos < (int)sizeof(msg) - 64; ++i)
+        pos += snprintf(msg + pos, sizeof(msg) - (size_t)pos,
+                        "; [%d](%d,%d) score=%.4f",
+                        i, (int)matches[i].x, (int)matches[i].y, matches[i].score);
+    Image2DAlg_FreeMatches(matches);
+
+    const size_t n = (size_t)drawn.rows * drawn.cols * 4;
+    uint8_t* px = (uint8_t*)malloc(n);
+    if (!px) { out->error = "内存不足"; return 2; }
+    memcpy(px, drawn.data, n);
+    out->images = AllocImageOut(drawn.cols, drawn.rows, px);
+    if (!out->images) { free(px); out->error = "内存不足"; return 2; }
+    out->imageCount = 1;
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：金字塔对位（node.json: alg.image2d.match_template_pyramid） ----------------
+// MatchTemplateEx 的提速版（单目标）：顶层粗化图全范围粗搜 → 逐级回原图仅在
+// 粗解 ±1 步进邻域内精化，层数 2~3 典型提速 4~10 倍；输出语义与 match_template_ex
+// 一致（模板中心落点，已映射回原图坐标系）。
+// 输入 2 张图像：images[0]=搜索图，images[1]=模板。
+// 参数（按声明顺序）：
+//   method      int     默认 5   [0,5]      建议归一化类（SQDIFF 系得分跨层不可比）
+//   scale_lo    number  默认 0.8 [0.01,10]  尺度下限
+//   scale_hi    number  默认 1.2 [0.01,10]  尺度上限
+//   scale_step  number  默认 0.05 [0.001,10]
+//   angle_lo    number  默认 -15 [-360,360] 角度下限（度，逆时针）
+//   angle_hi    number  默认 15  [-360,360] 角度上限
+//   angle_step  number  默认 1   [0.01,90]
+//   levels      int     默认 2   [1,6]      金字塔层数（>6 自动截断；模板最小边 <12 或
+//                                           图像最小边 <32 时自动截断——小模板用 ex）
+// 输出：搜索图克隆叠加中心十字标注（绿色）。
+// 消息通道："score=%.4f c=(%.1f,%.1f) scale=%.2f angle=%.1f levels=%d"。
+// 注意：粗搜在低分辨率进行——弱纹理/低对比模板可能粗搜失准（先用 ex 验证）。
+// 错误码：1 输入不足；2 搜索失败；3 参数非法（levels<1 / 步进非法 / 全部尺度越界）。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiMatchTemplatePyramid(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 2 || !in->images || !in->images[1].bgra) {
+        out->error = "需要 2 个图像输入（搜索图/模板）";
+        return 1;
+    }
+    int method = 5, levels = 2;
+    double scale_lo = 0.8, scale_hi = 1.2, scale_step = 0.05;
+    double angle_lo = -15.0, angle_hi = 15.0, angle_step = 1.0;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) method = p->i;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) scale_lo = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 1)) scale_hi = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 2)) scale_step = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 3)) angle_lo = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 4)) angle_hi = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 5)) angle_step = p->d;
+    if (const AlgoCParam* p = FindParam(in, 1, 1)) levels = p->i;
+
+    Image2DAlg_Image img = CoreInputFrom(in->images[0]);
+    Image2DAlg_Image tpl = CoreInputFrom(in->images[1]);
+    double score = 0, cx = 0, cy = 0, scale = 0, angle = 0;
+    const int rc = Image2DAlg_MatchTemplatePyramid(&img, &tpl, method,
+                                                   scale_lo, scale_hi, scale_step,
+                                                   angle_lo, angle_hi, angle_step,
+                                                   levels, &score, &cx, &cy, &scale, &angle);
+    if (rc == -3) { out->error = "对位失败（levels>=1、步进/范围非法或任何尺度模板越界）"; return 3; }
+    if (rc != 0) { out->error = "对位失败"; return 2; }
+
+    cv::Mat vis(in->images[0].height, in->images[0].width, CV_8UC4,
+                (void*)in->images[0].bgra);
+    cv::Mat drawn = vis.clone();
+    const cv::Point c((int)std::lround(cx), (int)std::lround(cy));
+    cv::line(drawn, c + cv::Point(-8, 0), c + cv::Point(8, 0), cv::Scalar(0, 255, 0, 255), 1);
+    cv::line(drawn, c + cv::Point(0, -8), c + cv::Point(0, 8), cv::Scalar(0, 255, 0, 255), 1);
+
+    static char msg[160];
+    snprintf(msg, sizeof(msg), "score=%.4f c=(%.1f,%.1f) scale=%.2f angle=%.1f levels=%d",
+             score, cx, cy, scale, angle, levels);
+
+    const size_t n = (size_t)drawn.rows * drawn.cols * 4;
+    uint8_t* px = (uint8_t*)malloc(n);
+    if (!px) { out->error = "内存不足"; return 2; }
+    memcpy(px, drawn.data, n);
+    out->images = AllocImageOut(drawn.cols, drawn.rows, px);
+    if (!out->images) { free(px); out->error = "内存不足"; return 2; }
+    out->imageCount = 1;
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：凸性缺陷（node.json: alg.image2d.convexity_defects） ----------------
+// 凸包与轮廓间的凹陷检测（引脚变形/缺料）：输入轮廓点集（如 contour_cloud 的输出），
+// 输出各缺陷最深点 z=0 点云（corner_sub_pix 同款，供下游测量/判定取用），
+// 深度与顶点索引并入消息（索引以内部调整后的点序为准——输入顺时针会被先反转）。
+// 输入：clouds[0]=轮廓点集（xy 取自 xyz，z 分量忽略；count >= 3）。
+// 参数：无。
+// 输出：缺陷最深点 z=0 点云（无凹陷时 count=0 空点云，属正常）。
+// 消息通道："count=N; [i]depth=D idx=(s,e,f) pt=(fx,fy); ..."（900 字节截断）。
+// 错误码：1 输入未连线；2 点集不足/内存不足；3 参数非法。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiConvexityDefects(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->cloudCount < 1 || !in->clouds || !in->clouds[0].xyz) {
+        out->error = "输入未连线（轮廓点集）"; return 1;
+    }
+    const AlgoCCloud* src = &in->clouds[0];
+    if (src->count < 3) { out->error = "轮廓点集至少需要 3 个点"; return 2; }
+
+    float* xy = FlattenCloudXy(*src);
+    if (!xy) { out->error = "内存不足"; return 2; }
+    Image2DAlg_Defect* defects = NULL;
+    int count = 0;
+    const int rc = Image2DAlg_ConvexityDefects(xy, src->count, &defects, &count);
+    free(xy);
+    if (rc == -3) { out->error = "凸性缺陷计算失败（点数 >= 3）"; return 3; }
+    if (rc != 0) { out->error = "凸性缺陷计算失败"; return 2; }
+
+    // 最深点 -> z=0 点云输出（fast_features 同款：无缺陷时输出空点云）
+    float* pts = (float*)malloc(sizeof(float) * (size_t)(count > 0 ? count : 1) * 2);
+    if (!pts) { Image2DAlg_FreeDefects(defects); out->error = "内存不足"; return 2; }
+    for (int i = 0; i < count; ++i) {
+        pts[i * 2]     = (float)defects[i].fx;
+        pts[i * 2 + 1] = (float)defects[i].fy;
+    }
+    out->clouds = AllocCloudOutZ0(pts, count);
+    free(pts);
+    if (!out->clouds) { Image2DAlg_FreeDefects(defects); out->error = "内存不足"; return 2; }
+    out->cloudCount = 1;
+
+    static char msg[900];
+    int pos = snprintf(msg, sizeof(msg), "count=%d", count);
+    for (int i = 0; i < count && pos < (int)sizeof(msg) - 96; ++i)
+        pos += snprintf(msg + pos, sizeof(msg) - (size_t)pos,
+                        "; [%d]depth=%.1f idx=(%d,%d,%d) pt=(%.1f,%.1f)",
+                        i, defects[i].depth, defects[i].start_index,
+                        defects[i].end_index, defects[i].farthest_index,
+                        defects[i].fx, defects[i].fy);
+    Image2DAlg_FreeDefects(defects);
+
+    out->error = msg;
+    return 0;
+}
+
+} // extern "C"（2.3.0 追加段）

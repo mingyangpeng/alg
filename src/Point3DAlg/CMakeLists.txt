@@ -6,6 +6,8 @@ project(Point3DAlg LANGUAGES CXX)
 file(GLOB_RECURSE SOURCES "*.cpp" "*.cc" "*.cxx")
 list(FILTER SOURCES EXCLUDE REGEX ".*_test\\.cpp$")
 list(FILTER SOURCES EXCLUDE REGEX ".*[/\\\\]tools[/\\\\].*")
+# 点云算子 C 封装依赖 PCL（CloudIO/CloudProcessor）——从 GLOB 摘出，按 PCL_FOUND 条件编入
+list(FILTER SOURCES EXCLUDE REGEX ".*Point3DAlg_CloudOps\\.cpp$")
 file(GLOB_RECURSE HEADERS "*.h" "*.hpp" "*.hxx")
 list(FILTER HEADERS EXCLUDE REGEX ".*[/\\\\]tools[/\\\\].*")
 
@@ -13,6 +15,9 @@ list(FILTER HEADERS EXCLUDE REGEX ".*[/\\\\]tools[/\\\\].*")
 # 含 <pcl/point_cloud.h>，必须与 RegistTool/RegistTest 一致地用 PCL_FOUND 保护：
 # PCL 未找到时库内不含配准层，ComUI 配准节点相应不可用
 if(PCL_FOUND)
+    # 点云算子 C 封装（LoadCloud/SaveCloudEx/Filter/Extract/Transform；
+    # 依赖 PCL——无 PCL 构建时整组符号不导出，见 Point3DAlg_api.h 守卫说明）
+    list(APPEND SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/Point3DAlg_CloudOps.cpp)
     list(APPEND SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/tools/Point3DAlg_Regist.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/tools/Point3DAlg_DomeFit.cpp
@@ -54,6 +59,9 @@ target_link_libraries(${PROJECT_NAME} PUBLIC CommonAlg)
 # 配准算法层复用 ShapelyAlg 的 CloudProcessor（ICP 家族）——仅 PCL 可用时编译
 if(PCL_FOUND)
     target_link_libraries(${PROJECT_NAME} PRIVATE ShapelyAlg)
+    # 通知 ComUI 适配层：本库含 PCL 依赖入口（无 PCL 时这些入口不编译、符号不导出——
+    # 宿主加载相应节点会得到明确的"方法不存在"，而非 DLL 链接失败；见适配层各守卫块）
+    target_compile_definitions(${PROJECT_NAME} PRIVATE POINT3DALG_HAS_PCL=1)
 endif()
 
 # 链接第三方库（OpenCV：FOV 标注画框/文字；JSON：配置解析；PCL：配准 + 可视化）
@@ -219,6 +227,11 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 
 add_executable(Point3DAlg_test Point3DAlg_test.cpp)
 target_link_libraries(Point3DAlg_test PRIVATE ${PROJECT_NAME})
+# 点云计算族测试段（LoadCloud/SaveCloudEx/Filter/Extract/Transform）调用的是
+# DLL 内 PCL 守卫导出的符号——PCL 可用时才编译这些测试段，否则链接会失败
+if(PCL_FOUND)
+    target_compile_definitions(Point3DAlg_test PRIVATE POINT3DALG_TEST_HAS_PCL=1)
+endif()
 set_target_properties(Point3DAlg_test PROPERTIES
     LINK_FLAGS "/INCREMENTAL /DEBUG /OPT:REF"
 )

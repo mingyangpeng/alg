@@ -1,6 +1,6 @@
 ﻿# Image2DAlg —— 通用 2D 模块
 
-`src/Image2DAlg` 是面向 ComUI 宿主的通用 2D 算法库：图像读取、通用处理、测量/缺陷检测，以及标定接口类（`Image2DAlg_Calib`）。当前版本 **2.0.0**（55 个通用算子：处理 16 + 特征 3 + 测量 36）。
+`src/Image2DAlg` 是面向 ComUI 宿主的通用 2D 算法库：图像读取、通用处理、测量/缺陷检测，以及标定接口类（`Image2DAlg_Calib`）。当前版本 **2.2.0**（73 个通用算子：处理 17 + 特征 14 + 测量 37 + 跟踪配准立体 5；另有 Init / ReadImage / GetVersion / Free* 等生命周期与释放接口）。
 
 ## 定位与依赖
 
@@ -102,12 +102,59 @@ ComUI 适配层在 `integration/comui/Image2DAlg_comui.cpp`，节点声明在 `i
 
 测量输入为非零即前景的二值语义；彩色输入内部先转灰度。无结果时返回 `0` 且 `count=0`。
 
+## 特征点与匹配对位（2.0.0 / 2.1.0）
+
+2.0.0 特征点族（大形变对位前置）：
+
+| 函数 | 说明 |
+|------|------|
+| `Image2DAlg_HarrisCorners(in, block, ksize, k, thresh_ratio, subpix, &pts, &n)` | Harris 角点（相对最大响应阈值 + 3x3 NMS；`subpix!=0` 亚像素细化） |
+| `Image2DAlg_GoodFeatures(in, max_corners, quality, min_dist, subpix, &pts, &n)` | Shi-Tomasi 角点（质量降序 + 最小间距 NMS） |
+| `Image2DAlg_CornerSubPix(in, pts, count, win, &out)` | 角点亚像素细化（细化失败保持原位） |
+| `Image2DAlg_ORBAlign(in1, in2, n_features, ratio, m[6], &matches, &count, &inliers)` | 一站式：ORB 检测 + Hamming 匹配（Lowe 比率）+ RANSAC 全仿射，`m` 为 in1→in2 的 2x3 行主序；配 `FreeOrbMatches` |
+
+2.1.0 特征链路拆分（检测 → 描述 → 匹配 → 几何估计可独立复用，与 ORBAlign 并存）：
+
+| 函数 | 说明 |
+|------|------|
+| `Image2DAlg_FastFeatures(in, threshold, nonmax_suppression, &pts, &n)` | FAST 角点（比 Harris 快一个数量级；`threshold<=0` → -3；平坦图无检出返回 0/0）；配 `FreePoint2f` |
+| `Image2DAlg_ComputeDescriptors(in, pts, count, type, n_features, &out)` | 关键点描述子计算，type：0=ORB(32B) / 1=BRISK(64B) / 2=AKAZE(61B) / 3=SIFT(浮点 128 维)；`n_features` 仅 ORB 有效；关键点越界/贴边 → -2；输出 `Image2DAlg_Descriptors{type, dim, is_float, count, data, fdata}` |
+| `Image2DAlg_FreeDescriptors(d)` | 释放描述子 data/fdata 并置空（结构体归调用方；NULL 安全） |
+| `Image2DAlg_MatchFeatures(d1, d2, pts1, pts2, ratio, &matches, &count)` | BFMatcher kNN(k=2) + Lowe 比率：二进制用 Hamming、SIFT 用 L2；ratio ∉ (0,1) → -3，type/dim/is_float 不一致 → -3，匹配 < 2 对 → -2；**复用** `Image2DAlg_OrbMatch` 结构与 `FreeOrbMatches` |
+| `Image2DAlg_EstimateAffinePartial(matches, count, thr, m[6], &inliers)` | 部分仿射估计（4 DOF：旋转+等比缩放+平移，工业对位首选）：RANSAC；count < 3 → -2，thr <= 0 → -3；`m` 为 in1→in2 的 2x3 行主序（同 ORBAlign 方向，可接 WarpAffine） |
+| `Image2DAlg_FindHomography(matches, count, thr, h[9], &inliers)` | 单应估计（3x3 透视，可接 WarpPerspective）：RANSAC；count < 4 → -2，共线/退化 → -2，thr <= 0 → -3；`h` 为 in1→in2 行主序、h[8]=1 |
+
+典型链路：`FastFeatures → ComputeDescriptors → MatchFeatures → EstimateAffinePartial/FindHomography → WarpAffine/WarpPerspective`。
+
+## 特征扩展与跟踪配准立体（2.2.0）
+
+2.2.0 特征扩展（检测+描述一次完成、斑点、一站式匹配）：
+
+| 函数 | 说明 |
+|------|------|
+| `Image2DAlg_BriskFeatures(in, n_features, contrast_threshold, &pts, &n, &desc)` | BRISK 检测+描述一次完成：`contrast_threshold` → BRISK `thresh`（<=0 默认 30）；`n_features` 忽略（无上限参数）；描述子 64 字节 |
+| `Image2DAlg_AkazeFeatures(...)` | AKAZE 检测+描述：`contrast_threshold` → AKAZE `threshold`（<=0 默认 0.001）；描述子 61 字节；`out_desc` 传 NULL = 只检测 |
+| `Image2DAlg_SiftFeatures(...)` | SIFT 检测+描述：`n_features` → `nfeatures`（<=0 不限）、`contrast_threshold` → `contrastThreshold`（<=0 默认 0.04）；浮点 128 维 |
+| `Image2DAlg_BlobDetect(in, min_area, max_area, min_circularity, min_convexity, &blobs, &n)` | 斑点检测（SimpleBlobDetector 连通域形状过滤，与 FitCirclesFromBinary 的轮廓圆拟合互补）；面积/圆度/凸性过滤，<=0 = 不过滤该项；暗斑默认（亮斑先反转）；配 `BlobFeature{x,y,radius}` + `FreeBlobFeatures` |
+| `Image2DAlg_DetectAndMatch(in1, in2, type, n_features, ratio, &matches, &n)` | 一站式检测+描述+匹配（ORBAlign 泛化版，type 0=ORB/1=BRISK/2=AKAZE/3=SIFT）；复用 `OrbMatch` + `FreeOrbMatches` |
+
+2.2.0 跟踪、配准与立体：
+
+| 函数 | 说明 |
+|------|------|
+| `Image2DAlg_CalcOpticalFlowPyrLK(prev, next, pts, count, win_size, max_level, &out_pts, out_status)` | 金字塔 LK 光流：`win_size` 偶数自动补奇、`max_level >= 0`；**`out_status` 一级指针契约——调用方预分配 count 字节**；`out_pts` 本库 malloc 配 `FreePoint2f` |
+| `Image2DAlg_FindTransformECC(templ, input, motion_type, max_iters, epsilon, m[9], &corr)` | ECC 对齐：motion_type 0=平移(2x3)/1=仿射(2x3)/2=单应(3x3)（与 cv 原生枚举取值不同）；`m` 为模板坐标取 input(m·x) 的采样映射；2x3 仅前 6 个有效；-2 = 不收敛/相关性 < 0.5 |
+| `Image2DAlg_PhaseCorrelate(a, b, &dx, &dy, &resp)` | 相位相关平移估计（亚像素）：输出 b 相对 a 的位移；尺寸不等 → -3 |
+| `Image2DAlg_StereoMatch(left, right, min_disparity, num_disparities, block_size, out_disparity)` | SGBM 双目视差：num_disparities 须为 16 倍数（否则 -3）；**`out_disparity` 一级指针契约——调用方预分配**（width/height/channels 与左图一致、1 通道）；输出 8U = CV_16S 定点值/16 四舍五入，无效视差 → 0；左图 x < min_disparity+num_disparities 条带视差不可靠（SGBM 特性） |
+| `Image2DAlg_SolvePnP(object_points, image_points, count, camera_matrix, dist_coeffs, dist_count, rvec, tvec)` | 2D-3D 位姿（默认迭代法 SOLVEPNP_ITERATIVE）：count >= 4（否则 -2）；`dist_coeffs` 可 NULL（dist_count<=0 无畸变）；object_points 3N 扁平 double |
+
 ## 错误码
 
 | 码 | 含义 |
 |----|------|
 | 0 | 成功 |
 | -1 | 空指针 / 空图 |
+| -2 | 特征/匹配/估计不足（特征族与 ORBAlign：无关键点、匹配对数过少、几何估计退化；跟踪配准族：ECC 不收敛或相关性不足、PnP 求解失败；ReadImage 例外——-2 为打开失败） |
 | -3 | 通道数、模式或参数不支持 |
 | -4 | 内存不足 |
 | -99 | OpenCV 异常（在 C 边界统一捕获，异常不跨 DLL） |

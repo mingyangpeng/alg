@@ -16,6 +16,8 @@
 
 #include <opencv2/imgcodecs.hpp>
 
+#include <opencv2/calib3d.hpp>   // projectPoints（SolvePnP 真值投影用）
+
 
 
 #include <cmath>
@@ -27,6 +29,8 @@
 #include <cstring>
 
 #include <string>
+
+#include <vector>
 
 
 
@@ -207,6 +211,8 @@ static void testVersionAndLifecycle()
     const char* ver = Image2DAlg_GetVersion();
 
     check(ver != NULL && ver[0] != '\0', "GetVersion 非空");
+
+    check(ver != NULL && std::strcmp(ver, "2.2.0") == 0, "GetVersion = 2.2.0（2.2.0 特征扩展+跟踪配准立体）");
 
     bool hasDigit = false;
 
@@ -1553,6 +1559,37 @@ static void testShapesDefectsMulti()
     Image2DAlg_FreeDefects(NULL);
 
     check(true, "FreeDefects NULL 安全");
+
+    // L 形顺/逆时针两种遍历序（review 回归：旧实现顺时针先反转点序，
+    // 返回索引落在反转后的数组上，与 api.h "输入点序" 契约相悖）
+    const float lccw[] = { 0.f, 0.f, 0.f, 4.f, 2.f, 4.f, 2.f, 2.f, 4.f, 2.f, 4.f, 0.f };  // OpenCV 有向面积为负
+    const float lcw[]  = { 4.f, 0.f, 4.f, 2.f, 2.f, 2.f, 2.f, 4.f, 0.f, 4.f, 0.f, 0.f };  // 反向遍历
+
+    for (int dir = 0; dir < 2; ++dir) {
+        const float* lp = (dir == 0) ? lccw : lcw;
+        defects = NULL;
+        count = 0;
+        check(Image2DAlg_ConvexityDefects(lp, 6, &defects, &count) == 0 && count == 1,
+              dir == 0 ? "L 形（顺时针序）恰有 1 处缺陷" : "L 形（逆时针序）恰有 1 处缺陷");
+        check(defects != NULL &&
+              defects[0].farthest_index >= 0 && defects[0].farthest_index < 6 &&
+              defects[0].start_index >= 0 && defects[0].start_index < 6 &&
+              defects[0].end_index >= 0 && defects[0].end_index < 6,
+              "缺陷索引均在 [0,6)（输入点序契约）");
+        check(defects != NULL &&
+              lp[defects[0].farthest_index * 2] == defects[0].fx &&
+              lp[defects[0].farthest_index * 2 + 1] == defects[0].fy,
+              "farthest_index 按输入点序回切 == (fx,fy)");
+        check(defects != NULL && std::fabs(defects[0].depth - 1.414) < 0.01, "L 形腔深 ≈ √2");
+        Image2DAlg_FreeDefects(defects);
+    }
+
+    // 退化输入：全部共线（凸包 <3 点）→ 无凹陷口径 0/NULL/0（不再透出 -99）
+    const float collinear[] = { 0.f, 0.f, 1.f, 1.f, 2.f, 2.f, 3.f, 3.f };
+    defects = NULL;
+    count = 0;
+    check(Image2DAlg_ConvexityDefects(collinear, 4, &defects, &count) == 0 &&
+          count == 0 && defects == NULL, "共线退化输入 -> 0/NULL/0");
 
 
 
@@ -3497,6 +3534,1592 @@ static void testFeaturePointsAndFits()
 }
 
 
+// ---------------- 2.1.0 特征链路拆分：FAST / 描述子 / 匹配 / 几何估计 ----------------
+
+
+
+static void testFeaturePipeline()
+
+{
+
+    std::printf("== FastFeatures ==\n");
+
+    // 富纹理合成图（与 ORBAlign 测试同一构造）：A 与 B = A 平移 (5,7)
+
+    cv::setRNGSeed(42);
+
+    cv::Mat tex(96, 96, CV_8UC1);
+
+    cv::randu(tex, cv::Scalar(40), cv::Scalar(220));
+
+    cv::Mat shifted(96, 96, CV_8UC1, cv::Scalar(40));
+
+    tex(cv::Rect(0, 0, 91, 89)).copyTo(shifted(cv::Rect(5, 7, 91, 89)));
+
+    Image2DAlg_Image i1 = MakeImage(tex);
+
+    Image2DAlg_Image i2 = MakeImage(shifted);
+
+    Image2DAlg_Point2f* fpts = NULL;
+
+    int nf = 0;
+
+    check(Image2DAlg_FastFeatures(&i1, 20, 1, &fpts, &nf) == 0, "FAST 检测返回 0");
+
+    check(nf > 0 && fpts != NULL, "FAST 检出特征点");
+
+    bool inb = true;
+
+    for (int i = 0; i < nf && fpts; ++i)
+
+        if (fpts[i].x < 0 || fpts[i].y < 0 || fpts[i].x >= 96 || fpts[i].y >= 96) inb = false;
+
+    check(inb, "FAST 点均在图像内");
+
+    // 平坦图：无检出属正常（0 / NULL / 返回 0）
+
+    cv::Mat flat(64, 64, CV_8UC1, cv::Scalar(128));
+
+    Image2DAlg_Image ifl = MakeImage(flat);
+
+    Image2DAlg_Point2f* fpts_f = NULL;
+
+    int nf_f = 0;
+
+    check(Image2DAlg_FastFeatures(&ifl, 20, 1, &fpts_f, &nf_f) == 0 &&
+          nf_f == 0 && fpts_f == NULL,
+
+          "平坦图无检出 -> 0/0（非错误）");
+
+    Image2DAlg_FreePoint2f(fpts_f);
+
+    check(Image2DAlg_FastFeatures(&i1, 0, 1, &fpts, &nf) == -3, "threshold<=0 -> -3");
+
+    check(Image2DAlg_FastFeatures(&i1, 20, 1, NULL, &nf) == -1, "out_points=NULL -> -1");
+
+    Image2DAlg_FreePoint2f(NULL);
+
+    check(true, "FreePoint2f NULL 安全");
+
+
+
+    std::printf("== ComputeDescriptors ==\n");
+
+    // 取 FAST 点中 16px 边距内的子集（描述子邻域充足），两图同取保持对应
+
+    std::vector<Image2DAlg_Point2f> p1v, p2v;
+
+    for (int i = 0; i < nf && fpts; ++i)
+
+        if (fpts[i].x >= 16 && fpts[i].x < 80 && fpts[i].y >= 16 && fpts[i].y < 80)
+
+            p1v.push_back(fpts[i]);
+
+    Image2DAlg_Point2f* fpts2 = NULL;
+
+    int nf2 = 0;
+
+    check(Image2DAlg_FastFeatures(&i2, 20, 1, &fpts2, &nf2) == 0 && nf2 > 0,
+
+          "图2 FAST 检测返回 0");
+
+    for (int i = 0; i < nf2 && fpts2; ++i)
+
+        if (fpts2[i].x >= 16 && fpts2[i].x < 80 && fpts2[i].y >= 16 && fpts2[i].y < 80)
+
+            p2v.push_back(fpts2[i]);
+
+    Image2DAlg_FreePoint2f(fpts2);
+
+    fpts2 = NULL;
+
+    Image2DAlg_FreePoint2f(fpts);
+
+    fpts = NULL;
+
+    check((int)p1v.size() >= 10 && (int)p2v.size() >= 10, "边距过滤后仍有 >= 10 个点");
+
+
+
+    Image2DAlg_Descriptors d1, d2;
+
+    std::memset(&d1, 0, sizeof(d1));
+
+    std::memset(&d2, 0, sizeof(d2));
+
+    check(Image2DAlg_ComputeDescriptors(&i1, p1v.data(), (int)p1v.size(), 0, 500, &d1) == 0,
+
+          "ORB 描述子计算返回 0");
+
+    check(d1.type == 0 && d1.dim == 32 && d1.is_float == 0 && d1.count == (int)p1v.size(),
+
+          "ORB：二进制 32 字节、数量与输入一致");
+
+    check(Image2DAlg_ComputeDescriptors(&i2, p2v.data(), (int)p2v.size(), 0, 500, &d2) == 0,
+
+          "图2 ORB 描述子计算返回 0");
+
+    // 四类描述子枚举与维度（OpenCV 4.4 默认输出长度）
+
+    Image2DAlg_Descriptors db;
+
+    std::memset(&db, 0, sizeof(db));
+
+    check(Image2DAlg_ComputeDescriptors(&i1, p1v.data(), (int)p1v.size(), 1, 0, &db) == 0 &&
+
+          db.type == 1 && db.dim == 64 && db.is_float == 0, "BRISK：二进制 64 字节");
+
+    Image2DAlg_FreeDescriptors(&db);
+
+    std::memset(&db, 0, sizeof(db));
+
+    check(Image2DAlg_ComputeDescriptors(&i1, p1v.data(), (int)p1v.size(), 2, 0, &db) == 0 &&
+
+          db.type == 2 && db.dim == 61 && db.is_float == 0, "AKAZE：二进制 61 字节");
+
+    Image2DAlg_FreeDescriptors(&db);
+
+    std::memset(&db, 0, sizeof(db));
+
+    check(Image2DAlg_ComputeDescriptors(&i1, p1v.data(), (int)p1v.size(), 3, 0, &db) == 0 &&
+
+          db.type == 3 && db.dim == 128 && db.is_float == 1 && db.fdata != NULL &&
+          db.data == NULL,
+
+          "SIFT：浮点 128 维（is_float=1）");
+
+    Image2DAlg_FreeDescriptors(&db);
+
+    // 错误路径
+
+    Image2DAlg_Descriptors dob;
+
+    std::memset(&dob, 0, sizeof(dob));
+
+    const Image2DAlg_Point2f oob[2] = { {32, 32}, {200, 200} };
+
+    check(Image2DAlg_ComputeDescriptors(&i1, oob, 2, 0, 500, &dob) == -2, "关键点越界 -> -2");
+
+    // 复用场景回归：已填充的 out 在 -2 出口不得被清零（否则已有 data 指针丢失
+    // 即泄漏——校验失败必须不动 out，见头文件契约）
+    check(d1.data != NULL && d1.count == (int)p1v.size() && d1.dim == 32,
+          "前置：d1 已持有有效缓冲");
+    const Image2DAlg_Point2f oob2[1] = { {5.0f, 200.0f} };
+
+    check(Image2DAlg_ComputeDescriptors(&i1, oob2, 1, 0, 500, &d1) == -2,
+          "越界 -2 复用同一 out 返回 -2");
+
+    check(d1.data != NULL && d1.count == (int)p1v.size() && d1.dim == 32 &&
+          d1.type == 0 && d1.is_float == 0,
+          "-2 后 d1 缓冲指针/元数据保持不变");
+
+    // 贴边点回归：扩图后贴边点应正常出描述子（此前贴边点会触发算子丢弃 -> -2
+    // 或产生不可复现结果）
+    {
+        const Image2DAlg_Point2f near_edge[2] = { {2.0f, 2.0f}, {94.0f, 94.0f} };
+        Image2DAlg_Descriptors dn;
+        std::memset(&dn, 0, sizeof(dn));
+        check(Image2DAlg_ComputeDescriptors(&i1, near_edge, 2, 0, 500, &dn) == 0,
+              "贴边点 (2,2)/(94,94) ORB 描述子计算返回 0（扩图采样）");
+        check(dn.count == 2 && dn.dim == 32 && dn.data != NULL,
+              "贴边点描述子数量/维度正确");
+        Image2DAlg_FreeDescriptors(&dn);
+    }
+
+    const Image2DAlg_Point2f one[1] = { {32, 32} };
+
+    check(Image2DAlg_ComputeDescriptors(&i1, one, 0, 0, 500, &dob) == -3, "count=0 -> -3");
+
+    check(Image2DAlg_ComputeDescriptors(&i1, one, 1, 4, 500, &dob) == -3, "type 越界 -> -3");
+
+    check(Image2DAlg_ComputeDescriptors(&i1, one, 1, 0, 500, NULL) == -1, "out=NULL -> -1");
+
+    check(Image2DAlg_ComputeDescriptors(&i1, NULL, 1, 0, 500, &dob) == -1, "pts=NULL -> -1");
+
+    Image2DAlg_FreeDescriptors(&dob);   // 未填充的结构体（全 NULL）释放安全
+
+    Image2DAlg_FreeDescriptors(NULL);
+
+    check(true, "FreeDescriptors NULL 安全");
+
+
+
+    std::printf("== MatchFeatures ==\n");
+
+    Image2DAlg_OrbMatch* fm = NULL;
+
+    int nfm = 0;
+
+    check(Image2DAlg_MatchFeatures(&d1, &d2, p1v.data(), p2v.data(), 0.75, &fm, &nfm) == 0,
+
+          "描述子匹配返回 0");
+
+    check(nfm >= 2 && fm != NULL, "比率测试后 >= 2 对");
+
+    int consistent = 0;
+
+    for (int i = 0; i < nfm && fm; ++i)
+
+        if (std::hypot(fm[i].x1 + 5.0 - fm[i].x2, fm[i].y1 + 7.0 - fm[i].y2) < 1.5)
+
+            ++consistent;
+
+    check(consistent >= 1, "存在 p2 = p1 + (5,7) 的正确匹配");
+
+    check(fm != NULL && fm[0].distance >= 0, "匹配对含描述子距离");
+
+    Image2DAlg_FreeOrbMatches(fm);
+
+    fm = NULL;
+
+    nfm = 0;
+
+    check(Image2DAlg_MatchFeatures(&d1, &d2, p1v.data(), p2v.data(), 0.0, &fm, &nfm) == -3,
+
+          "ratio=0 -> -3");
+
+    check(Image2DAlg_MatchFeatures(&d1, &d2, p1v.data(), p2v.data(), 1.5, &fm, &nfm) == -3,
+
+          "ratio>=1 -> -3");
+
+    // type 不一致（ORB vs SIFT）
+
+    Image2DAlg_Descriptors ds;
+
+    std::memset(&ds, 0, sizeof(ds));
+
+    check(Image2DAlg_ComputeDescriptors(&i1, p1v.data(), (int)p1v.size(), 3, 0, &ds) == 0,
+
+          "SIFT 描述子计算返回 0（匹配用）");
+
+    check(Image2DAlg_MatchFeatures(&d1, &ds, p1v.data(), p2v.data(), 0.75, &fm, &nfm) == -3,
+
+          "type 不一致 -> -3");
+
+    // 一致性校验组合补全：dim 不一致（同 type）/ is_float 不一致（同 type）
+    {
+        Image2DAlg_Descriptors dx1 = d1, dx2 = d2;
+        dx2.dim = 31;   // 人为破坏 dim（其余字段与 dx1 一致）
+        check(Image2DAlg_MatchFeatures(&dx1, &dx2, p1v.data(), p2v.data(), 0.75, &fm, &nfm) == -3,
+              "dim 不一致 -> -3");
+        Image2DAlg_Descriptors dy1 = d1;
+        dy1.is_float = 1;   // 人为破坏 is_float（与 dx2 不一致）
+        check(Image2DAlg_MatchFeatures(&dy1, &dx2, p1v.data(), p2v.data(), 0.75, &fm, &nfm) == -3,
+              "is_float 不一致 -> -3");
+        // is_float 一致但无 fdata 缓冲 -> -1
+        Image2DAlg_Descriptors dz1 = d1, dz2 = d2;
+        dz1.is_float = 1;
+        dz2.is_float = 1;
+        check(Image2DAlg_MatchFeatures(&dz1, &dz2, p1v.data(), p2v.data(), 0.75, &fm, &nfm) == -1,
+              "is_float=1 且 fdata=NULL -> -1");
+    }
+
+    Image2DAlg_FreeDescriptors(&ds);
+
+    // 平坦图：描述子无区分性 -> 0 对通过比率测试 -> -2
+
+    Image2DAlg_Descriptors df1, df2;
+
+    std::memset(&df1, 0, sizeof(df1));
+
+    std::memset(&df2, 0, sizeof(df2));
+
+    const Image2DAlg_Point2f fpts3[3] = { {32, 32}, {34, 32}, {32, 34} };
+
+    check(Image2DAlg_ComputeDescriptors(&ifl, fpts3, 3, 0, 500, &df1) == 0,
+
+          "平坦图 ORB 描述子计算返回 0");
+
+    check(Image2DAlg_ComputeDescriptors(&ifl, fpts3, 3, 0, 500, &df2) == 0,
+
+          "平坦图第二套描述子返回 0");
+
+    check(Image2DAlg_MatchFeatures(&df1, &df2, fpts3, fpts3, 0.75, &fm, &nfm) == -2,
+
+          "平坦图无区分性匹配 -> -2");
+
+    Image2DAlg_FreeDescriptors(&df1);
+
+    Image2DAlg_FreeDescriptors(&df2);
+
+    check(Image2DAlg_MatchFeatures(NULL, &d2, p1v.data(), p2v.data(), 0.75, &fm, &nfm) == -1,
+
+          "d1=NULL -> -1");
+
+    check(Image2DAlg_MatchFeatures(&d1, &d2, p1v.data(), p2v.data(), 0.75, NULL, &nfm) == -1,
+
+          "out=NULL -> -1");
+
+
+
+    std::printf("== 链路：匹配 -> 部分仿射/单应（合成平移真值） ==\n");
+
+    check(Image2DAlg_MatchFeatures(&d1, &d2, p1v.data(), p2v.data(), 0.75, &fm, &nfm) == 0 &&
+          nfm >= 2, "重新匹配供几何估计");
+
+    cv::setRNGSeed(42);   // RANSAC 可复现
+
+    double m6[6] = { 0 };
+
+    int ninl = 0;
+
+    check(Image2DAlg_EstimateAffinePartial(fm, nfm, 3.0, m6, &ninl) == 0,
+
+          "部分仿射估计返回 0");
+
+    check(std::fabs(m6[0] - 1.0) < 0.1 && std::fabs(m6[4] - 1.0) < 0.1 &&
+          std::fabs(m6[1]) < 0.1 && std::fabs(m6[3]) < 0.1 &&
+          std::fabs(m6[2] - 5.0) < 1.0 && std::fabs(m6[5] - 7.0) < 1.0,
+
+          "部分仿射 ≈ 平移 (5,7)");
+
+    check(ninl >= 3, "部分仿射内点 >= 3");
+
+    cv::setRNGSeed(42);
+
+    double h9[9] = { 0 };
+
+    check(Image2DAlg_FindHomography(fm, nfm, 3.0, h9, &ninl) == 0, "单应估计返回 0");
+
+    const double hs = h9[8] != 0.0 ? h9[8] : 1.0;   // 归一化防御
+
+    check(std::fabs(h9[0] / hs - 1.0) < 0.05 && std::fabs(h9[2] / hs - 5.0) < 1.0 &&
+          std::fabs(h9[4] / hs - 1.0) < 0.05 && std::fabs(h9[5] / hs - 7.0) < 1.0,
+
+          "单应 ≈ 平移 (5,7)");
+
+    check(ninl >= 3, "单应内点 >= 3");
+
+    Image2DAlg_FreeOrbMatches(fm);
+
+    fm = NULL;
+
+    nfm = 0;
+
+
+
+    std::printf("== EstimateAffinePartial/FindHomography 已知变换正解 ==\n");
+
+    // 相似变换真值：p2 = 1.2·R(15°)·p1 + (3,4)，5x4 网格点精确满足
+
+    const double rad = 15.0 * 3.14159265358979323846 / 180.0;
+
+    const double ca = 1.2 * std::cos(rad), sa = 1.2 * std::sin(rad);
+
+    std::vector<Image2DAlg_OrbMatch> sim;
+
+    for (int i = 0; i < 20; ++i) {
+
+        const double x = (i % 5) * 10.0 - 20.0;
+
+        const double y = (i / 5) * 8.0 - 12.0;
+
+        Image2DAlg_OrbMatch mm;
+
+        mm.x1 = x;
+
+        mm.y1 = y;
+
+        mm.x2 = ca * x - sa * y + 3.0;
+
+        mm.y2 = sa * x + ca * y + 4.0;
+
+        mm.distance = 0;
+
+        sim.push_back(mm);
+
+    }
+
+    cv::setRNGSeed(42);
+
+    check(Image2DAlg_EstimateAffinePartial(sim.data(), 20, 3.0, m6, &ninl) == 0,
+
+          "已知相似变换估计返回 0");
+
+    check(std::fabs(m6[0] - ca) < 1e-4 && std::fabs(m6[1] + sa) < 1e-4 &&
+          std::fabs(m6[2] - 3.0) < 1e-4 && std::fabs(m6[3] - sa) < 1e-4 &&
+          std::fabs(m6[4] - ca) < 1e-4 && std::fabs(m6[5] - 4.0) < 1e-4,
+
+          "恢复 1.2·R(15°) + (3,4)");
+
+    check(ninl == 20, "精确数据内点 = 20");
+
+    // 单应真值：p2 = H·p1，H = [[1.01,0.02,5],[0.01,1.03,7],[0.001,0.0005,1]]
+
+    std::vector<Image2DAlg_OrbMatch> homo;
+
+    for (int i = 0; i < 20; ++i) {
+
+        const double x = (i % 5) * 10.0 - 20.0;
+
+        const double y = (i / 5) * 8.0 - 12.0;
+
+        const double w = 0.001 * x + 0.0005 * y + 1.0;
+
+        Image2DAlg_OrbMatch mm;
+
+        mm.x1 = x;
+
+        mm.y1 = y;
+
+        mm.x2 = (1.01 * x + 0.02 * y + 5.0) / w;
+
+        mm.y2 = (0.01 * x + 1.03 * y + 7.0) / w;
+
+        mm.distance = 0;
+
+        homo.push_back(mm);
+
+    }
+
+    cv::setRNGSeed(42);
+
+    check(Image2DAlg_FindHomography(homo.data(), 20, 3.0, h9, &ninl) == 0,
+
+          "已知单应估计返回 0");
+
+    check(std::fabs(h9[0] - 1.01) < 1e-4 && std::fabs(h9[2] - 5.0) < 1e-4 &&
+          std::fabs(h9[4] - 1.03) < 1e-4 && std::fabs(h9[5] - 7.0) < 1e-4 &&
+          std::fabs(h9[8] - 1.0) < 1e-6,
+
+          "恢复投影单应矩阵");
+
+    check(ninl == 20, "精确数据内点 = 20");
+
+    // 错误路径
+
+    check(Image2DAlg_EstimateAffinePartial(sim.data(), 2, 3.0, m6, &ninl) == -2, "count<3 -> -2");
+
+    check(Image2DAlg_EstimateAffinePartial(sim.data(), 20, 0.0, m6, &ninl) == -3,
+
+          "threshold<=0 -> -3");
+
+    check(Image2DAlg_EstimateAffinePartial(NULL, 20, 3.0, m6, &ninl) == -1, "matches=NULL -> -1");
+
+    check(Image2DAlg_EstimateAffinePartial(sim.data(), 20, 3.0, NULL, &ninl) == -1, "m=NULL -> -1");
+
+    check(Image2DAlg_FindHomography(homo.data(), 3, 3.0, h9, &ninl) == -2, "count<4 -> -2");
+
+    check(Image2DAlg_FindHomography(homo.data(), 20, -1.0, h9, &ninl) == -3,
+
+          "threshold<=0 -> -3");
+
+    check(Image2DAlg_FindHomography(NULL, 20, 3.0, h9, &ninl) == -1, "matches=NULL -> -1");
+
+    // 共线退化：所有点在同一直线上 -> 单应无法求解
+
+    std::vector<Image2DAlg_OrbMatch> coll;
+
+    for (int i = 0; i < 12; ++i) {
+
+        Image2DAlg_OrbMatch mm;
+
+        mm.x1 = (double)(i * 4);
+
+        mm.y1 = 5.0;
+
+        mm.x2 = (double)(i * 4) + 2.0;
+
+        mm.y2 = 6.0;
+
+        mm.distance = 0;
+
+        coll.push_back(mm);
+
+    }
+
+    cv::setRNGSeed(42);
+
+    check(Image2DAlg_FindHomography(coll.data(), 12, 3.0, h9, &ninl) == -2, "共线退化 -> -2");
+
+    Image2DAlg_FreeOrbMatches(NULL);
+
+    check(true, "FreeOrbMatches NULL 安全");
+
+    Image2DAlg_FreeDescriptors(&d1);
+
+    Image2DAlg_FreeDescriptors(&d2);
+
+    Image2DAlg_FreeImage(&ifl);
+
+    Image2DAlg_FreeImage(&i2);
+
+    Image2DAlg_FreeImage(&i1);
+
+}
+
+
+
+
+
+// ---------------- 2.2.0 批次：P1 特征扩展（检测器 / 斑点 / 一站式匹配） ----------------
+
+static void testFeatureExtensions()
+
+{
+
+    std::printf("== BriskFeatures / AkazeFeatures / SiftFeatures ==\n");
+
+    // 富纹理合成图（96x96，值域 40..220）与平移 (5,7) 副本（同 testFeaturePipeline 构造）
+
+    cv::setRNGSeed(42);
+
+    cv::Mat tex(96, 96, CV_8UC1);
+
+    cv::randu(tex, cv::Scalar(40), cv::Scalar(220));
+
+    cv::Mat shifted(96, 96, CV_8UC1, cv::Scalar(40));
+
+    tex(cv::Rect(0, 0, 91, 89)).copyTo(shifted(cv::Rect(5, 7, 91, 89)));
+
+    Image2DAlg_Image i1 = MakeImage(tex);
+
+    Image2DAlg_Image i2 = MakeImage(shifted);
+
+    cv::Mat flat(64, 64, CV_8UC1, cv::Scalar(128));
+
+    Image2DAlg_Image ifl = MakeImage(flat);
+
+    Image2DAlg_Point2f* fpts = NULL;
+
+    int fc = 0;
+
+    Image2DAlg_Descriptors fd;
+
+    std::memset(&fd, 0, sizeof(fd));
+
+    check(Image2DAlg_BriskFeatures(&i1, 500, 0, &fpts, &fc, &fd) == 0, "BRISK 检测+描述返回 0（contrast<=0 取默认）");
+
+    check(fc > 0 && fpts != NULL, "BRISK 检出特征点");
+
+    check(fd.type == 1 && fd.dim == 64 && fd.is_float == 0 && fd.count == fc && fd.data != NULL,
+
+          "BRISK 描述子：二进制 64 字节、数量与点数一致");
+
+    bool inb = true;
+
+    for (int i = 0; i < fc && fpts; ++i)
+
+        if (fpts[i].x < 0 || fpts[i].y < 0 || fpts[i].x >= 96 || fpts[i].y >= 96) inb = false;
+
+    check(inb, "BRISK 点均在图像内");
+
+    Image2DAlg_FreePoint2f(fpts);
+
+    fpts = NULL;
+
+    fc = 0;
+
+    Image2DAlg_FreeDescriptors(&fd);
+
+    std::memset(&fd, 0, sizeof(fd));
+
+    check(Image2DAlg_BriskFeatures(&i1, 500, 40, &fpts, &fc, &fd) == 0 && fc > 0,
+
+          "BRISK contrast_threshold=40（映射 thresh，仍有点）");
+
+    Image2DAlg_FreePoint2f(fpts);
+
+    fpts = NULL;
+
+    fc = 0;
+
+    Image2DAlg_FreeDescriptors(&fd);
+
+    std::memset(&fd, 0, sizeof(fd));
+
+    // AKAZE 非线性扩散会平滑 iid 噪声（randu 图仅 2 点）——改用 4px 马赛克结构纹理
+
+    cv::setRNGSeed(4);
+
+    cv::Mat mos(128, 128, CV_8UC1);
+
+    for (int my = 0; my < 128; my += 4)
+
+        for (int mx = 0; mx < 128; mx += 4) {
+
+            const int shade = 20 + cv::theRNG().uniform(0, 214);
+
+            mos(cv::Rect(mx, my, 4, 4)).setTo(cv::Scalar(shade));
+
+        }
+
+    Image2DAlg_Image imos = MakeImage(mos);
+
+    check(Image2DAlg_AkazeFeatures(&imos, 0, 0, &fpts, &fc, &fd) == 0, "AKAZE 检测+描述返回 0（contrast<=0 取默认）");
+
+    check(fc > 0 && fpts != NULL, "AKAZE 检出特征点");
+
+    check(fd.type == 2 && fd.dim == 61 && fd.is_float == 0 && fd.count == fc && fd.data != NULL,
+
+          "AKAZE 描述子：二进制 61 字节、数量与点数一致");
+
+    Image2DAlg_FreePoint2f(fpts);
+
+    fpts = NULL;
+
+    fc = 0;
+
+    Image2DAlg_FreeDescriptors(&fd);
+
+    std::memset(&fd, 0, sizeof(fd));
+
+    check(Image2DAlg_AkazeFeatures(&imos, 0, 0.005, &fpts, &fc, &fd) == 0 && fc > 0,
+
+          "AKAZE contrast_threshold=0.005（映射 threshold，仍有点）");
+
+    Image2DAlg_FreePoint2f(fpts);
+
+    fpts = NULL;
+
+    fc = 0;
+
+    Image2DAlg_FreeDescriptors(&fd);
+
+    std::memset(&fd, 0, sizeof(fd));
+
+    check(Image2DAlg_SiftFeatures(&i1, 300, 0, &fpts, &fc, &fd) == 0, "SIFT 检测+描述返回 0（contrast<=0 取默认）");
+
+    check(fc > 0 && fpts != NULL, "SIFT 检出特征点");
+
+    check(fd.type == 3 && fd.dim == 128 && fd.is_float == 1 && fd.count == fc &&
+
+          fd.fdata != NULL && fd.data == NULL,
+
+          "SIFT 描述子：浮点 128 维（is_float=1）、数量与点数一致");
+
+    Image2DAlg_FreePoint2f(fpts);
+
+    fpts = NULL;
+
+    fc = 0;
+
+    Image2DAlg_FreeDescriptors(&fd);
+
+    std::memset(&fd, 0, sizeof(fd));
+
+    check(Image2DAlg_SiftFeatures(&i1, 0, 0.1, &fpts, &fc, &fd) == 0 && fc > 0,
+
+          "SIFT contrast_threshold=0.1（映射 contrastThreshold，仍有点）");
+
+    Image2DAlg_FreePoint2f(fpts);
+
+    fpts = NULL;
+
+    fc = 0;
+
+    Image2DAlg_FreeDescriptors(&fd);
+
+    std::memset(&fd, 0, sizeof(fd));
+
+    // out_desc = NULL 只检测（便捷用法）；平坦图无检出属正常
+
+    check(Image2DAlg_BriskFeatures(&i1, 500, 0, &fpts, &fc, NULL) == 0 && fc > 0 && fpts != NULL,
+
+          "out_desc=NULL 只检测不取描述子");
+
+    Image2DAlg_FreePoint2f(fpts);
+
+    fpts = NULL;
+
+    fc = 0;
+
+    check(Image2DAlg_BriskFeatures(&ifl, 500, 0, &fpts, &fc, &fd) == 0 && fc == 0 &&
+
+          fpts == NULL && fd.count == 0 && fd.data == NULL,
+
+          "平坦图无检出 -> 0/0（描述子同样为空）");
+
+    check(Image2DAlg_BriskFeatures(NULL, 500, 0, &fpts, &fc, &fd) == -1, "in=NULL -> -1");
+
+    check(Image2DAlg_BriskFeatures(&i1, 500, 0, NULL, &fc, &fd) == -1, "out_points=NULL -> -1");
+
+    check(Image2DAlg_BriskFeatures(&i1, 500, 0, &fpts, NULL, &fd) == -1, "out_count=NULL -> -1");
+
+    check(Image2DAlg_SiftFeatures(&i1, 500, 0, &fpts, NULL, &fd) == -1, "SIFT out_count=NULL -> -1");
+
+    Image2DAlg_FreeDescriptors(&fd);
+
+    Image2DAlg_FreeDescriptors(NULL);
+
+    check(true, "FreeDescriptors NULL 安全（检测器族）");
+
+    Image2DAlg_FreeImage(&imos);
+
+
+
+    std::printf("== BlobDetect ==\n");
+
+    // 亮背景（240）暗斑（30）：SimpleBlobDetector 默认 blobColor=0 检测暗斑
+
+    cv::Mat bg(128, 128, CV_8UC1, cv::Scalar(240));
+
+    cv::circle(bg, cv::Point(30, 30), 6, cv::Scalar(30), -1);
+
+    cv::circle(bg, cv::Point(80, 40), 8, cv::Scalar(30), -1);
+
+    cv::circle(bg, cv::Point(60, 100), 10, cv::Scalar(30), -1);
+
+    Image2DAlg_Image ib = MakeImage(bg);
+
+    Image2DAlg_BlobFeature* blobs = NULL;
+
+    int nb = 0;
+
+    check(Image2DAlg_BlobDetect(&ib, 50, 2000, 0.5, 0.5, &blobs, &nb) == 0 && nb == 3,
+
+          "BlobDetect 返回 0 且检出 3 个已知圆");
+
+    const double tctr[3][2] = { {30, 30}, {80, 40}, {60, 100} };
+
+    const double trad[3] = { 6, 8, 10 };
+
+    bool blob_ok = (nb == 3);
+
+    if (nb == 3) {
+
+        for (int i = 0; i < 3; ++i) {
+
+            int best = -1;
+
+            double bd = 1e9;
+
+            for (int k = 0; k < 3; ++k) {
+
+                const double d = std::hypot(blobs[i].x - tctr[k][0], blobs[i].y - tctr[k][1]);
+
+                if (d < bd) { bd = d; best = k; }
+
+            }
+
+            if (best < 0 || bd > 2.0 || std::fabs(blobs[i].radius - trad[best]) > 2.0) blob_ok = false;
+
+        }
+
+    }
+
+    check(blob_ok, "斑点中心误差 < 2px、半径误差 < 2px");
+
+    // 面积过滤生效：r6 圆约 113px、r8 约 201px、r10 约 314px
+
+    Image2DAlg_FreeBlobFeatures(blobs);
+
+    blobs = NULL;
+
+    nb = 0;
+
+    check(Image2DAlg_BlobDetect(&ib, 250, 0, 0, 0, &blobs, &nb) == 0 && nb == 1 &&
+
+          std::fabs(blobs[0].radius - 10.0) <= 2.0,
+
+          "min_area=250 过滤后只剩半径 10 的圆");
+
+    Image2DAlg_FreeBlobFeatures(blobs);
+
+    blobs = NULL;
+
+    nb = 0;
+
+    check(Image2DAlg_BlobDetect(&ib, 50, 150, 0, 0, &blobs, &nb) == 0 && nb == 1 &&
+
+          std::fabs(blobs[0].radius - 6.0) <= 2.0,
+
+          "max_area=150 过滤后只剩半径 6 的圆");
+
+    Image2DAlg_FreeBlobFeatures(blobs);
+
+    blobs = NULL;
+
+    nb = 0;
+
+    check(Image2DAlg_BlobDetect(&ifl, 50, 2000, 0.5, 0.5, &blobs, &nb) == 0 && nb == 0 && blobs == NULL,
+
+          "平坦图无斑点 -> 0/0");
+
+    check(Image2DAlg_BlobDetect(NULL, 50, 2000, 0.5, 0.5, &blobs, &nb) == -1, "in=NULL -> -1");
+
+    check(Image2DAlg_BlobDetect(&ib, 50, 2000, 0.5, 0.5, NULL, &nb) == -1, "out_blobs=NULL -> -1");
+
+    Image2DAlg_FreeBlobFeatures(NULL);
+
+    check(true, "FreeBlobFeatures NULL 安全");
+
+    Image2DAlg_FreeImage(&ib);
+
+
+
+    std::printf("== DetectAndMatch（一站式检测+描述+匹配） ==\n");
+
+    // 已知平移 (5,7)：四种类型均应恢复大量正确点对
+
+    Image2DAlg_OrbMatch* dm = NULL;
+
+    int ndm = 0;
+
+    check(Image2DAlg_DetectAndMatch(&i1, &i2, 0, 500, 0.75, &dm, &ndm) == 0 && ndm > 10,
+
+          "DetectAndMatch ORB 匹配对 > 10");
+
+    int consistent = 0;
+
+    for (int i = 0; i < ndm && dm; ++i)
+
+        if (std::hypot(dm[i].x1 + 5.0 - dm[i].x2, dm[i].y1 + 7.0 - dm[i].y2) < 1.5) ++consistent;
+
+    check(consistent * 2 >= ndm && consistent >= 5, "DetectAndMatch ORB 过半点对满足平移 (5,7)");
+
+    Image2DAlg_FreeOrbMatches(dm);
+
+    dm = NULL;
+
+    ndm = 0;
+
+    check(Image2DAlg_DetectAndMatch(&i1, &i2, 1, 500, 0.75, &dm, &ndm) == 0 && ndm > 10,
+
+          "DetectAndMatch BRISK 匹配对 > 10");
+
+    consistent = 0;
+
+    for (int i = 0; i < ndm && dm; ++i)
+
+        if (std::hypot(dm[i].x1 + 5.0 - dm[i].x2, dm[i].y1 + 7.0 - dm[i].y2) < 1.5) ++consistent;
+
+    check(consistent * 2 >= ndm && consistent >= 5, "DetectAndMatch BRISK 过半点对满足平移 (5,7)");
+
+    Image2DAlg_FreeOrbMatches(dm);
+
+    dm = NULL;
+
+    ndm = 0;
+
+    // AKAZE 在 iid 噪声上检出稀少——马赛克纹理（同上，平移 (5,7)）
+
+    cv::Mat mosh(128, 128, CV_8UC1, cv::Scalar(128));
+
+    mos(cv::Rect(0, 0, 123, 121)).copyTo(mosh(cv::Rect(5, 7, 123, 121)));
+
+    Image2DAlg_Image imos1 = MakeImage(mos);
+
+    Image2DAlg_Image imos2 = MakeImage(mosh);
+
+    check(Image2DAlg_DetectAndMatch(&imos1, &imos2, 2, 500, 0.75, &dm, &ndm) == 0 && ndm > 10,
+
+          "DetectAndMatch AKAZE 匹配对 > 10");
+
+    consistent = 0;
+
+    for (int i = 0; i < ndm && dm; ++i)
+
+        if (std::hypot(dm[i].x1 + 5.0 - dm[i].x2, dm[i].y1 + 7.0 - dm[i].y2) < 1.5) ++consistent;
+
+    check(consistent * 2 >= ndm && consistent >= 5, "DetectAndMatch AKAZE 过半点对满足平移 (5,7)");
+
+    Image2DAlg_FreeImage(&imos2);
+
+    Image2DAlg_FreeImage(&imos1);
+
+    Image2DAlg_FreeOrbMatches(dm);
+
+    dm = NULL;
+
+    ndm = 0;
+
+    check(Image2DAlg_DetectAndMatch(&i1, &i2, 3, 500, 0.75, &dm, &ndm) == 0 && ndm > 10,
+
+          "DetectAndMatch SIFT 匹配对 > 10");
+
+    consistent = 0;
+
+    for (int i = 0; i < ndm && dm; ++i)
+
+        if (std::hypot(dm[i].x1 + 5.0 - dm[i].x2, dm[i].y1 + 7.0 - dm[i].y2) < 1.5) ++consistent;
+
+    check(consistent * 2 >= ndm && consistent >= 5, "DetectAndMatch SIFT 过半点对满足平移 (5,7)");
+
+    Image2DAlg_FreeOrbMatches(dm);
+
+    dm = NULL;
+
+    ndm = 0;
+
+    // 错误路径
+
+    check(Image2DAlg_DetectAndMatch(&i1, &i2, 4, 500, 0.75, &dm, &ndm) == -3, "type 越界 -> -3");
+
+    check(Image2DAlg_DetectAndMatch(&i1, &i2, 0, 500, 0.0, &dm, &ndm) == -3, "ratio=0 -> -3");
+
+    check(Image2DAlg_DetectAndMatch(&i1, &i2, 0, 500, 1.5, &dm, &ndm) == -3, "ratio>=1 -> -3");
+
+    check(Image2DAlg_DetectAndMatch(NULL, &i2, 0, 500, 0.75, &dm, &ndm) == -1, "in1=NULL -> -1");
+
+    check(Image2DAlg_DetectAndMatch(&i1, &i2, 0, 500, 0.75, NULL, &ndm) == -1, "out=NULL -> -1");
+
+    check(Image2DAlg_DetectAndMatch(&ifl, &ifl, 0, 500, 0.75, &dm, &ndm) == -2, "平坦图无特征 -> -2");
+
+    Image2DAlg_FreeOrbMatches(dm);
+
+    Image2DAlg_FreeOrbMatches(NULL);
+
+    check(true, "FreeOrbMatches NULL 安全（DetectAndMatch）");
+
+    Image2DAlg_FreeImage(&ifl);
+
+    Image2DAlg_FreeImage(&i2);
+
+    Image2DAlg_FreeImage(&i1);
+
+}
+
+
+
+
+// ---------------- 2.2.0 批次：P2 跟踪 / 配准 / 立体 / 位姿 ----------------
+
+static void testTrackRegisterStereo()
+
+{
+
+    std::printf("== CalcOpticalFlowPyrLK ==\n");
+
+    // 前后帧 = 同一纹理平移 (3,2)，点网格留 16px 边距（win 21 窗口完整落在图内）
+
+    cv::setRNGSeed(7);
+
+    cv::Mat tex(96, 96, CV_8UC1);
+
+    cv::randu(tex, cv::Scalar(40), cv::Scalar(220));
+
+    cv::Mat moved(96, 96, CV_8UC1, cv::Scalar(40));
+
+    tex(cv::Rect(0, 0, 93, 94)).copyTo(moved(cv::Rect(3, 2, 93, 94)));
+
+    Image2DAlg_Image ip = MakeImage(tex);
+
+    Image2DAlg_Image iq = MakeImage(moved);
+
+    std::vector<Image2DAlg_Point2f> tin;
+
+    for (int y = 16; y <= 80; y += 16)
+
+        for (int x = 16; x <= 80; x += 16) {
+
+            Image2DAlg_Point2f pt;
+
+            pt.x = (float)x;
+
+            pt.y = (float)y;
+
+            tin.push_back(pt);
+
+        }
+
+    check((int)tin.size() == 25, "LK 跟踪点网格 25 点");
+
+    Image2DAlg_Point2f* np = NULL;
+
+    unsigned char status[25];
+
+    std::memset(status, 0xAA, sizeof(status));
+
+    check(Image2DAlg_CalcOpticalFlowPyrLK(&ip, &iq, tin.data(), 25, 21, 3, &np, status) == 0,
+
+          "LK 光流跟踪返回 0");
+
+    bool st_ok = true;
+
+    bool disp_ok = true;
+
+    for (int i = 0; i < 25 && np; ++i) {
+
+        if (status[i] == 0) st_ok = false;
+
+        if (std::fabs(np[i].x - (tin[i].x + 3.0)) > 1.0 ||
+
+            std::fabs(np[i].y - (tin[i].y + 2.0)) > 1.0) disp_ok = false;
+
+    }
+
+    check(st_ok, "LK status 全部非零");
+
+    check(disp_ok, "LK 跟踪位移 ≈ (3,2)");
+
+    Image2DAlg_FreePoint2f(np);
+
+    np = NULL;
+
+    check(Image2DAlg_CalcOpticalFlowPyrLK(&ip, &iq, tin.data(), 25, 20, 3, &np, status) == 0 && np != NULL,
+
+          "win_size=20 偶数自动补奇返回 0");
+
+    Image2DAlg_FreePoint2f(np);
+
+    np = NULL;
+
+    check(Image2DAlg_CalcOpticalFlowPyrLK(&ip, &iq, tin.data(), 25, 0, 3, &np, status) == -3, "win_size<=0 -> -3");
+
+    check(Image2DAlg_CalcOpticalFlowPyrLK(&ip, &iq, tin.data(), 25, 21, -1, &np, status) == -3, "max_level<0 -> -3");
+
+    check(Image2DAlg_CalcOpticalFlowPyrLK(&ip, &iq, tin.data(), 0, 21, 3, &np, status) == -3, "count=0 -> -3");
+
+    check(Image2DAlg_CalcOpticalFlowPyrLK(&ip, &iq, tin.data(), 25, 21, 3, &np, NULL) == -1, "out_status=NULL -> -1");
+
+    check(Image2DAlg_CalcOpticalFlowPyrLK(&ip, &iq, NULL, 25, 21, 3, &np, status) == -1, "pts=NULL -> -1");
+
+    Image2DAlg_FreePoint2f(NULL);
+
+    check(true, "FreePoint2f NULL 安全（LK）");
+
+    Image2DAlg_FreeImage(&iq);
+
+    Image2DAlg_FreeImage(&ip);
+
+
+
+    std::printf("== FindTransformECC ==\n");
+
+    cv::setRNGSeed(11);
+
+    cv::Mat etex(120, 120, CV_8UC1);
+
+    cv::randu(etex, cv::Scalar(40), cv::Scalar(220));
+
+    Image2DAlg_Image et = MakeImage(etex);
+
+    double em[9] = { 0 };
+
+    double corr = 0.0;
+
+    // 平移：input = templ 内容平移 (4,3)（warpAffine 前向 + 复制边框避免黑边）。
+
+    // 注：cv 4.4 的 ECC 在 iid 噪声图对上直接抛不收敛异常（旋转用例可收敛），
+
+    // 平移用例改用高斯模糊结构纹理对（模板与输入同纹理；原生核验 corr≈0.999、
+
+    // 恢复 (4,3)）
+
+    cv::Mat etexb;
+
+    cv::GaussianBlur(etex, etexb, cv::Size(9, 9), 2.0);
+
+    Image2DAlg_Image etb = MakeImage(etexb);
+
+    cv::Mat tin2(120, 120, CV_8UC1);
+
+    cv::Mat T = (cv::Mat_<double>(2, 3) << 1, 0, 4, 0, 1, 3);
+
+    cv::warpAffine(etexb, tin2, T, tin2.size(), cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+
+    Image2DAlg_Image ein = MakeImage(tin2);
+
+    em[6] = em[7] = em[8] = 99.0;   // 2x3 出口应清零（回归：防误按 3x3 读残留）
+
+    check(Image2DAlg_FindTransformECC(&etb, &ein, 0, 200, 1e-5, em, &corr) == 0, "ECC 平移对齐返回 0");
+
+    check(std::fabs(em[2] - 4.0) < 0.5 && std::fabs(em[5] - 3.0) < 0.5 &&
+
+          std::fabs(em[0] - 1.0) < 0.05 && std::fabs(em[4] - 1.0) < 0.05,
+
+          "ECC 恢复平移 (4,3)");
+
+    check(em[6] == 0.0 && em[7] == 0.0 && em[8] == 0.0, "ECC 2x3 出口 m[6..8] 清零");
+
+    check(corr > 0.9, "ECC 平移相关系数 > 0.9");
+
+    // 仿射：input = templ 内容旋转 2° + 平移 (2,1)，恢复前向矩阵
+
+    cv::Mat ain(120, 120, CV_8UC1);
+
+    const double rad2 = 2.0 * 3.14159265358979323846 / 180.0;
+
+    cv::Mat A = (cv::Mat_<double>(2, 3) << std::cos(rad2), -std::sin(rad2), 2,
+
+                                           std::sin(rad2), std::cos(rad2), 1);
+
+    cv::warpAffine(etex, ain, A, ain.size(), cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+
+    Image2DAlg_Image eain = MakeImage(ain);
+
+    std::memset(em, 0, sizeof(em));
+
+    corr = 0.0;
+
+    check(Image2DAlg_FindTransformECC(&et, &eain, 1, 200, 1e-5, em, &corr) == 0, "ECC 仿射对齐返回 0");
+
+    check(std::fabs(em[0] - std::cos(rad2)) < 0.03 && std::fabs(em[1] + std::sin(rad2)) < 0.03 &&
+
+          std::fabs(em[3] - std::sin(rad2)) < 0.03 && std::fabs(em[4] - std::cos(rad2)) < 0.03,
+
+          "ECC 恢复 2° 旋转");
+
+    check(corr > 0.9, "ECC 仿射相关系数 > 0.9");
+
+    // 单应：相同图 -> 恒等矩阵、相关系数 ≈ 1
+
+    Image2DAlg_Image esame = MakeImage(etex);
+
+    std::memset(em, 0, sizeof(em));
+
+    corr = 0.0;
+
+    check(Image2DAlg_FindTransformECC(&et, &esame, 2, 200, 1e-5, em, &corr) == 0, "ECC 单应对齐返回 0");
+
+    check(std::fabs(em[0] - 1.0) < 1e-4 && std::fabs(em[1]) < 1e-4 && std::fabs(em[2]) < 1e-4 &&
+
+          std::fabs(em[3]) < 1e-4 && std::fabs(em[4] - 1.0) < 1e-4 && std::fabs(em[5]) < 1e-4 &&
+
+          std::fabs(em[6]) < 1e-4 && std::fabs(em[7]) < 1e-4 && std::fabs(em[8] - 1.0) < 1e-4,
+
+          "ECC 相同图恢复恒等单应");
+
+    check(corr > 0.99, "ECC 相同图相关系数 ≈ 1");
+
+    // 不收敛：平坦输入无结构 -> -2；错误路径
+
+    cv::Mat eflat(120, 120, CV_8UC1, cv::Scalar(128));
+
+    Image2DAlg_Image efl = MakeImage(eflat);
+
+    check(Image2DAlg_FindTransformECC(&et, &efl, 0, 200, 1e-5, em, &corr) == -2, "ECC 平坦图不收敛 -> -2");
+
+    check(Image2DAlg_FindTransformECC(&et, &ein, 3, 200, 1e-5, em, &corr) == -3, "motion_type 越界 -> -3");
+
+    check(Image2DAlg_FindTransformECC(&et, &ein, 0, 0, 1e-5, em, &corr) == -3, "max_iters<1 -> -3");
+
+    check(Image2DAlg_FindTransformECC(&et, &ein, 0, 200, 0.0, em, &corr) == -3, "epsilon<=0 -> -3");
+
+    check(Image2DAlg_FindTransformECC(&et, &ein, 0, 200, 1e-5, NULL, &corr) == -1, "m=NULL -> -1");
+
+    check(Image2DAlg_FindTransformECC(&et, &ein, 0, 200, 1e-5, em, NULL) == -1, "correlation=NULL -> -1");
+
+    Image2DAlg_FreeImage(&efl);
+
+    Image2DAlg_FreeImage(&esame);
+
+    Image2DAlg_FreeImage(&eain);
+
+    Image2DAlg_FreeImage(&ein);
+
+    Image2DAlg_FreeImage(&etb);
+
+    Image2DAlg_FreeImage(&et);
+
+
+
+    std::printf("== PhaseCorrelate ==\n");
+
+    cv::setRNGSeed(13);
+
+    cv::Mat ptex(128, 128, CV_8UC1);
+
+    cv::randu(ptex, cv::Scalar(40), cv::Scalar(220));
+
+    cv::Mat psh(128, 128, CV_8UC1, cv::Scalar(40));
+
+    ptex(cv::Rect(0, 0, 122, 124)).copyTo(psh(cv::Rect(6, 4, 122, 124)));
+
+    Image2DAlg_Image pa = MakeImage(ptex);
+
+    Image2DAlg_Image pb = MakeImage(psh);
+
+    double pdx = 0, pdy = 0, presp = 0;
+
+    check(Image2DAlg_PhaseCorrelate(&pa, &pb, &pdx, &pdy, &presp) == 0, "相位相关返回 0");
+
+    check(std::fabs(pdx - 6.0) < 0.5 && std::fabs(pdy - 4.0) < 0.5,
+
+          "相位相关平移 ≈ (6,4)");
+
+    check(presp > 0.1, "相位相关峰值响应 > 0.1");
+
+    cv::Mat psmall(96, 96, CV_8UC1, cv::Scalar(0));
+
+    Image2DAlg_Image ps = MakeImage(psmall);
+
+    check(Image2DAlg_PhaseCorrelate(&pa, &ps, &pdx, &pdy, &presp) == -3, "尺寸不等 -> -3");
+
+    check(Image2DAlg_PhaseCorrelate(&pa, &pb, NULL, &pdy, &presp) == -1, "out_dx=NULL -> -1");
+
+    Image2DAlg_FreeImage(&ps);
+
+    Image2DAlg_FreeImage(&pb);
+
+    Image2DAlg_FreeImage(&pa);
+
+
+
+    std::printf("== StereoMatch ==\n");
+
+    // 左右图 = 同一纹理水平错位 10px（视差约定 xL - xR = 10，右图取 stex(+10)），
+
+    // 两图全宽有内容；采样区取 x >= num_disparities 的深部条带
+
+    //（SGBM 搜索窗随视差数越出右图边界，左条带视差不可靠，见头文件注释）
+
+    cv::setRNGSeed(17);
+
+    cv::Mat stex(120, 210, CV_8UC1);
+
+    cv::randu(stex, cv::Scalar(40), cv::Scalar(220));
+
+    cv::Mat sleft = stex(cv::Rect(0, 0, 200, 120)).clone();
+
+    cv::Mat sright = stex(cv::Rect(10, 0, 200, 120)).clone();
+
+    Image2DAlg_Image sl = MakeImage(sleft);
+
+    Image2DAlg_Image sr = MakeImage(sright);
+
+    Image2DAlg_Image disp;
+
+    disp.width = 200;
+
+    disp.height = 120;
+
+    disp.channels = 1;
+
+    disp.data = (unsigned char*)std::malloc((size_t)200 * 120);
+
+    std::memset(disp.data, 0, (size_t)200 * 120);
+
+    check(Image2DAlg_StereoMatch(&sl, &sr, 0, 96, 5, &disp) == 0, "SGBM 立体匹配返回 0");
+
+    int good_px = 0, total_px = 0;
+
+    for (int y = 20; y < 100; y += 2)
+
+        for (int x = 120; x < 190; x += 2) {
+
+            ++total_px;
+
+            const int v = disp.data[(size_t)y * 200 + x];
+
+            if (v >= 9 && v <= 11) ++good_px;
+
+        }
+
+    check(total_px > 0 && good_px * 20 >= total_px * 19, "SGBM 深部采样区 >= 95% 像素视差 ≈ 10（方向为正）");
+
+    // 无效视差 -> 0 回归：min_disparity=2 时 SGBM 的无效标记 (minD-1)*16 = 16
+    // 换算后是 1 而非负数，旧实现靠负数钳位兜不住——左条带会以 1 的合法假象漏出
+    {
+        Image2DAlg_Image disp2;
+        disp2.width = 200;
+        disp2.height = 120;
+        disp2.channels = 1;
+        disp2.data = (unsigned char*)std::malloc((size_t)200 * 120);
+        std::memset(disp2.data, 0xAB, (size_t)200 * 120);
+        check(Image2DAlg_StereoMatch(&sl, &sr, 2, 96, 5, &disp2) == 0,
+              "min_disparity=2 立体匹配返回 0");
+        int strip_bad = 0, deep_ok = 0, deep_total = 0;
+        for (int y = 20; y < 100; y += 2) {
+            for (int x = 4; x < 40; x += 2)
+                if (disp2.data[(size_t)y * 200 + x] != 0) ++strip_bad;
+            for (int x = 120; x < 190; x += 2) {
+                ++deep_total;
+                const int v = disp2.data[(size_t)y * 200 + x];
+                if (v >= 9 && v <= 11) ++deep_ok;
+            }
+        }
+        check(strip_bad == 0, "min_disparity=2 左条带无效视差 -> 0");
+        check(deep_total > 0 && deep_ok * 10 >= deep_total * 9,
+              "min_disparity=2 深部视差 ≈ 10 仍正确");
+        Image2DAlg_FreeImage(&disp2);
+    }
+
+    // 错误路径：num_disparities 与容器校验
+
+    check(Image2DAlg_StereoMatch(&sl, &sr, 0, 40, 5, &disp) == -3, "num_disparities 非 16 倍数 -> -3");
+
+    check(Image2DAlg_StereoMatch(&sl, &sr, 0, 0, 5, &disp) == -3, "num_disparities<=0 -> -3");
+
+    Image2DAlg_Image badh = disp;
+
+    badh.height = 100;
+
+    check(Image2DAlg_StereoMatch(&sl, &sr, 0, 96, 5, &badh) == -3, "容器高度不匹配 -> -3");
+
+    Image2DAlg_Image badc = disp;
+
+    badc.channels = 3;
+
+    check(Image2DAlg_StereoMatch(&sl, &sr, 0, 96, 5, &badc) == -3, "容器 channels=3 -> -3");
+
+    Image2DAlg_Image badd = disp;
+
+    badd.data = NULL;
+
+    check(Image2DAlg_StereoMatch(&sl, &sr, 0, 96, 5, &badd) == -1, "容器 data=NULL -> -1");
+
+    cv::Mat sbig(130, 160, CV_8UC1, cv::Scalar(0));
+
+    Image2DAlg_Image sb = MakeImage(sbig);
+
+    check(Image2DAlg_StereoMatch(&sl, &sb, 0, 96, 5, &disp) == -3, "左右图尺寸不等 -> -3");
+
+    check(Image2DAlg_StereoMatch(&sl, &sr, 0, 96, 5, NULL) == -1, "out_disparity=NULL -> -1");
+
+    Image2DAlg_FreeImage(&sb);
+
+    Image2DAlg_FreeImage(&disp);
+
+    Image2DAlg_FreeImage(&sr);
+
+    Image2DAlg_FreeImage(&sl);
+
+
+
+    std::printf("== SolvePnP ==\n");
+
+    // 已知内参 + 立方体 8 角点，位姿真值 rvec=(0.1,0.2,0.3) tvec=(0,0,5)
+
+    const double fx = 380.0, fy = 380.0, cx = 320.0, cy = 240.0;
+
+    double cam[9] = { fx, 0, cx, 0, fy, cy, 0, 0, 1 };
+
+    const double cube[8][3] = {
+
+        { -0.3, -0.3, -0.3 }, { 0.3, -0.3, -0.3 }, { 0.3, 0.3, -0.3 }, { -0.3, 0.3, -0.3 },
+
+        { -0.3, -0.3, 0.3 }, { 0.3, -0.3, 0.3 }, { 0.3, 0.3, 0.3 }, { -0.3, 0.3, 0.3 }
+
+    };
+
+    double obj[24];
+
+    for (int i = 0; i < 8; ++i) {
+
+        obj[i * 3] = cube[i][0];
+
+        obj[i * 3 + 1] = cube[i][1];
+
+        obj[i * 3 + 2] = cube[i][2];
+
+    }
+
+    cv::Mat rvec_t = (cv::Mat_<double>(3, 1) << 0.1, 0.2, 0.3);
+
+    cv::Mat tvec_t = (cv::Mat_<double>(3, 1) << 0.0, 0.0, 5.0);
+
+    cv::Mat camm = (cv::Mat_<double>(3, 3) << fx, 0, cx, 0, fy, cy, 0, 0, 1);
+
+    // 注：OpenCV 4.4 projectPoints 对 Nx1 CV_64FC3 InputArray 触发内部断言，
+    // 用 vector<Point3f> 输入（float 精度足够）
+    std::vector<cv::Point3f> objf;
+
+    for (int i = 0; i < 8; ++i)
+
+        objf.push_back(cv::Point3f((float)cube[i][0], (float)cube[i][1], (float)cube[i][2]));
+
+    std::vector<cv::Point2f> proj;
+
+    cv::projectPoints(objf, rvec_t, tvec_t, camm, cv::noArray(), proj);
+
+    std::vector<Image2DAlg_Point2f> imgpts(proj.size());
+    for (size_t i = 0; i < proj.size(); ++i) {
+        imgpts[i].x = proj[i].x;
+        imgpts[i].y = proj[i].y;
+    }
+
+    double rvec[3] = { 0 }, tvec[3] = { 0 };
+
+    check(Image2DAlg_SolvePnP(obj, imgpts.data(), 8, cam, NULL, 0, rvec, tvec) == 0,
+
+          "SolvePnP 返回 0（无畸变、dist=NULL）");
+
+    check(std::fabs(rvec[0] - 0.1) < 0.05 && std::fabs(rvec[1] - 0.2) < 0.05 &&
+
+          std::fabs(rvec[2] - 0.3) < 0.05 && std::fabs(tvec[0]) < 0.05 &&
+
+          std::fabs(tvec[1]) < 0.05 && std::fabs(tvec[2] - 5.0) < 0.05,
+
+          "SolvePnP 恢复位姿 (0.1,0.2,0.3)/(0,0,5)");
+
+    // 带畸变（4 项 [k1,k2,p1,p2]）：投影与求解用同一套系数
+
+    const double dist4[4] = { 0.1, -0.05, 0.001, -0.001 };
+
+    cv::Mat distm = (cv::Mat_<double>(4, 1) << 0.1, -0.05, 0.001, -0.001);
+
+    std::vector<cv::Point2f> proj2;
+
+    cv::projectPoints(objf, rvec_t, tvec_t, camm, distm, proj2);
+
+    std::vector<Image2DAlg_Point2f> imgpts2(proj2.size());
+    for (size_t i = 0; i < proj2.size(); ++i) {
+        imgpts2[i].x = proj2[i].x;
+        imgpts2[i].y = proj2[i].y;
+    }
+
+    double rvec2[3] = { 0 }, tvec2[3] = { 0 };
+
+    check(Image2DAlg_SolvePnP(obj, imgpts2.data(), 8, cam, dist4, 4, rvec2, tvec2) == 0,
+
+          "SolvePnP 带畸变返回 0");
+
+    check(std::fabs(rvec2[0] - 0.1) < 0.05 && std::fabs(rvec2[1] - 0.2) < 0.05 &&
+
+          std::fabs(rvec2[2] - 0.3) < 0.05 && std::fabs(tvec2[2] - 5.0) < 0.05,
+
+          "SolvePnP 带畸变恢复位姿");
+
+    // 错误路径
+
+    check(Image2DAlg_SolvePnP(obj, imgpts.data(), 3, cam, NULL, 0, rvec, tvec) == -2, "count<4 -> -2");
+
+    check(Image2DAlg_SolvePnP(obj, imgpts.data(), 0, cam, NULL, 0, rvec, tvec) == -2, "count=0 -> -2");
+
+    // dist_count 非法回归：非 0/4/5/8/12/14 的正值显式拦截为 -3（此前落入 cv
+    // 断言异常 -> -99，且断言前可能已对调用方短缓冲构造超长视图越界读）
+    {
+        const double dist3[3] = { 0.1, -0.05, 0.001 };
+        rvec[0] = 42.0;
+        tvec[0] = 42.0;
+        check(Image2DAlg_SolvePnP(obj, imgpts.data(), 8, cam, dist3, 3, rvec, tvec) == -3,
+              "dist_count=3 非法 -> -3");
+        check(rvec[0] == 42.0 && tvec[0] == 42.0, "dist_count 非法出口不写 rvec/tvec");
+        check(Image2DAlg_SolvePnP(obj, imgpts.data(), 8, cam, dist4, 6, rvec, tvec) == -3,
+              "dist_count=6 非法 -> -3");
+    }
+
+    check(Image2DAlg_SolvePnP(NULL, imgpts.data(), 8, cam, NULL, 0, rvec, tvec) == -1, "object=NULL -> -1");
+
+    check(Image2DAlg_SolvePnP(obj, NULL, 8, cam, NULL, 0, rvec, tvec) == -1, "image=NULL -> -1");
+
+    check(Image2DAlg_SolvePnP(obj, imgpts.data(), 8, NULL, NULL, 0, rvec, tvec) == -1, "camera=NULL -> -1");
+
+    check(Image2DAlg_SolvePnP(obj, imgpts.data(), 8, cam, NULL, 0, NULL, tvec) == -1, "rvec=NULL -> -1");
+
+}
+
+
+
+
+// ---------------- 2.2.0 补充：彩色（BGRA）输入路径冒烟 ----------------
+// 上述新算子测试图均为单通道；此处用同内容的 BGRA 版本覆盖 GrayOf 的 4 通道
+// 分支（BGRA2GRAY），核验检测/匹配/跟踪/立体链路在彩色输入上行为一致。
+// BGRA 图由单通道真值图 GRAY2BGRA 合成（BGRA2GRAY 后逐位还原），预期结果与
+// 单通道用例一致。
+
+static void testColorInputPaths()
+
+{
+
+    std::printf("== 彩色输入路径（BGRA -> 灰度） ==\n");
+
+    // DetectAndMatch（BGRA 对，平移 (5,7)）
+    cv::setRNGSeed(42);
+    cv::Mat tex(96, 96, CV_8UC1);
+    cv::randu(tex, cv::Scalar(40), cv::Scalar(220));
+    cv::Mat shifted(96, 96, CV_8UC1, cv::Scalar(40));
+    tex(cv::Rect(0, 0, 91, 89)).copyTo(shifted(cv::Rect(5, 7, 91, 89)));
+    cv::Mat bgra1, bgra2;
+    cv::cvtColor(tex, bgra1, cv::COLOR_GRAY2BGRA);
+    cv::cvtColor(shifted, bgra2, cv::COLOR_GRAY2BGRA);
+    Image2DAlg_Image c1 = MakeImage(bgra1);
+    Image2DAlg_Image c2 = MakeImage(bgra2);
+    Image2DAlg_OrbMatch* cm = NULL;
+    int ncm = 0;
+    check(Image2DAlg_DetectAndMatch(&c1, &c2, 0, 500, 0.75, &cm, &ncm) == 0 && ncm > 10,
+          "BGRA DetectAndMatch(ORB) 返回 0 且匹配充足");
+    int consistent = 0;
+    for (int i = 0; i < ncm && cm; ++i)
+        if (std::hypot(cm[i].x1 + 5.0 - cm[i].x2, cm[i].y1 + 7.0 - cm[i].y2) < 1.5) ++consistent;
+    check(consistent >= 5, "BGRA 匹配含正确平移点对");
+    Image2DAlg_FreeOrbMatches(cm);
+    cm = NULL;
+    ncm = 0;
+
+    // BlobDetect（BGRA 暗斑）
+    cv::Mat bg(128, 128, CV_8UC4, cv::Scalar(240, 240, 240, 255));
+    cv::circle(bg, cv::Point(30, 30), 6, cv::Scalar(30, 30, 30, 255), -1);
+    cv::circle(bg, cv::Point(80, 40), 8, cv::Scalar(30, 30, 30, 255), -1);
+    Image2DAlg_Image ibc = MakeImage(bg);
+    Image2DAlg_BlobFeature* cbs = NULL;
+    int nbc = 0;
+    check(Image2DAlg_BlobDetect(&ibc, 50, 2000, 0.5, 0.5, &cbs, &nbc) == 0 && nbc == 2,
+          "BGRA BlobDetect 检出 2 个暗斑");
+    Image2DAlg_FreeBlobFeatures(cbs);
+    cbs = NULL;
+    nbc = 0;
+    Image2DAlg_FreeImage(&ibc);
+
+    // CalcOpticalFlowPyrLK（BGRA，平移 (3,2)）
+    cv::setRNGSeed(7);
+    cv::Mat mtex(96, 96, CV_8UC1);
+    cv::randu(mtex, cv::Scalar(40), cv::Scalar(220));
+    cv::Mat moved(96, 96, CV_8UC1, cv::Scalar(40));
+    mtex(cv::Rect(0, 0, 93, 94)).copyTo(moved(cv::Rect(3, 2, 93, 94)));
+    cv::Mat bgra_p, bgra_q;
+    cv::cvtColor(mtex, bgra_p, cv::COLOR_GRAY2BGRA);
+    cv::cvtColor(moved, bgra_q, cv::COLOR_GRAY2BGRA);
+    Image2DAlg_Image bp = MakeImage(bgra_p);
+    Image2DAlg_Image bq = MakeImage(bgra_q);
+    const Image2DAlg_Point2f tin1[1] = { {48.0f, 48.0f} };
+    Image2DAlg_Point2f* np = NULL;
+    unsigned char st1 = 0;
+    check(Image2DAlg_CalcOpticalFlowPyrLK(&bp, &bq, tin1, 1, 21, 3, &np, &st1) == 0 &&
+          st1 != 0 && np != NULL && std::fabs(np[0].x - 51.0) < 1.0 &&
+          std::fabs(np[0].y - 50.0) < 1.0,
+          "BGRA LK 跟踪位移 ≈ (3,2)");
+    Image2DAlg_FreePoint2f(np);
+    np = NULL;
+    Image2DAlg_FreeImage(&bq);
+    Image2DAlg_FreeImage(&bp);
+
+    // StereoMatch（BGRA，视差 10）
+    cv::setRNGSeed(17);
+    cv::Mat stex(120, 210, CV_8UC1);
+    cv::randu(stex, cv::Scalar(40), cv::Scalar(220));
+    cv::Mat sleft = stex(cv::Rect(0, 0, 200, 120)).clone();
+    cv::Mat sright = stex(cv::Rect(10, 0, 200, 120)).clone();
+    cv::Mat bl, br;
+    cv::cvtColor(sleft, bl, cv::COLOR_GRAY2BGRA);
+    cv::cvtColor(sright, br, cv::COLOR_GRAY2BGRA);
+    Image2DAlg_Image slc = MakeImage(bl);
+    Image2DAlg_Image src_b = MakeImage(br);
+    Image2DAlg_Image cdisp;
+    cdisp.width = 200;
+    cdisp.height = 120;
+    cdisp.channels = 1;
+    cdisp.data = (unsigned char*)std::malloc((size_t)200 * 120);
+    std::memset(cdisp.data, 0, (size_t)200 * 120);
+    check(Image2DAlg_StereoMatch(&slc, &src_b, 0, 96, 5, &cdisp) == 0, "BGRA SGBM 返回 0");
+    int gok = 0, gtotal = 0;
+    for (int y = 20; y < 100; y += 4)
+        for (int x = 120; x < 190; x += 4) {
+            ++gtotal;
+            const int v = cdisp.data[(size_t)y * 200 + x];
+            if (v >= 9 && v <= 11) ++gok;
+        }
+    check(gtotal > 0 && gok * 5 >= gtotal * 4, "BGRA SGBM 深部视差 ≈ 10");
+    Image2DAlg_FreeImage(&cdisp);
+    Image2DAlg_FreeImage(&src_b);
+    Image2DAlg_FreeImage(&slc);
+
+    // FindTransformECC（BGRA 平移模型，模糊结构纹理）
+    cv::Mat etex(120, 120, CV_8UC1);
+    cv::randu(etex, cv::Scalar(40), cv::Scalar(220));
+    cv::Mat etexb;
+    cv::GaussianBlur(etex, etexb, cv::Size(9, 9), 2.0);
+    cv::Mat tin2(120, 120, CV_8UC1);
+    cv::Mat T = (cv::Mat_<double>(2, 3) << 1, 0, 4, 0, 1, 3);
+    cv::warpAffine(etexb, tin2, T, tin2.size(), cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+    cv::Mat bt, bi;
+    cv::cvtColor(etexb, bt, cv::COLOR_GRAY2BGRA);
+    cv::cvtColor(tin2, bi, cv::COLOR_GRAY2BGRA);
+    Image2DAlg_Image et = MakeImage(bt);
+    Image2DAlg_Image ein = MakeImage(bi);
+    double em[9] = { 0 };
+    double corr = 0.0;
+    check(Image2DAlg_FindTransformECC(&et, &ein, 0, 200, 1e-5, em, &corr) == 0 &&
+          std::fabs(em[2] - 4.0) < 0.5 && std::fabs(em[5] - 3.0) < 0.5 && corr > 0.9,
+          "BGRA ECC 恢复平移 (4,3)");
+    Image2DAlg_FreeImage(&ein);
+    Image2DAlg_FreeImage(&et);
+
+    Image2DAlg_FreeImage(&c2);
+    Image2DAlg_FreeImage(&c1);
+}
 
 
 
@@ -3628,6 +5251,14 @@ int main()
     testRegionStats();
 
     testFeaturePointsAndFits();
+
+    testFeaturePipeline();
+
+    testFeatureExtensions();
+
+    testTrackRegisterStereo();
+
+    testColorInputPaths();
 
     testErrorPaths();
 

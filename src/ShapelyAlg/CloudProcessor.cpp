@@ -1532,7 +1532,9 @@ int CloudProcessor<PointT>::segmentDBSCAN(const CloudConstPtr& src, double eps, 
 
     const int n = (int)clean->size();
     out_labels.assign((size_t)n, -1);
-    // 标签按 clean 对齐，函数尾部映射回原始 src 行号（见 return 前）
+    // 标签按 clean 对齐（长度 = 剔除非有限点后的点数，clean 点 j 对应 src 行 global[j]），
+    // 函数尾部仅按簇大小降序编号，**不回映射到 src 行号**——调用方如需原始行号须自行经 global
+    // 映射（见 fitInputClean；Point3DAlg 封装层即按此契约做映射）。
 
     // 1) 半径搜索缓存每个点的邻居，并标记核心点（含自身的邻居数 >= min_points）
     typename pcl::search::KdTree<PointT>::Ptr tree(new pcl::search::KdTree<PointT>);

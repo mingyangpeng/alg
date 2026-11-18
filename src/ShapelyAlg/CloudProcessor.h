@@ -424,7 +424,10 @@ public:
     /// 噪声点单独标记。
     /// [in] eps         邻域半径
     /// [in] min_points  核心点所需最小邻居数（含自身）
-    /// [out] out_labels 与 src 等长的簇标签；-1 = 噪声，≥0 = 簇号（按簇大小降序编号）
+    /// [out] out_labels 按"剔除非有限点后的 clean 云"对齐的簇标签（**与 src 不等长**：
+    ///             labels[j] = clean 点 j 的标签，clean 点 j 对应 src 行 global[j]，
+    ///             global 由 fitInputClean 产生；含 NaN/Inf 输入时调用方须自行映射回原行号）；
+    ///             -1 = 噪声，≥0 = 簇号（按簇大小降序编号）
     /// 返回：簇数量（不含噪声）
     /// 注意：PCL 1.9 无 DBSCAN，内部用 KdTree 半径搜索 + 并查集实现。
     static int segmentDBSCAN(const CloudConstPtr& src, double eps, int min_points,

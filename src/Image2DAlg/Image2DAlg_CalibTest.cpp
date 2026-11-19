@@ -45,7 +45,11 @@ static void testMono()
     std::printf("== 单目标定（针孔 + 畸变）==\n");
     const cv::Size imgSize(1280, 960);
     const cv::Size corners(9, 6);
-    const double square = 10.0;   // mm
+    // 方格边长 25mm：板面 200×125mm，覆盖到像场半径 r≈0.57。
+    // 板若只占像场中心窄贴片（r≤0.24），(fx,k1,k2) 径向多项式在该区间上
+    // 本质简并——连 OpenCV calibrateCamera 都只能骑在似然谷里（fx 偏差
+    // 可达 +6~16px），±5px 级断言统计上不可满足；板面覆盖越宽越可辨识。
+    const double square = 25.0;   // mm
 
     // 真值参数
     image2d::CameraIntrinsics truth;
@@ -62,7 +66,7 @@ static void testMono()
     std::vector<std::vector<cv::Point2f>> views;
     std::mt19937 rng(12345);
     std::uniform_real_distribution<double> noise(-0.05, 0.05);
-    for (int v = 0; v < 10; ++v) {
+    for (int v = 0; v < 12; ++v) {
         const double ang = -0.3 + 0.06 * v;
         cv::Mat rvec = MakeRVec(0.02 * (v - 5), 0.03 * v, ang);
         cv::Mat tvec = MakeTVec(-100.0 + 20.0 * v, -80.0 + 15.0 * v, 350.0 + 30.0 * v);
@@ -104,6 +108,11 @@ static void testMono()
     check(near(result.cy, truth.cy, 5.0), "cy 收敛（真值 480）");
     check(near(result.k1, truth.k1, 0.05), "k1 收敛（真值 -0.15）");
     check(near(result.k2, truth.k2, 0.05), "k2 收敛（真值 0.02）");
+
+    // 回归（工单003）：外参量纲恢复——t_z 应接近模拟真值（首图 t=(-100,-80,350)）。
+    // 修复前 t 被拍到"板对角线×5"的任意尺度，LM 伪收敛后外参完全失真。
+    check(!tvecs.empty() && near(tvecs[0].at<double>(2), 350.0, 40.0),
+          "外参 t_z 恢复模拟量纲（首图真值 350）");
 
     std::printf("    求解: fx=%.2f fy=%.2f cx=%.2f cy=%.2f k1=%.4f k2=%.4f rms=%.4f\n",
                 result.fx, result.fy, result.cx, result.cy, result.k1, result.k2, rms);
@@ -195,6 +204,31 @@ static void testFisheye()
               "鱼眼去畸变往返一致");
     }
 
+    // 回归（工单003）：Mei 投影 fy 各向异性参与——fy≠fx 时 v 轴必须用 fy。
+    // 修复前 MeiProjectPoint 只用 fx，CalibrateFisheyeMei 优化的 fy 是无约束
+    // 参数（雅可比恒零），永远停在初值上。
+    {
+        image2d::CameraIntrinsics Ka;
+        Ka.imageSize = imgSize;
+        Ka.fx = 350.0; Ka.fy = 500.0;   // 故意 fy≠fx
+        Ka.cx = 640.0; Ka.cy = 480.0;
+        Ka.xi = 0.6;
+        const double w2[3] = { 3.0, 4.0, 10.0 };
+        const double nw = std::sqrt(w2[0] * w2[0] + w2[1] * w2[1] + w2[2] * w2[2]);
+        const double denom = Ka.xi + w2[2] / nw;          // ξ + cosθ
+        const double eu = Ka.fx * (w2[0] / nw) / denom;   // u−cx 期望（fx·sx/denom）
+        const double ev = Ka.fy * (w2[1] / nw) / denom;   // v−cy 期望（fy·sy/denom）
+        double uv2[2];
+        check(image2d::MeiProjectPoint(w2, Ka, uv2), "MeiProjectPoint fy≠fx");
+        check(std::fabs(uv2[0] - (Ka.cx + eu)) < 1e-9 &&
+              std::fabs(uv2[1] - (Ka.cy + ev)) < 1e-9, "各向异性投影：u/v 轴分别用 fx/fy");
+        double dir2[3];
+        check(image2d::MeiUnprojectPixel(uv2[0], uv2[1], Ka, dir2), "MeiUnprojectPixel fy≠fx");
+        check(std::fabs(dir2[0] - w2[0] / nw) < 1e-9 &&
+              std::fabs(dir2[1] - w2[1] / nw) < 1e-9 &&
+              std::fabs(dir2[2] - w2[2] / nw) < 1e-9, "各向异性反投影方向一致");
+    }
+
     std::printf("    求解: fx=%.2f fy=%.2f cx=%.2f cy=%.2f xi=%.4f rms=%.4f\n",
                 result.fx, result.fy, result.cx, result.cy, result.xi, rms);
 }
@@ -205,7 +239,9 @@ static void testStereo()
     std::printf("== 双目标定 + 立体校正 ==\n");
     const cv::Size imgSize(1280, 960);
     const cv::Size corners(9, 6);
-    const double square = 10.0;
+    // 方格边长 25mm：与单目测试同理，板面须覆盖足够像场半径，
+    // (fx,k1) 径向简并才被透视线索打破（窄中央贴片连 OpenCV 都无法辨识 fx）
+    const double square = 25.0;
 
     // 左右相机有固定的相对位姿（平行光轴 + 已知基线）
     const double baseline = 120.0;   // mm
@@ -218,13 +254,18 @@ static void testStereo()
     const std::vector<cv::Point3f> world = image2d::CalibBoardWorldPoints(corners, square);
 
     // 模拟：同一批位姿（板→世界），左右相机分别投影
-    // 左相机系 = 世界系；右相机系 = 世界系平移 -baseline（X 方向）
+    // 右相机 = 左相机沿相机系 X 平移 −baseline（刚体基线，平行光轴）
+    // 位姿/视角数与单目测试对齐（12 视图、倾斜 ±15° 级、距离 350~680）：
+    // 板面近乎正对时 (fx,t_z,k1) 存在近似连续规范谷——曾实测 8 视图弱倾斜数据
+    // 上真值 rms(0.0421) 反而高于谷内伪解(0.0410)，连 OpenCV calibrateCamera
+    // 都只能收敛到 fx 偏 +6~16px，±5px 断言在统计上不可满足；倾斜提供的
+    // 透视线索是数据可辨识的前提。
     std::vector<std::vector<cv::Point2f>> leftViews, rightViews;
     std::mt19937 rng(999);
     std::uniform_real_distribution<double> noise(-0.05, 0.05);
-    for (int v = 0; v < 8; ++v) {
-        cv::Mat rvec = MakeRVec(0.02 * v, -0.02 * v, 0.05 * v);
-        cv::Mat tvec = MakeTVec(-100.0 + 15.0 * v, -70.0 + 10.0 * v, 380.0 + 25.0 * v);
+    for (int v = 0; v < 12; ++v) {
+        cv::Mat rvec = MakeRVec(0.02 * (v - 5), 0.03 * v, -0.3 + 0.06 * v);
+        cv::Mat tvec = MakeTVec(-100.0 + 20.0 * v, -80.0 + 15.0 * v, 350.0 + 30.0 * v);
         cv::Mat R;
         cv::Rodrigues(rvec, R);
 
@@ -243,9 +284,13 @@ static void testStereo()
                     (float)(truthL.fx * (xn * rad) + truthL.cx + noise(rng)),
                     (float)(truthL.fy * (yn * rad) + truthL.cy + noise(rng))));
             }
-            // 右相机（在世界系 X+baseline，同姿态）
+            // 右相机 = 左相机沿相机系 X 平移 −baseline（刚体基线，平行光轴）：
+            //   x_r = R·X + t − (b,0,0)，相对位姿恒为 R_rel=I、t_rel=(b,0,0)。
+            //   （旧写法把 wp.x−baseline 代入 R 后 xc 又减 baseline——基线被计两次，
+            //   附加位姿相关项 R·(b,0,0)，等效基线≈2b 且随位姿漂移，与
+            //   "固定相对位姿 + 基线 120" 的断言自相矛盾，任何正确实现都无法满足）
             {
-                const double X = wp.x - baseline, Y = wp.y, Z = wp.z;   // 相机系 = 世界系平移
+                const double X = wp.x, Y = wp.y, Z = wp.z;
                 const double xc = R.at<double>(0, 0) * X + R.at<double>(0, 1) * Y + R.at<double>(0, 2) * Z + tvec.at<double>(0) - baseline;
                 const double yc = R.at<double>(1, 0) * X + R.at<double>(1, 1) * Y + R.at<double>(1, 2) * Z + tvec.at<double>(1);
                 const double zc = R.at<double>(2, 0) * X + R.at<double>(2, 1) * Y + R.at<double>(2, 2) * Z + tvec.at<double>(2);

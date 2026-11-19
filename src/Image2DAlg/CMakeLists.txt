@@ -63,6 +63,13 @@ if(MSVC)
     target_link_libraries(Image2DAlg_CalibTest PRIVATE ${OpenCV_LIBS})
 endif()
 
+# ctest：CalibTest 与运行时 DLL 同在 output/Release（无外部数据文件依赖——
+# 模拟数据自生成，持久化测试把临时文件写到工作目录）
+add_test(NAME Image2DAlg_CalibTest
+    COMMAND Image2DAlg_CalibTest
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output/Release
+)
+
 # -----------------------------------------------------------------------------
 # C 接口测试入口（ctest 第 5 项）
 # -----------------------------------------------------------------------------

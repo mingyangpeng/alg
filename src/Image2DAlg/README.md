@@ -1,6 +1,6 @@
 ﻿# Image2DAlg —— 通用 2D 模块
 
-`src/Image2DAlg` 是面向 ComUI 宿主的通用 2D 算法库：图像读取、通用处理、测量/缺陷检测，以及标定接口类（`Image2DAlg_Calib`）。当前版本 **2.2.0**（73 个通用算子：处理 17 + 特征 14 + 测量 37 + 跟踪配准立体 5；另有 Init / ReadImage / GetVersion / Free* 等生命周期与释放接口）。
+`src/Image2DAlg` 是面向 ComUI 宿主的通用 2D 算法库：图像读取、通用处理、测量/缺陷检测，以及标定接口类（`Image2DAlg_Calib`）。当前版本 **2.3.0**（76 个通用算子：处理 20 + 特征 14 + 测量 37 + 跟踪配准立体 5；另有 Init / ReadImage / GetVersion / Free* 等生命周期与释放接口）。
 
 ## 定位与依赖
 
@@ -59,6 +59,9 @@ ComUI 适配层在 `integration/comui/Image2DAlg_comui.cpp`，节点声明在 `i
 | `Image2DAlg_WarpPerspective(in, m[9], w, h, interpolation, out)` | 同输入 | 透视变换（3x3 行主序） |
 | `Image2DAlg_HSVThreshold(in, h_lo, h_hi, s_lo, s_hi, v_lo, v_hi, out)` | 1 | HSV 阈值分割 0/255 掩膜（h∈[0,180]，红色跨 0 需两次调用；灰度图 -3） |
 | `Image2DAlg_AbsDiff(in1, in2, out)` | 同输入 | 批板差分：逐像素差的绝对值（尺寸/通道必须一致） |
+| `Image2DAlg_Laplacian(in, ksize, scale, out)` | 同输入 | Laplacian 二阶导（2.3.0）：ksize 1/3/5/7；8U/16U 走 CV_16S 中间取绝对值×scale 饱和回原深度，浮点同深度保符号 |
+| `Image2DAlg_Filter2D(in, kernel, ksize, out)` | 同输入 | 自定义 k×k 浮点核卷积（2.3.0）：ksize 奇数 1~51、行主序锚点=核中心；8U/16U 走 CV_16S 中间取绝对值饱和回原深度，浮点同深度保符号。中值/双边/高斯由 Blur method 0/1/2 覆盖，不另设入口 |
+| `Image2DAlg_DenoiseNLMeans(in, h, h_color, tw, sw, out)` | 同输入 | 非局部均值降噪（2.3.0）：1ch → fastNlMeansDenoising / 3ch → fastNlMeansDenoisingColored / 4ch 拆 BGR 后回贴 alpha（同 Blur 双边先例）；h 亮度强度（>0，建议 3）、h_color 彩色强度（通常 = h）、tw 模板窗（默认 7，自动补奇）、sw 搜索窗（默认 21，须 > tw 否则 -3，自动补奇）；NLMeans 块匹配语义 Blur 未覆盖故单设入口 |
 
 ## 测量 / 缺陷检测
 

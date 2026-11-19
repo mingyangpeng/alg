@@ -15,6 +15,7 @@
 #include <opencv2/features2d.hpp>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/video.hpp>   // calcOpticalFlowPyrLK / findTransformECC（world440 全含，无新增链接依赖）
+#include <opencv2/photo.hpp>   // fastNlMeansDenoising(Colored)（world440 全含，无新增链接依赖）
 
 #include <math.h>
 #include <stdlib.h>
@@ -2820,6 +2821,94 @@ int Image2DAlg_SolvePnP(const double* object_points, const Image2DAlg_Point2f* i
             tvec[i] = tv.at<double>(i, 0);
         }
         return 0;
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+// ---------------- 滤波扩展（2.3.0 新增） ----------------
+
+int Image2DAlg_Laplacian(const Image2DAlg_Image* in, int ksize, double scale,
+                         Image2DAlg_Image* out) {
+    cv::Mat src;
+    if (int rc = Wrap(in, src)) return rc;
+    if (!out) return -1;
+    if (ksize != 1 && ksize != 3 && ksize != 5 && ksize != 7) return -3;
+    if (!(scale > 0.0)) return -3;
+    try {
+        cv::Mat dst;
+        const bool floatIn = (src.depth() == CV_32F || src.depth() == CV_64F);
+        if (floatIn) {
+            // 浮点输入：同深度直出（保留符号）
+            cv::Laplacian(src, dst, src.depth(), ksize, scale);
+        } else {
+            // 8U/16U：CV_16S 中间 -> |响应|×scale 饱和回原深度（负响应折叠，
+            // 工业边缘增强常用口径；需要符号信息时改用浮点输入）
+            cv::Mat mid;
+            cv::Laplacian(src, mid, CV_16S, ksize, scale);
+            cv::convertScaleAbs(mid, dst);
+        }
+        return CopyOut(dst, out);
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+int Image2DAlg_Filter2D(const Image2DAlg_Image* in, const float* kernel, int ksize,
+                        Image2DAlg_Image* out) {
+    cv::Mat src;
+    if (int rc = Wrap(in, src)) return rc;
+    if (!kernel || !out) return -1;
+    if (ksize < 1 || ksize > 51 || ksize % 2 == 0) return -3;
+    try {
+        cv::Mat kern(ksize, ksize, CV_32F, (void*)kernel);
+        cv::Mat dst;
+        const bool floatIn = (src.depth() == CV_32F || src.depth() == CV_64F);
+        if (floatIn) {
+            cv::filter2D(src, dst, src.depth(), kern);
+        } else {
+            // 8U/16U：CV_16S 中间（保留符号与幅值）-> |响应| 饱和回原深度
+            cv::Mat mid;
+            cv::filter2D(src, mid, CV_16S, kern);
+            cv::convertScaleAbs(mid, dst);
+        }
+        return CopyOut(dst, out);
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+int Image2DAlg_DenoiseNLMeans(const Image2DAlg_Image* in, double h, double h_color,
+                              int template_window, int search_window,
+                              Image2DAlg_Image* out) {
+    cv::Mat src;
+    if (int rc = Wrap(in, src)) return rc;
+    if (!out) return -1;
+    // 强度参数须为正（NLMeans 的 h 是噪声水平权重，<=0 无意义）；窗口先按
+    // 调用值比较（search 须 > template），再自动补奇（下限 3 / 补奇后仍严格大于）
+    if (!(h > 0.0) || !(h_color > 0.0)) return -3;
+    if (search_window <= template_window) return -3;
+    const int tw = OddAtLeast(template_window, 3);
+    const int sw = OddAtLeast(search_window, tw + 2);
+    try {
+        cv::Mat dst;
+        if (src.channels() == 1) {
+            cv::fastNlMeansDenoising(src, dst, (float)h, tw, sw);
+        } else if (src.channels() == 3) {
+            cv::fastNlMeansDenoisingColored(src, dst, (float)h, (float)h_color, tw, sw);
+        } else {
+            // 4 通道 BGRA：NLMeans 不支持 4 通道——拆 BGR 走 Colored 后回贴 alpha
+            std::vector<cv::Mat> ch;
+            cv::split(src, ch);
+            cv::Mat bgr, denoised;
+            cv::merge(std::vector<cv::Mat>{ch[0], ch[1], ch[2]}, bgr);
+            cv::fastNlMeansDenoisingColored(bgr, denoised, (float)h, (float)h_color, tw, sw);
+            std::vector<cv::Mat> out_ch;
+            cv::split(denoised, out_ch);
+            out_ch.push_back(ch[3]);
+            cv::merge(out_ch, dst);
+        }
+        return CopyOut(dst, out);
     } catch (const cv::Exception&) {
         return -99;
     }

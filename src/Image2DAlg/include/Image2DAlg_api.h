@@ -42,6 +42,10 @@
 //            跟踪配准立体族（CalcOpticalFlowPyrLK 光流 / FindTransformECC 对齐 /
 //            PhaseCorrelate 平移估计 / StereoMatch 双目视差 / SolvePnP 位姿）
 //
+//   2.3.0  + 滤波扩展（Laplacian 算子 / Filter2D 自定义卷积核——中值/双边/
+//            高斯已由 Blur method 0/1/2 覆盖，不另设入口避免语义漂移）+
+//            DenoiseNLMeans 非局部均值降噪
+//
 // 【通道语义】Image2DAlg_Image.channels 支持 1（灰度）/ 3（BGR）/ 4（BGRA），
 //   data 为紧排像素（行步长 = width * channels，无对齐填充）：
 //   * 通用算子保持输入真实通道数（1→1、3→3、4→4，alpha 随通道参与运算）；
@@ -1231,6 +1235,62 @@ IMAGE2DALG_EXPORT int Image2DAlg_SolvePnP(const double* object_points,  /* 3N */
                                           int count, const double camera_matrix[9],
                                           const double* dist_coeffs, int dist_count,
                                           double rvec[3], double tvec[3]);
+
+// ---------------- 滤波扩展（2.3.0 新增） ----------------
+// 注：中值/双边/高斯已由 Image2DAlg_Blur 的 method 0/1/2 覆盖（含 4ch 双边
+// 内部拆 BGR 保 alpha），本节只补 Blur 未覆盖的导数类、自定义核滤波与非局部
+// 均值降噪（NLMeans 块匹配加权去噪，语义不同于局部滤波），避免同一语义
+// 多入口漂移。
+
+/// Laplacian 算子（二阶导：边缘/纹理增强）。
+/// [in]  ksize   核边长（1/3/5/7，奇数；其余 -> -3）
+/// [in]  scale   结果缩放系数（>0；1 = 原始值）
+/// [out] out     同 MedianBlur 容器约定。深度规则：浮点输入 -> 同深度（保留
+///               符号）；8U/16U 输入 -> CV_16S 中间结果取绝对值 × scale 后
+///               饱和回原深度（负响应折叠为正，工业边缘增强常用口径）
+/// 返回：0 成功；-1 空指针；-3 ksize 非法/scale <= 0/容器不匹配；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_Laplacian(const Image2DAlg_Image* in, int ksize,
+                                           double scale, Image2DAlg_Image* out);
+
+/// 自定义卷积核（filter2D：任意线性滤波，锐化/模板匹配核/边缘核）。
+/// [in]  kernel   float 数组，ksize*ksize 个元素行主序（锚点 = 核中心）
+/// [in]  ksize    核边长（奇数，1~51；核元素全 0 也合法——输出全 0 图）
+/// [out] out      同 MedianBlur 容器约定。深度规则：8U/16U 输入 -> CV_16S
+///                中间结果取绝对值后饱和回原深度；浮点输入 -> 同深度（保留符号）
+/// 返回：0 成功；-1 空指针；-3 ksize 非法（<1、>51、偶数）/kernel 为 NULL/
+///       容器不匹配；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_Filter2D(const Image2DAlg_Image* in,
+                                          const float* kernel, int ksize,
+                                          Image2DAlg_Image* out);
+
+/// 非局部均值降噪（NLMeans：cv::fastNlMeansDenoising / fastNlMeansDenoisingColored，
+/// 块匹配加权平均去高斯白噪声，保细节优于局部滤波——与 Blur 双边互补的另一条
+/// 降噪路径，Blur 未覆盖此语义故单设入口）。
+/// [in]  in              输入图（1 灰度 / 3 BGR / 4 BGRA；其余 -> -3）
+/// [in]  h               亮度分量滤波强度（>0；常用 3~10：大 = 去噪强但细节损失
+///                       多，小 = 保细节但有残留噪声；建议默认 3）
+/// [in]  h_color         彩色分量强度（>0；仅 3/4 通道生效——内部转 CIELAB 后
+///                       L 分量用 h、AB 分量用 h_color，通常取 = h）
+/// [in]  template_window 模板窗边长（块尺寸；奇数，偶数/过小自动补奇下限 3，
+///                       默认建议 7）
+/// [in]  search_window   搜索窗边长（取相似块的搜索范围；奇数，偶数自动补奇；
+///                       调用值须 > template_window，补奇后仍保证严格大于；
+///                       默认建议 21，性能随其线性下降）
+/// [out] out             同 MedianBlur 容器约定：malloc 新紧排缓冲（width/height/
+///                       channels 同输入），用 Image2DAlg_FreeImage 释放；返回
+///                       非 0 时 out->data 保持调用方内容未写。路由规则：
+///                       1 通道 -> fastNlMeansDenoising；3 通道 ->
+///                       fastNlMeansDenoisingColored；4 通道 BGRA 内部拆 BGR 走
+///                       Colored 后回贴原 alpha（同 Blur 4ch 双边先例）。
+///                       输入容器恒 8U 紧排（data 为 unsigned char*，全模块统一
+///                       口径；cv photo 模块 NLMeans 支持 CV_8U/CV_16U，32F 不适用）
+/// 返回：0 成功；-1 空指针/空图（in/out 为 NULL、data 为空、宽高 <= 0）；
+///       -3 h <= 0、h_color <= 0、search_window <= template_window 或容器不匹配
+///       （通道非 1/3/4）；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_DenoiseNLMeans(const Image2DAlg_Image* in,
+                                                double h, double h_color,
+                                                int template_window, int search_window,
+                                                Image2DAlg_Image* out);
 
 #ifdef __cplusplus
 }

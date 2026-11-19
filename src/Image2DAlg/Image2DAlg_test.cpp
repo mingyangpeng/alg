@@ -20,6 +20,8 @@
 
 
 
+#include <algorithm>   // std::max initializer-list（NLMeans 噪声偏离度用）
+
 #include <cmath>
 
 #include <cstdio>
@@ -212,7 +214,7 @@ static void testVersionAndLifecycle()
 
     check(ver != NULL && ver[0] != '\0', "GetVersion 非空");
 
-    check(ver != NULL && std::strcmp(ver, "2.2.0") == 0, "GetVersion = 2.2.0（2.2.0 特征扩展+跟踪配准立体）");
+    check(ver != NULL && std::strcmp(ver, "2.3.0") == 0, "GetVersion = 2.3.0（2.3.0 滤波扩展：Laplacian/Filter2D）");
 
     bool hasDigit = false;
 
@@ -1590,6 +1592,194 @@ static void testShapesDefectsMulti()
     count = 0;
     check(Image2DAlg_ConvexityDefects(collinear, 4, &defects, &count) == 0 &&
           count == 0 && defects == NULL, "共线退化输入 -> 0/NULL/0");
+
+    // ---- 2.3.0 滤波扩展：Laplacian / Filter2D ----
+    {
+        // 8U 阶梯图：左黑右白（边界在 x=10）
+        cv::Mat step(10, 20, CV_8UC1, cv::Scalar(0));
+        for (int y = 0; y < step.rows; ++y)
+            for (int x = 10; x < step.cols; ++x)
+                step.at<unsigned char>(y, x) = 255;
+        Image2DAlg_Image in = MakeImage(step);
+        Image2DAlg_Image out;
+        std::memset(&out, 0, sizeof(out));
+
+        check(Image2DAlg_Laplacian(&in, 3, 1.0, &out) == 0, "Laplacian 8U 返回 0");
+        check(out.width == 20 && out.height == 10 && out.channels == 1,
+              "Laplacian 尺寸/通道与输入一致");
+        int flatZero = 1, maxResp = 0;
+        for (int y = 0; y < 10; ++y) {
+            if (out.data[y * 20 + 5] != 0) flatZero = 0;
+            for (int x = 8; x <= 12; ++x)
+                if (out.data[y * 20 + x] > maxResp) maxResp = out.data[y * 20 + x];
+        }
+        check(flatZero, "Laplacian 平坦区响应 0");
+        check(maxResp >= 200, "Laplacian 边界强响应（8U 走 CV_16S 中间取绝对值）");
+        check(Image2DAlg_Laplacian(&in, 2, 1.0, &out) == -3, "Laplacian 偶数核 -> -3");
+        check(Image2DAlg_Laplacian(&in, 3, 0.0, &out) == -3, "Laplacian scale<=0 -> -3");
+        Image2DAlg_FreeImage(&out);
+
+        float ident[9] = { 0, 0, 0, 0, 1, 0, 0, 0, 0 };
+        std::memset(&out, 0, sizeof(out));
+        check(Image2DAlg_Filter2D(&in, ident, 3, &out) == 0, "Filter2D 恒等核返回 0");
+        int same = 1;
+        for (int i = 0; i < 20 * 10; ++i)
+            if (out.data[i] != in.data[i]) { same = 0; break; }
+        check(same, "Filter2D 恒等核输出逐像素 == 输入");
+
+        float kern[9] = { 0, -1, 0, -1, 5, -1, 0, -1, 0 };   // 5x 锐化核
+        std::memset(&out, 0, sizeof(out));
+        check(Image2DAlg_Filter2D(&in, kern, 3, &out) == 0, "Filter2D 锐化核返回 0");
+        check(out.data[5 * 20 + 5] == 0, "锐化核平坦黑区保持 0");
+        int edgeMax = 0;
+        for (int y = 0; y < 10; ++y)
+            for (int x = 9; x <= 11; ++x)
+                if (out.data[y * 20 + x] > edgeMax) edgeMax = out.data[y * 20 + x];
+        check(edgeMax >= 200, "锐化核边界增强（CV_16S 中间取 |.|）");
+        check(Image2DAlg_Filter2D(&in, NULL, 3, &out) == -1, "Filter2D kernel=NULL -> -1");
+        check(Image2DAlg_Filter2D(&in, ident, 2, &out) == -3, "Filter2D 偶数核 -> -3");
+        Image2DAlg_FreeImage(&out);
+        Image2DAlg_FreeImage(&in);
+    }
+
+    // ---- 2.3.0 滤波扩展：DenoiseNLMeans（非局部均值降噪） ----
+    {
+        // 灰度：常量底色 200 + 200 个 LCG 撒出的单点盐椒噪声——孤立点的块
+        // 自权重恒为 1（块与自身距离 0），小 h 下其余相似块权重趋 0 仍会保留
+        // 孤立点，需大 h 强降噪（h=50）让平坦块权重参与平均，把单点拉回底色
+        cv::Mat noisy(64, 64, CV_8UC1, cv::Scalar(200));
+        unsigned seed = 12345u;
+        for (int i = 0; i < 200; ++i) {
+            seed = seed * 1103515245u + 12345u;
+            const int x = (int)((seed >> 16) % 64);
+            seed = seed * 1103515245u + 12345u;
+            const int y = (int)((seed >> 16) % 64);
+            noisy.at<unsigned char>(y, x) = (unsigned char)((i & 1) ? 0 : 255);
+        }
+        Image2DAlg_Image in = MakeImage(noisy);
+        Image2DAlg_Image out;
+        std::memset(&out, 0, sizeof(out));
+
+        check(Image2DAlg_DenoiseNLMeans(&in, 50.0, 50.0, 7, 21, &out) == 0,
+              "NLMeans 8U 返回 0");
+        check(out.width == 64 && out.height == 64 && out.channels == 1,
+              "NLMeans 尺寸/通道与输入一致");
+        int cntBefore = 0, cntAfter = 0;
+        long long absBefore = 0, absAfter = 0;
+        for (int i = 0; i < 64 * 64; ++i) {
+            const int d0 = std::abs((int)in.data[i] - 200);
+            const int d1 = std::abs((int)out.data[i] - 200);
+            if (d0 > 20) ++cntBefore;
+            if (d1 > 20) ++cntAfter;
+            absBefore += d0;
+            absAfter += d1;
+        }
+        check(cntAfter * 5 <= cntBefore,
+              "NLMeans 噪声点显著减弱（偏离底色>20 的像素 5 倍以上收敛）");
+        check(absAfter < absBefore, "NLMeans 输出整体更接近常量底色（平均偏差收窄）");
+        Image2DAlg_FreeImage(&out);
+
+        // 偶数窗口自动补奇：template 6 -> 7、search 20 -> 21（补奇后仍 > template）
+        std::memset(&out, 0, sizeof(out));
+        check(Image2DAlg_DenoiseNLMeans(&in, 10.0, 10.0, 6, 20, &out) == 0,
+              "NLMeans 偶数窗口自动补奇返回 0");
+        check(out.channels == 1, "NLMeans 补奇调用输出通道不变");
+        Image2DAlg_FreeImage(&out);
+
+        // 3ch 彩色同验：常量底色 (180,120,90) + 单点噪声——BGR 各通道均更接近底色
+        cv::Mat noisy3(64, 64, CV_8UC3, cv::Scalar(90, 120, 180));
+        seed = 54321u;
+        for (int i = 0; i < 200; ++i) {
+            seed = seed * 1103515245u + 12345u;
+            const int x = (int)((seed >> 16) % 64);
+            seed = seed * 1103515245u + 12345u;
+            const int y = (int)((seed >> 16) % 64);
+            noisy3.at<cv::Vec3b>(y, x) = (i & 1) ? cv::Vec3b(0, 0, 0)
+                                                 : cv::Vec3b(255, 255, 255);
+        }
+        Image2DAlg_Image in3 = MakeImage(noisy3);
+        std::memset(&out, 0, sizeof(out));
+        check(Image2DAlg_DenoiseNLMeans(&in3, 50.0, 50.0, 7, 21, &out) == 0,
+              "NLMeans 3ch 返回 0（走 Colored）");
+        check(out.width == 64 && out.height == 64 && out.channels == 3,
+              "NLMeans 3ch 尺寸/通道与输入一致");
+        int cnt3Before = 0, cnt3After = 0;
+        for (int y = 0; y < 64; ++y) {
+            for (int x = 0; x < 64; ++x) {
+                const cv::Vec3b& p0 = noisy3.at<cv::Vec3b>(y, x);
+                const unsigned char* p1 = out.data + ((size_t)y * 64 + x) * 3;
+                const int dev0 = std::max({ std::abs((int)p0[0] - 90),
+                                            std::abs((int)p0[1] - 120),
+                                            std::abs((int)p0[2] - 180) });
+                const int dev1 = std::max({ std::abs((int)p1[0] - 90),
+                                            std::abs((int)p1[1] - 120),
+                                            std::abs((int)p1[2] - 180) });
+                if (dev0 > 20) ++cnt3Before;
+                if (dev1 > 20) ++cnt3After;
+            }
+        }
+        check(cnt3After * 5 <= cnt3Before,
+              "NLMeans 3ch 噪声点显著减弱（Colored 路径生效）");
+        Image2DAlg_FreeImage(&out);
+
+        // 4ch alpha 保持：BGR 噪声参与降噪、alpha 逐像素原样回贴（拆 BGR 先例）
+        cv::Mat noisy4;
+        cv::cvtColor(noisy3, noisy4, cv::COLOR_BGR2BGRA);
+        for (int y = 0; y < 64; ++y)
+            for (int x = 0; x < 64; ++x)
+                noisy4.at<cv::Vec4b>(y, x)[3] = (unsigned char)((x * 3 + y) % 256);
+        Image2DAlg_Image in4 = MakeImage(noisy4);
+        std::memset(&out, 0, sizeof(out));
+        check(Image2DAlg_DenoiseNLMeans(&in4, 50.0, 50.0, 7, 21, &out) == 0,
+              "NLMeans 4ch 返回 0（拆 BGR 走 Colored）");
+        check(out.width == 64 && out.height == 64 && out.channels == 4,
+              "NLMeans 4ch 尺寸/通道与输入一致");
+        int alphaKeep = 1;
+        for (int i = 0; i < 64 * 64; ++i)
+            if (out.data[i * 4 + 3] != in4.data[i * 4 + 3]) { alphaKeep = 0; break; }
+        check(alphaKeep, "NLMeans 4ch alpha 逐像素原样保留");
+        int cnt4After = 0;
+        for (int y = 0; y < 64; ++y)
+            for (int x = 0; x < 64; ++x) {
+                const unsigned char* p = out.data + ((size_t)y * 64 + x) * 4;
+                const int dev = std::max({ std::abs((int)p[0] - 90),
+                                           std::abs((int)p[1] - 120),
+                                           std::abs((int)p[2] - 180) });
+                if (dev > 20) ++cnt4After;
+            }
+        check(cnt4After * 5 <= cnt3Before,
+              "NLMeans 4ch BGR 分量降噪生效（拆 BGR 路径与 3ch 同幅度收敛）");
+        Image2DAlg_FreeImage(&out);
+
+        // 错误路径
+        std::memset(&out, 0, sizeof(out));
+        check(Image2DAlg_DenoiseNLMeans(&in, 0.0, 10.0, 7, 21, &out) == -3,
+              "NLMeans h<=0 -> -3");
+        check(Image2DAlg_DenoiseNLMeans(&in, -1.0, 10.0, 7, 21, &out) == -3,
+              "NLMeans h<0 -> -3");
+        check(Image2DAlg_DenoiseNLMeans(&in, 10.0, 0.0, 7, 21, &out) == -3,
+              "NLMeans h_color<=0 -> -3");
+        check(Image2DAlg_DenoiseNLMeans(&in, 10.0, 10.0, 21, 21, &out) == -3,
+              "NLMeans search<=template -> -3");
+        check(Image2DAlg_DenoiseNLMeans(&in, 10.0, 10.0, 7, 5, &out) == -3,
+              "NLMeans search<template -> -3");
+        check(Image2DAlg_DenoiseNLMeans(NULL, 10.0, 10.0, 7, 21, &out) == -1,
+              "NLMeans in=NULL -> -1");
+        check(Image2DAlg_DenoiseNLMeans(&in, 10.0, 10.0, 7, 21, NULL) == -1,
+              "NLMeans out=NULL -> -1");
+
+        cv::Mat two(4, 4, CV_8UC2, cv::Scalar(1, 2));
+        Image2DAlg_Image in2 = MakeImage(two);
+        std::memset(&out, 0, sizeof(out));
+        check(Image2DAlg_DenoiseNLMeans(&in2, 10.0, 10.0, 7, 21, &out) == -3,
+              "NLMeans 2 通道容器不匹配 -> -3");
+        Image2DAlg_FreeImage(&out);
+        Image2DAlg_FreeImage(&in2);
+        Image2DAlg_FreeImage(&out);
+        Image2DAlg_FreeImage(&in3);
+        Image2DAlg_FreeImage(&in4);
+        Image2DAlg_FreeImage(&in);
+    }
 
 
 

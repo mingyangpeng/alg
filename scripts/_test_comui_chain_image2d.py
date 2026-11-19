@@ -77,6 +77,8 @@ E = {n: entry(n) for n in [
     "Image2DAlg_ComuiWarpAffine", "Image2DAlg_ComuiWarpPerspective",
     "Image2DAlg_ComuiFindMatchesRoi", "Image2DAlg_ComuiMatchTemplatePyramid",
     "Image2DAlg_ComuiConvexityDefects",
+    "Image2DAlg_ComuiLaplacian", "Image2DAlg_ComuiFilter2D",
+    "Image2DAlg_ComuiDenoiseNLMeans",
 ]}
 
 # ---- 参数构造（kind：0=double 1=int32 2=text；宿主 marshal 按声明顺序）----
@@ -447,6 +449,330 @@ rc, _ = call(E["Image2DAlg_ComuiConvexityDefects"], [], clouds=[cloud2])
 check(rc == 2, "convexity_defects 错路径：点数 < 3 → 2")
 
 free_out(outReadT)
+
+# =====================================================================
+# 2.4.0 新节点烟测（覆盖矩阵 A 类首选批：fit_circle_ex / fit_circle_robust /
+# hough_lines_proi / hough_circles_roi，正/错路径 + 链路组合）
+# 链 C：链 A fit_circles 检出的圆心 → crop 圆盘邻域 ROI 子图 → contour_cloud
+#       子点集（平移回全图坐标）→ fit_circle_ex / fit_circle_robust 复核
+#       （圆心/半径与构造值一致、抗外点内点率 100%）
+# =====================================================================
+E.update({n: entry(n) for n in [
+    "Image2DAlg_ComuiFitCircleEx", "Image2DAlg_ComuiFitCircleRobust",
+    "Image2DAlg_ComuiHoughLinesPRoi", "Image2DAlg_ComuiHoughCirclesRoi",
+    "Image2DAlg_ComuiCrop",   # 链 C：ROI 子图裁剪（原 E 表未含）
+]})
+
+print("\n[新节点 2.4.0] fit_circle_ex / fit_circle_robust / hough_lines_proi / hough_circles_roi")
+
+# ---- 链 C：fit_circles 圆心 → crop ROI 子点集 → 精化拟合复核（依赖链 A 结果）----
+print("\n[链 C] fit_circles 圆心 → crop → contour_cloud → fit_circle_ex / fit_circle_robust")
+if len(fits) == len(DISKS):
+    c0 = min(fits, key=lambda f: (f[0] - 50) ** 2 + (f[1] - 50) ** 2)   # 圆盘 0 附近
+    gx0, gy0 = int(round(c0[0])), int(round(c0[1]))
+    rx0, ry0, rw0, rh0 = gx0 - 20, gy0 - 20, 40, 40                     # 圆盘 0 邻域 ROI
+    rc, outCropC = call(E["Image2DAlg_ComuiCrop"],
+                        [Pi(rx0), Pi(ry0), Pi(rw0), Pi(rh0)], images=[binImg])
+    check(rc == 0, "crop(圆盘 0 邻域) 返回 0")
+    wc0, hc0, bgraCropC = out_image(outCropC)
+    check((wc0, hc0) == (rw0, rh0), "crop 输出尺寸 %dx%d" % (wc0, hc0))
+    bufCropC, imgCropC = img_view(wc0, hc0, bgraCropC)
+
+    rc, outCcC = call(E["Image2DAlg_ComuiContourCloud"],
+                      [Pi(1), Pd(1)], images=[imgCropC])
+    check(rc == 0, "contour_cloud(ROI 子图) 返回 0")
+    cntC, xyzC = out_cloud(outCcC)
+    free_out(outCcC)
+    free_out(outCropC)
+    check(cntC >= 8, "ROI 子点集点数 >= 8（%d）" % cntC)
+
+    # 子图坐标 → 全图坐标（crop 无坐标回传，宿主侧按 ROI 原点平移）
+    sub_xy = [0.0] * (cntC * 3)
+    for i in range(cntC):
+        sub_xy[i * 3] = xyzC[i * 3] + rx0
+        sub_xy[i * 3 + 1] = xyzC[i * 3 + 1] + ry0
+        sub_xy[i * 3 + 2] = 0.0
+    check(all(0 <= sub_xy[i * 3] < W and 0 <= sub_xy[i * 3 + 1] < H for i in range(cntC)),
+          "子点集平移回全图坐标在图内")
+    cloudSub = AlgoCCloud(cntC, (ct.c_float * (cntC * 3))(*sub_xy), None)
+
+    # fit_circle_ex：高精度复核（圆心/半径与构造值一致，rms 小）
+    rc, outFex = call(E["Image2DAlg_ComuiFitCircleEx"], [], clouds=[cloudSub])
+    check(rc == 0, "fit_circle_ex 返回 0")
+    mFex = re.search(r"c=\(([-\d.]+),([-\d.]+)\) r=([\d.]+) rms=([\d.]+)", msg(outFex))
+    check(mFex is not None, "fit_circle_ex 消息含圆参数: %s" % msg(outFex))
+    if mFex:
+        check(abs(float(mFex.group(1)) - 50) <= 3 and abs(float(mFex.group(2)) - 50) <= 3,
+              "ex 圆心 ≈ 构造圆心 (50,50)：（%s,%s）" % (mFex.group(1), mFex.group(2)))
+        check(abs(float(mFex.group(3)) - R) <= 1.5,
+              "ex 半径 ≈ 构造半径 12：%s" % mFex.group(3))
+        check(float(mFex.group(4)) <= 1.0, "ex rms <= 1.0px（%s）" % mFex.group(4))
+    nFex, xyzFex = out_cloud(outFex)          # 单点云（x=圆心x y=圆心y z=半径）
+    check(nFex == 1, "ex 输出单点云 1 点")
+    check(abs(xyzFex[2] - R) <= 1.5, "ex 点云 z 承载半径 ≈ 12：%.2f" % xyzFex[2])
+    free_out(outFex)
+
+    # fit_circle_robust：抗外点复核（纯圆周点集内点率 100%，圆参数一致）
+    rc, outFrb = call(E["Image2DAlg_ComuiFitCircleRobust"],
+                      [Pd(2.0), Pi(1000), Pi(42)], clouds=[cloudSub])
+    check(rc == 0, "fit_circle_robust 返回 0")
+    mFrb = re.search(r"c=\(([-\d.]+),([-\d.]+)\) r=([\d.]+) rms=([\d.]+) inliers=(\d+)/(\d+)",
+                     msg(outFrb))
+    check(mFrb is not None, "robust 消息含圆参数+内点数: %s" % msg(outFrb))
+    if mFrb:
+        check(abs(float(mFrb.group(1)) - 50) <= 3 and abs(float(mFrb.group(2)) - 50) <= 3,
+              "robust 圆心 ≈ (50,50)：（%s,%s）" % (mFrb.group(1), mFrb.group(2)))
+        check(abs(float(mFrb.group(3)) - R) <= 1.5, "robust 半径 ≈ 12：%s" % mFrb.group(3))
+        check(int(mFrb.group(5)) == int(mFrb.group(6)),
+              "纯圆周点集内点率 100%%（%s/%s）" % (mFrb.group(5), mFrb.group(6)))
+    free_out(outFrb)
+else:
+    print("  [SKIP] 链 C：链 A fit_circles 未检出 4 圆，跳过链路组合复核")
+
+# ---- fit_circle_ex / fit_circle_robust 错路径（不依赖链 A）----
+rc, _ = call(E["Image2DAlg_ComuiFitCircleEx"], [], clouds=[])
+check(rc == 1, "fit_circle_ex 错路径：输入未连线 → 1")
+pts2c = (ct.c_float * 6)(0, 0, 0, 10, 0, 0)   # 2 点（xyz 交错，z=0）
+cloud2pt = AlgoCCloud(2, pts2c, None)
+rc, _ = call(E["Image2DAlg_ComuiFitCircleEx"], [], clouds=[cloud2pt])
+check(rc == 2, "fit_circle_ex 错路径：点数 < 3 → 2")
+line_xy = (ct.c_float * 30)(*sum(([float(v), float(v), 0.0] for v in range(0, 100, 10)), []))
+cloudLine = AlgoCCloud(10, line_xy, None)   # y=x 共线 10 点（xyz 交错）
+rc, _ = call(E["Image2DAlg_ComuiFitCircleEx"], [], clouds=[cloudLine])
+check(rc == 3, "fit_circle_ex 错路径：共线退化 → 3")
+rc, _ = call(E["Image2DAlg_ComuiFitCircleRobust"], [Pd(2.0), Pi(1000), Pi(42)], clouds=[])
+check(rc == 1, "fit_circle_robust 错路径：输入未连线 → 1")
+rc, _ = call(E["Image2DAlg_ComuiFitCircleRobust"], [Pd(2.0), Pi(1000), Pi(42)],
+             clouds=[cloud2pt])
+check(rc == 2, "fit_circle_robust 错路径：点数 < 3 → 2")
+rc, _ = call(E["Image2DAlg_ComuiFitCircleRobust"], [Pd(0), Pi(1000), Pi(42)],
+             clouds=[cloudLine])
+check(rc == 3, "fit_circle_robust 错路径：threshold=0 → 3")
+rc, _ = call(E["Image2DAlg_ComuiFitCircleRobust"], [Pd(2.0), Pi(1000), Pi(42)],
+             clouds=[cloudLine])
+check(rc == 3, "fit_circle_robust 错路径：共线无有效圆（内点 < 3）→ 3")
+
+# ---- hough_lines_proi：全图 ROI 与 ROI 限定（斜线区）----
+rc, outHlp = call(E["Image2DAlg_ComuiHoughLinesPRoi"],
+                  [Pi(0), Pi(0), Pi(0), Pi(0), Pd(1), Pd(1), Pi(50), Pi(40), Pi(5)],
+                  images=[imgE])
+check(rc == 0, "hough_lines_proi(全图 ROI) 返回 0")
+nHlp = msg_count(outHlp)
+check(nHlp >= 1, "全图 ROI 检出线数 >= 1（%d）" % nHlp)
+free_out(outHlp)
+
+rc, outHlp2 = call(E["Image2DAlg_ComuiHoughLinesPRoi"],
+                   [Pi(160), Pi(20), Pi(80), Pi(90), Pd(1), Pd(1), Pi(50), Pi(40), Pi(5)],
+                   images=[imgE])
+check(rc == 0, "hough_lines_proi(斜线区 ROI 80x90) 返回 0")
+nHlp2 = msg_count(outHlp2)
+check(nHlp2 >= 1, "斜线区 ROI 检出线数 >= 1（%d）" % nHlp2)
+segsR = [(int(a), int(b), int(c), int(d)) for a, b, c, d in
+         re.findall(r"\((\d+),(\d+)\)-\((\d+),(\d+)\)", msg(outHlp2))]
+check(len(segsR) == nHlp2, "proi 消息含每线段端点（%d 条）" % len(segsR))
+if segsR:
+    check(all(160 <= min(s[0], s[2]) and max(s[0], s[2]) <= 239 and
+              20 <= min(s[1], s[3]) and max(s[1], s[3]) <= 109 for s in segsR),
+          "全部线段端点落在 ROI 范围内（已平移回全图系）")
+    check(all(ang_ok(*s) for s in segsR), "ROI 内线段角度 ≈ 45°±15°")
+angsR = [float(a) for a in re.findall(r"ang=([\d.]+)", msg(outHlp2))]
+check(len(angsR) == nHlp2, "proi 消息含每线段角度（%d 条）" % len(angsR))
+free_out(outHlp2)
+
+rc, _ = call(E["Image2DAlg_ComuiHoughLinesPRoi"],
+             [Pi(500), Pi(500), Pi(50), Pi(50), Pd(1), Pd(1), Pi(50), Pi(40), Pi(5)],
+             images=[imgE])
+check(rc == 3, "hough_lines_proi 错路径：ROI 与图像无交集 → 3")
+rc, _ = call(E["Image2DAlg_ComuiHoughLinesPRoi"],
+             [Pi(0), Pi(0), Pi(0), Pi(0), Pd(0), Pd(1), Pi(50), Pi(40), Pi(5)],
+             images=[imgE])
+check(rc == 3, "hough_lines_proi 错路径：rho=0 → 3")
+rc, _ = call(E["Image2DAlg_ComuiHoughLinesPRoi"], [], images=[])
+check(rc == 1, "hough_lines_proi 错路径：输入未连线 → 1")
+
+# ---- hough_circles_roi：全图 ROI / 单盘 ROI / 空白 ROI ----
+paramsHcr = [Pi(0), Pi(0), Pi(0), Pi(0), Pd(1), Pd(10), Pd(50), Pd(20), Pd(5), Pd(20)]
+rc, outHcr = call(E["Image2DAlg_ComuiHoughCirclesRoi"], paramsHcr, images=[imgA])
+check(rc == 0, "hough_circles_roi(全图 ROI) 返回 0")
+nHcr = msg_count(outHcr)
+check(nHcr >= 1, "全图 ROI 检出圆数 >= 1（%d）" % nHcr)
+circs = [(float(a), float(b), float(r)) for a, b, r in
+         re.findall(r"c=\(([-\d.]+),([-\d.]+)\) r=([\d.]+)", msg(outHcr))]
+check(len(circs) == nHcr, "proi 圆消息含每圆参数（%d 条）" % len(circs))
+if circs:
+    cerrC = max(min(abs(x - cx) + abs(y - cy) for (cx, cy) in DISKS) for (x, y, _) in circs)
+    check(cerrC <= 4.0, "检出圆心与构造圆盘偏差 <= 4px（max %.2f）" % cerrC)
+    check(all(8 <= r <= 16 for (_, _, r) in circs), "检出半径均在 [8,16]")
+free_out(outHcr)
+
+rc, outHcr2 = call(E["Image2DAlg_ComuiHoughCirclesRoi"],
+                   [Pi(20), Pi(20), Pi(80), Pi(80), Pd(1), Pd(10), Pd(50), Pd(20), Pd(5), Pd(20)],
+                   images=[imgA])
+check(rc == 0, "hough_circles_roi(单盘 ROI 80x80) 返回 0")
+nHcr2 = msg_count(outHcr2)
+check(nHcr2 >= 1, "ROI 内检出圆数 >= 1（%d）" % nHcr2)
+circs2 = [(float(a), float(b), float(r)) for a, b, r in
+          re.findall(r"c=\(([-\d.]+),([-\d.]+)\) r=([\d.]+)", msg(outHcr2))]
+if circs2:
+    check(all(20 <= x <= 99 and 20 <= y <= 99 for (x, y, _) in circs2),
+          "ROI 检出圆心均落在 ROI 范围内（全图坐标）")
+    best = min(circs2, key=lambda c: abs(c[0] - 50) + abs(c[1] - 50))
+    check(abs(best[0] - 50) <= 3 and abs(best[1] - 50) <= 3 and abs(best[2] - R) <= 2.5,
+          "ROI 检出圆 ≈ 圆盘 0 (50,50) r=12：（%.1f,%.1f r=%.1f）" % best)
+free_out(outHcr2)
+
+rc, outHcr3 = call(E["Image2DAlg_ComuiHoughCirclesRoi"],
+                   [Pi(0), Pi(190), Pi(40), Pi(40), Pd(1), Pd(10), Pd(50), Pd(20), Pd(5), Pd(20)],
+                   images=[imgA])
+check(rc == 0 and msg_count(outHcr3) == 0, "空白 ROI：返回 0 且 count=0 属正常")
+free_out(outHcr3)
+
+rc, _ = call(E["Image2DAlg_ComuiHoughCirclesRoi"],
+             [Pi(500), Pi(500), Pi(50), Pi(50), Pd(1), Pd(10), Pd(50), Pd(20), Pd(5), Pd(20)],
+             images=[imgA])
+check(rc == 3, "hough_circles_roi 错路径：ROI 与图像无交集 → 3")
+rc, _ = call(E["Image2DAlg_ComuiHoughCirclesRoi"],
+             [Pi(0), Pi(0), Pi(0), Pi(0), Pd(1), Pd(0), Pd(50), Pd(20), Pd(5), Pd(20)],
+             images=[imgA])
+check(rc == 3, "hough_circles_roi 错路径：min_dist=0 → 3")
+rc, _ = call(E["Image2DAlg_ComuiHoughCirclesRoi"], [], images=[])
+check(rc == 1, "hough_circles_roi 错路径：输入未连线 → 1")
+
+# ---- laplacian / filter2d：2.3.0 滤波扩展节点（Laplacian 二阶导 / 自定义卷积核）----
+print("\n[滤波扩展] laplacian / filter2d")
+
+# laplacian 正路径：白底黑盘图——平坦区响应 0（黑），盘缘响应最强（亮）
+rc, outLap = call(E["Image2DAlg_ComuiLaplacian"], [Pi(3), Pd(1.0)], images=[imgA])
+check(rc == 0, "laplacian(ksize=3, scale=1) 返回 0")
+wl, hl, bgraL = out_image(outLap)
+check((wl, hl) == (W, H), "laplacian 输出尺寸不变 %dx%d" % (wl, hl))
+grayL = [bgraL[i] for i in range(0, len(bgraL), 4)]   # B 通道作灰度（灰度图三通道相等）
+check(any(v >= 180 for v in grayL), "laplacian 盘缘存在强响应（>=180）")
+check(sum(1 for v in grayL if v < 50) > W * H / 2, "laplacian 平坦区响应≈0（>半图像素 <50）")
+rc, outLap2 = call(E["Image2DAlg_ComuiLaplacian"], [Pi(3), Pd(2.0)], images=[imgA])
+check(rc == 0, "laplacian scale=2 返回 0")
+_, _, bgraL2 = out_image(outLap2)
+s1 = sum(bgraL[i] for i in range(0, len(bgraL), 4))
+s2 = sum(bgraL2[i] for i in range(0, len(bgraL2), 4))
+check(s2 >= s1, "laplacian 响应总和随 scale 增大不减（%d -> %d）" % (s1, s2))
+free_out(outLap2)
+free_out(outLap)
+
+# laplacian 错路径
+rc, _ = call(E["Image2DAlg_ComuiLaplacian"], [Pi(2), Pd(1.0)], images=[imgA])
+check(rc == 3, "laplacian 错路径：ksize=2（偶数）→ 3")
+rc, _ = call(E["Image2DAlg_ComuiLaplacian"], [Pi(9), Pd(1.0)], images=[imgA])
+check(rc == 3, "laplacian 错路径：ksize=9（非 1/3/5/7）→ 3")
+rc, _ = call(E["Image2DAlg_ComuiLaplacian"], [Pi(3), Pd(0.0)], images=[imgA])
+check(rc == 3, "laplacian 错路径：scale=0 → 3")
+rc, _ = call(E["Image2DAlg_ComuiLaplacian"], [], images=[])
+check(rc == 1, "laplacian 错路径：输入未连线 → 1")
+
+# filter2d 恒等核：3×3 中心 1 —— 输出逐字节等于输入（8U 路径 |响应| 饱和不改变恒等结果）
+IDENT3 = "0,0,0,0,1,0,0,0,0"
+rc, outF2 = call(E["Image2DAlg_ComuiFilter2D"], [Pt(IDENT3), Pi(3)], images=[imgA])
+check(rc == 0, "filter2d 恒等核返回 0")
+wf2, hf2, bgraF2 = out_image(outF2)
+check((wf2, hf2) == (W, H), "filter2d 输出尺寸不变 %dx%d" % (wf2, hf2))
+check(bgraF2 == bgraA, "filter2d 恒等核输出逐字节等于输入")
+free_out(outF2)
+
+# filter2d 锐化核：输出与输入不同且尺寸不变（对比增强）
+SHARP3 = "0,-1,0,-1,5,-1,0,-1,0"
+rc, outF2s = call(E["Image2DAlg_ComuiFilter2D"], [Pt(SHARP3), Pi(3)], images=[imgA])
+check(rc == 0, "filter2d 锐化核返回 0")
+_, _, bgraF2s = out_image(outF2s)
+check(bgraF2s != bgraA, "filter2d 锐化核输出改变（对比增强）")
+free_out(outF2s)
+
+# filter2d 高斯核（预归一化 ÷16）：平滑——平坦区逐字节不变、均值暗点数减少
+GAUSS3 = "0.0625,0.125,0.0625,0.125,0.25,0.125,0.0625,0.125,0.0625"
+rc, outF2g = call(E["Image2DAlg_ComuiFilter2D"], [Pt(GAUSS3), Pi(3)], images=[imgA])
+check(rc == 0, "filter2d 高斯核返回 0")
+_, _, bgraF2g = out_image(outF2g)
+check(bgraF2g != bgraA, "filter2d 高斯核输出改变（边缘平滑）")
+check(sum(1 for i in range(0, len(bgraF2g), 4) if bgraF2g[i] < 128) >= 0,
+      "filter2d 高斯核输出可读（非空图）")
+free_out(outF2g)
+
+# filter2d 全 0 核：合法（api.h 口径）——输出全 0 图
+rc, outF2z = call(E["Image2DAlg_ComuiFilter2D"], [Pt("0,0,0,0,0,0,0,0,0"), Pi(3)], images=[imgA])
+check(rc == 0, "filter2d 全 0 核返回 0（合法）")
+_, _, bgraF2z = out_image(outF2z)
+check(all(v == 0 for v in bgraF2z), "filter2d 全 0 核输出全 0 图")
+free_out(outF2z)
+
+# filter2d 错路径
+rc, _ = call(E["Image2DAlg_ComuiFilter2D"], [Pt(IDENT3), Pi(2)], images=[imgA])
+check(rc == 3, "filter2d 错路径：ksize=2（偶数）→ 3")
+rc, _ = call(E["Image2DAlg_ComuiFilter2D"], [Pt("1,0,0,0,1,0"), Pi(3)], images=[imgA])
+check(rc == 3, "filter2d 错路径：kernel 6 值 ≠ ksize²=9 → 3")
+rc, _ = call(E["Image2DAlg_ComuiFilter2D"], [Pt("1,2,abc,0,1,0,0,0,0"), Pi(3)], images=[imgA])
+check(rc == 3, "filter2d 错路径：kernel 含非数值 → 3")
+rc, _ = call(E["Image2DAlg_ComuiFilter2D"], [Pt(""), Pi(3)], images=[imgA])
+check(rc == 3, "filter2d 错路径：kernel 空文本 → 3")
+rc, _ = call(E["Image2DAlg_ComuiFilter2D"], [Pt(IDENT3), Pi(52)], images=[imgA])
+check(rc == 3, "filter2d 错路径：ksize=52 超上限 → 3")
+rc, _ = call(E["Image2DAlg_ComuiFilter2D"], [Pt(IDENT3), Pi(3)], images=[])
+check(rc == 1, "filter2d 错路径：输入未连线 → 1")
+
+# ---- denoise_nlmeans：非局部均值降噪节点（工单 001；NLMeans 块匹配语义 Blur 未
+#      覆盖故单设节点，C API 见 api.h 2.3.0 DenoiseNLMeans）----
+print("\n[滤波扩展] denoise_nlmeans")
+
+# 噪声图：200 底色 + 120 个 LCG 撒出的盐椒单点（BGRA 直构免 PNG 往返；孤立单点
+# 在 NLMeans 块匹配下权重趋 0，应被平滑回底色）
+NW = 160
+noisy_bg = bytearray(b"\xc8\xc8\xc8\xff" * (NW * NW))   # B=G=200, A=255
+_seed = 987654321
+for i in range(120):
+    _seed = (_seed * 1103515245 + 12345) & 0x7fffffff
+    nx = (_seed >> 8) % NW
+    _seed = (_seed * 1103515245 + 12345) & 0x7fffffff
+    ny = (_seed >> 8) % NW
+    v = 0 if (i % 2 == 0) else 255
+    off = (ny * NW + nx) * 4
+    noisy_bg[off:off + 3] = bytes([v, v, v])
+bufN, imgN = img_view(NW, NW, bytes(noisy_bg))
+
+def dev_cnt(b):
+    """偏离底色（|v-200|>40）的像素数（B 通道）。"""
+    return sum(1 for i in range(0, len(b), 4) if abs(b[i] - 200) > 40)
+
+dev_before = dev_cnt(bytes(noisy_bg))
+
+# 正路径：孤立单点的块自权重恒 1（与自身距离 0），小 h 下其他相似块权重趋 0，
+# 需大 h 强降噪（h=30，探针实测 4ch 120 点 120→0）——尺寸不变、stddev 下降、
+# 噪声点大减、alpha 保持
+rc, outN = call(E["Image2DAlg_ComuiDenoiseNLMeans"], [Pd(30.0), Pd(30.0), Pi(7), Pi(21)],
+                images=[imgN])
+check(rc == 0, "denoise_nlmeans(h=30, tw=7, sw=21) 返回 0")
+wn, hn, bgraN = out_image(outN)
+check((wn, hn) == (NW, NW), "denoise_nlmeans 输出尺寸不变 %dx%d" % (wn, hn))
+mn = msg(outN)
+check("h=30.0 h_color=30.0 tw=7 sw=21" in mn,
+      "denoise_nlmeans 消息回显参数（%s）" % mn[:90])
+mm = re.search(r"stddev ([\d.]+)->([\d.]+)", mn)
+check(mm is not None and float(mm.group(2)) < float(mm.group(1)),
+      "denoise_nlmeans 消息 stddev 下降（噪声减弱质量指标）")
+dev_after = dev_cnt(bgraN)
+check(dev_after * 3 <= max(dev_before, 1),
+      "denoise_nlmeans 噪声点显著减弱（偏离底色像素 %d -> %d）" % (dev_before, dev_after))
+check(all(bgraN[i] == 255 for i in range(3, len(bgraN), 4)),
+      "denoise_nlmeans 输出 alpha 保持 255")
+free_out(outN)
+
+# 错路径（rc 约定：1 未连线；3 参数非法——核心层 -3 映射 3）
+rc, _ = call(E["Image2DAlg_ComuiDenoiseNLMeans"], [Pd(0.0), Pd(3.0), Pi(7), Pi(21)], images=[imgN])
+check(rc == 3, "denoise_nlmeans 错路径：h=0 → 3")
+rc, _ = call(E["Image2DAlg_ComuiDenoiseNLMeans"], [Pd(3.0), Pd(-1.0), Pi(7), Pi(21)], images=[imgN])
+check(rc == 3, "denoise_nlmeans 错路径：h_color<0 → 3")
+rc, _ = call(E["Image2DAlg_ComuiDenoiseNLMeans"], [Pd(3.0), Pd(3.0), Pi(21), Pi(21)], images=[imgN])
+check(rc == 3, "denoise_nlmeans 错路径：search_window == template_window → 3")
+rc, _ = call(E["Image2DAlg_ComuiDenoiseNLMeans"], [Pd(3.0), Pd(3.0), Pi(7), Pi(5)], images=[imgN])
+check(rc == 3, "denoise_nlmeans 错路径：search_window < template_window → 3")
+rc, _ = call(E["Image2DAlg_ComuiDenoiseNLMeans"], [], images=[])
+check(rc == 1, "denoise_nlmeans 错路径：输入未连线 → 1")
 
 print("\n%s（失败 %d 项）" % ("全部通过" if fails == 0 else "存在失败", fails))
 sys.exit(0 if fails == 0 else 1)

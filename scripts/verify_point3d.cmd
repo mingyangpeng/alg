@@ -79,7 +79,18 @@ if not defined DUMPBIN (
     goto :dependents
 )
 echo     dumpbin = !DUMPBIN!
+rem dumpbin output can come back truncated under this environment (observed
+rem twice: exact same byte cut, missing the tail of the export table). Detect
+rem the Summary trailer and retry; a full dump always ends with a Summary.
+set "TRY=0"
+:dump_exports
+set /a TRY+=1
 "!DUMPBIN!" /nologo /exports "%OUT%\Point3DAlg.dll" > "%TMPD%\exports.txt" 2>&1
+findstr /c:" Summary" "%TMPD%\exports.txt" >nul 2>&1
+if errorlevel 1 if !TRY! LSS 3 (
+    ping -n 2 127.0.0.1 >nul
+    goto :dump_exports
+)
 set "MISSING="
 for %%s in (Point3DAlg_GetVersion Point3DAlg_Init Point3DAlg_Cleanup Point3DAlg_ReadSickCloud Point3DAlg_FreeBuffer Point3DAlg_FreeCloud Point3DAlg_LoadCloud Point3DAlg_SaveCloudEx Point3DAlg_FilterCloud Point3DAlg_ExtractCloud Point3DAlg_TransformCloud Point3DAlg_FitModel Point3DAlg_SegmentCloud Point3DAlg_FreeClouds Point3DAlg_KnnSearch Point3DAlg_RadiusSearch Point3DAlg_MeasureCloud Point3DAlg_EstimateNormals Point3DAlg_DetectKeypoints Point3DAlg_ReconstructSurface Point3DAlg_MeshOp Point3DAlg_CloudToHeightMap Point3DAlg_FreeMesh Point3DAlg_FreeHeightMap Point3DAlg_LoadSickConfig Point3DAlg_StitchQuality Point3DAlg_CreateSickReader Point3DAlg_ComuiReadSick Point3DAlg_ComuiVoxel Point3DAlg_ComuiLoadCloud Point3DAlg_ComuiFilterCloud Point3DAlg_ComuiHeightMap Point3DAlg_ComuiDetectKeypoints Point3DAlg_ComuiFitModel) do (
     findstr /c:"%%s" "%TMPD%\exports.txt" >nul 2>&1
@@ -98,7 +109,13 @@ if not defined DUMPBIN (
     echo     SKIP - dumpbin not found
     goto :ctest
 )
+rem /dependents has produced a 0-byte file before: retry while empty (max 3).
+set "TRY=0"
+:dump_dependents
+set /a TRY+=1
 "!DUMPBIN!" /nologo /dependents "%OUT%\Point3DAlg.dll" > "%TMPD%\dependents.txt" 2>&1
+for %%A in ("%TMPD%\dependents.txt") do set "DSZ=%%~zA"
+if "!DSZ!"=="0" if !TRY! LSS 3 (ping -n 2 127.0.0.1 >nul & goto :dump_dependents)
 for %%d in (CommonAlg.dll ShapelyAlg.dll opencv_world440.dll pcl_common_release.dll) do (
     findstr /i /c:"%%d" "%TMPD%\dependents.txt" >nul 2>&1
     if errorlevel 1 (echo     MISS %%d & set "FAILED=1") else (echo     OK   %%d)

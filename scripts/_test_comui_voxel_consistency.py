@@ -22,7 +22,9 @@ import sys
 import numpy as np
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-DLL_DIR = r"D:\pmy\alg\build_gate2\output\Release"
+# DLL 目录：argv[1] 覆盖；默认 <repo>/build/output/Release（与链路脚本同口径）
+DLL_DIR = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "build", "output", "Release"))
 os.environ["PATH"] = DLL_DIR + os.pathsep + os.environ.get("PATH", "")
 os.add_dll_directory(DLL_DIR)
 

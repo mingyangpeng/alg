@@ -84,6 +84,11 @@ E_MEASURE = entry("Point3DAlg_ComuiMeasureCloud")
 E_SICK_QUALITY = entry("Point3DAlg_ComuiSickQuality")
 E_SICK_INTENSITY = entry("Point3DAlg_ComuiSickIntensity")
 E_SICK_RAW = entry("Point3DAlg_ComuiSickRaw")
+E_SAVE_EX = entry("Point3DAlg_ComuiSaveCloudEx")
+E_FIT_MODEL = entry("Point3DAlg_ComuiFitModel")
+E_KNN = entry("Point3DAlg_ComuiKnnSearch")
+E_RADIUS = entry("Point3DAlg_ComuiRadiusSearch")
+E_THICKNESS = entry("Point3DAlg_ComuiThicknessMap")
 
 # ---- marshal 辅助（宿主按 node.json params 声明序 + kind 组装，不带参数名）----
 def P(kind, val):
@@ -325,6 +330,257 @@ try:
     os.remove(tmp_ply)
 except OSError:
     pass
+
+# =====================================================================
+# Part 4. A 类补缺 4 节点：save_cloud_ex / knn_search / radius_search / thickness_map
+#（错误路径恒跑；正路径用链 B 的 verts 合成云，不依赖 Z: 盘）
+# =====================================================================
+print("---- Part 4. A 类补缺节点（save_cloud_ex / knn_search / radius_search / thickness_map）----")
+
+print("[错误路径]")
+rc, out = call(E_SAVE_EX, [], clouds=[(len(verts), [v for p in verts for v in p])])
+check(rc == 1, "save_cloud_ex 未设路径 → 1: %s" % out_msg(out))
+
+rc, out = call(E_SAVE_EX, [(2, os.path.join(tempfile.gettempdir(), "_no_such_dir_xyz_0", "c.ply")),
+                           (1, 1), (1, 1)], clouds=[(len(verts), [v for p in verts for v in p])])
+check(rc == 2, "save_cloud_ex 目录不存在 → 2: %s" % out_msg(out))
+
+rc, out = call(E_SAVE_EX, [(2, os.path.join(tempfile.gettempdir(), "_c_bad.pcd")), (1, 9), (1, 0)],
+               clouds=[(len(verts), [v for p in verts for v in p])])
+check(rc == 3, "save_cloud_ex type=9 → 3: %s" % out_msg(out))
+
+rc, out = call(E_KNN, [(0, 5.0), (0, 5.0), (0, 2.125), (1, 0)],
+               clouds=[(len(verts), [v for p in verts for v in p])])
+check(rc == 3, "knn_search k=0 → 3: %s" % out_msg(out))
+
+rc, out = call(E_KNN, [(0, 5.0), (0, 5.0), (0, 2.125), (1, 10)])
+check(rc == 1, "knn_search 输入未连线 → 1: %s" % out_msg(out))
+
+rc, out = call(E_KNN, [(0, 0.0), (0, 0.0), (0, 0.0), (1, 5)], clouds=[(0, [])])
+check(rc == 2, "knn_search 空点云 → 2: %s" % out_msg(out))
+
+rc, out = call(E_RADIUS, [(0, 5.0), (0, 5.0), (0, 2.125), (0, 0.0)], clouds=[(len(verts), [v for p in verts for v in p])])
+check(rc == 3, "radius_search radius=0 → 3: %s" % out_msg(out))
+
+rc, out = call(E_RADIUS, [(0, 5.0), (0, 5.0), (0, 2.125), (0, 0.5)])
+check(rc == 1, "radius_search 输入未连线 → 1: %s" % out_msg(out))
+
+rc, out = call(E_THICKNESS, [(0, 0.25)])
+check(rc == 1, "thickness_map 未连线 → 1: %s" % out_msg(out))
+
+rc, out = call(E_THICKNESS, [(0, 0.25)], clouds=[(len(verts), [v for p in verts for v in p])])
+check(rc == 1, "thickness_map 只连一片云 → 1: %s" % out_msg(out))
+
+rc, out = call(E_THICKNESS, [(0, 0.0)],
+               clouds=[(len(verts), [v for p in verts for v in p]),
+                       (len(verts), [v for p in verts for v in p])])
+check(rc == 3, "thickness_map cell=0 → 3: %s" % out_msg(out))
+
+print("[正路径]（合成云，不依赖 Z: 盘）")
+
+# knn_search：query 落在格网点 (5,5,2.125) 上 → 最近邻距离 0；k=5 全列
+QK = (5.0, 5.0, 2.0 + 0.5 * 0.5 * 0.5)
+rc, out = call(E_KNN, [(0, QK[0]), (0, QK[1]), (0, QK[2]), (1, 5)],
+               clouds=[(len(verts), [v for p in verts for v in p])])
+kmsg = out_msg(out)
+check(rc == 0, "knn_search k=5 rc=0: %s" % kmsg)
+m = re.search(r"knn k=(\d+) hits=(\d+)", kmsg)
+check(m is not None and m.group(1) == "5" and m.group(2) == "5", "knn 消息头恒为 k=5 hits=5")
+groups = re.findall(r"(\d+):([0-9.eE+-]+)", kmsg)
+check(len(groups) == 5, "knn 消息列 5 组 idx:dist")
+check(len(groups) == 5 and float(groups[0][1]) < 1e-6, "knn 最近邻距离 ≈ 0（query 与格网点重合）")
+d5 = [float(g[1]) for g in groups]
+check(d5 == sorted(d5), "knn 距离升序（欧氏口径）")
+
+# knn_search：k 超上限 999 → 按 30 截断（消息头部仍是总 k）
+rc, out = call(E_KNN, [(0, QK[0]), (0, QK[1]), (0, QK[2]), (1, 999)],
+               clouds=[(len(verts), [v for p in verts for v in p])])
+kmsg = out_msg(out)
+check(rc == 0 and "knn k=30 hits=30" in kmsg, "knn k=999 截断为 30: %s" % kmsg[:48])
+
+# radius_search：r=0.3 → 中心 + 4 个正邻格点（对角 0.354 > 0.3 不入）
+rc, out = call(E_RADIUS, [(0, QK[0]), (0, QK[1]), (0, QK[2]), (0, 0.3)],
+               clouds=[(len(verts), [v for p in verts for v in p])])
+rmsg = out_msg(out)
+check(rc == 0, "radius_search r=0.3 rc=0: %s" % rmsg)
+m = re.search(r"radius=[0-9.eE+-]+ hits=(\d+)", rmsg)
+check(m is not None and m.group(1) == "5", "radius r=0.3 命中 5（中心+4邻点）")
+
+# radius_search：0 命中属正常成功（api.h 口径："半径内无点 → 0 成功 + *out_count=0"）
+rc, out = call(E_RADIUS, [(0, 100.0), (0, 100.0), (0, 100.0), (0, 0.1)],
+               clouds=[(len(verts), [v for p in verts for v in p])])
+rmsg = out_msg(out)
+check(rc == 0 and "hits=0" in rmsg, "radius 远离点云 → rc=0 hits=0: %s" % rmsg)
+
+# thickness_map：顶面平面 z=2.0、底面 z=0.5+x/10 → 厚度 1.5~0.5（线性），cell=0.25 逐格对齐
+top_pts = []
+bot_pts = []
+for i in range(41):
+    for j in range(41):
+        x, y = i * 0.25, j * 0.25
+        top_pts.append((x, y, 2.0))
+        bot_pts.append((x, y, 0.5 + x / 10.0))
+rc, out = call(E_THICKNESS, [(0, 0.25)],
+               clouds=[(len(top_pts), [v for p in top_pts for v in p]),
+                       (len(bot_pts), [v for p in bot_pts for v in p])])
+tmsg = out_msg(out)
+check(rc == 0, "thickness_map rc=0: %s" % tmsg)
+if rc == 0:
+    check("thickness=[0.5~1.5]" in tmsg, "thickness min/max = [0.5~1.5]: %s" % tmsg)
+    check("valid=1681/1681(100.0%)" in tmsg, "thickness 有效率 100%%: %s" % tmsg)
+    w, hgt, px = out_image(out)
+    check(w == 41 and hgt == 41, "thickness 图尺寸 41x41: %dx%d" % (w, hgt))
+    check(any(p[3] == 255 for p in px), "thickness BGRA alpha=255")
+    check(max(p[0] for p in px) == 255 and min(p[0] for p in px) == 0,
+          "厚度归一化含灰度 0 与 255（tmin→0/tmax→255）")
+
+# thickness_map：两云 XY 不重叠 → 无同格双有效对 → 4（量测失败口径）
+bot_far = [(x + 100.0, y, z) for (x, y, z) in bot_pts]
+rc, out = call(E_THICKNESS, [(0, 0.25)],
+               clouds=[(len(top_pts), [v for p in top_pts for v in p]),
+                       (len(bot_pts), [v for p in bot_far for v in p])])
+check(rc == 4, "thickness 两云 XY 不重叠 → 4: %s" % out_msg(out))
+
+# =====================================================================
+# 链 C. load_cloud → filter_cloud(voxel) → save_cloud_ex 落盘 → load_cloud 回读
+#（save_cloud_ex 反向闭环验证：PLY/TXT/PCD 三格式落盘并回读点数一致）
+# =====================================================================
+print("---- 链 C. load_cloud → filter(voxel) → save_cloud_ex → load_cloud 回读 ----")
+tmp_in_ply = os.path.join(tempfile.gettempdir(), "_comui_chain_point3d_save_in.ply")
+tmp_out_ply = os.path.join(tempfile.gettempdir(), "_comui_chain_point3d_saved.ply")
+tmp_out_txt = os.path.join(tempfile.gettempdir(), "_comui_chain_point3d_saved.txt")
+tmp_out_pcd = os.path.join(tempfile.gettempdir(), "_comui_chain_point3d_saved.pcd")
+with open(tmp_in_ply, "w", encoding="ascii") as f:
+    f.write("ply\nformat ascii 1.0\nelement vertex %d\n" % len(verts))
+    f.write("property float x\nproperty float y\nproperty float z\nend_header\n")
+    for v in verts:
+        f.write("%.4f %.4f %.4f\n" % v)
+
+rc, out = call(E_LOAD_CLOUD, [(2, tmp_in_ply), (1, 1)])
+check(rc == 0, "链C load_cloud rc=0")
+ptsC = out_cloud(out) if rc == 0 else []
+nC = len(ptsC)
+check(nC == len(verts), "链C load_cloud 点数 = %d" % len(verts))
+
+if rc == 0 and nC > 0:
+    rc, out = call(E_FILTER, [(1, 0), (0, 0.5)], clouds=[(nC, [v for p in ptsC for v in p])])
+    check(rc == 0, "链C filter_cloud(voxel) rc=0: %s" % out_msg(out))
+    ptsF = out_cloud(out) if rc == 0 else []
+    nF = len(ptsF)
+    check(0 < nF < nC, "链C filter 点数递减合理：%d -> %d" % (nC, nF))
+else:
+    ptsF, nF = [], 0
+
+if ptsF:
+    flatF = [v for p in ptsF for v in p]
+    for tname, tcode, tfile in (("PLY", 1, tmp_out_ply), ("TXT", 2, tmp_out_txt), ("PCD", 0, tmp_out_pcd)):
+        rc, out = call(E_SAVE_EX, [(2, tfile), (1, tcode), (1, 1 if tcode == 1 else 0)],
+                       clouds=[(nF, flatF)])
+        smsg = msg_of(out)
+        check(rc == 0, "链C save_cloud_ex %s rc=0: %s" % (tname, smsg))
+        check("points=%d" % nF in smsg and "type=%s" % tname in smsg,
+              "save %s 消息含点数/格式: %s" % (tname, smsg))
+        rc, out = call(E_LOAD_CLOUD, [(2, tfile), (1, tcode)])
+        ptsR = out_cloud(out) if rc == 0 else []
+        check(rc == 0 and len(ptsR) == nF, "链C %s 落盘回读点数一致：%d == %d" % (tname, len(ptsR), nF))
+else:
+    skip("链C save/回读（filter 输出为空）")
+
+# =====================================================================
+# Part 5. 1.3.0 扩展节点：fit_model method 5 = line3D / filter_cloud method 10 = approxVoxel
+#（错误路径恒跑；正路径用合成云，不依赖 Z: 盘）
+# =====================================================================
+print("---- Part 5. 1.3.0 扩展节点（fit_model line3D / filter_cloud approxVoxel）----")
+
+# 空间直线拟合：沿方向 (1,2,3)/|·| 过 (1,1,1) 的直线 + 微垂直扰动（确定性伪噪声）
+import math
+DIRV = (1.0, 2.0, 3.0)
+dn = math.sqrt(sum(c * c for c in DIRV))
+DIRU = tuple(c / dn for c in DIRV)
+a0 = (DIRU[1], -DIRU[0], 0.0)
+a0n = math.sqrt(sum(c * c for c in a0))
+A = tuple(c / a0n for c in a0)                      # 与 DIRU 正交的单位向量
+B = (DIRU[1] * A[2] - DIRU[2] * A[1],
+     DIRU[2] * A[0] - DIRU[0] * A[2],
+     DIRU[0] * A[1] - DIRU[1] * A[0])               # u×a 第三个正交向量
+line_pts = []
+for i in range(60):
+    t = -1.5 + i * 0.05
+    jx = ((i * 37) % 7 - 3) * 0.002                 # ±0.006 内确定性垂直扰动
+    jy = ((i * 53) % 7 - 3) * 0.002
+    line_pts.append((1.0 + DIRU[0] * t + A[0] * jx + B[0] * jy,
+                     1.0 + DIRU[1] * t + A[1] * jx + B[1] * jy,
+                     1.0 + DIRU[2] * t + A[2] * jx + B[2] * jy))
+flat_line = [v for p in line_pts for v in p]
+
+# fit_model method 5 line3D（node.json 参数声明序：method/fit/distance_threshold）
+rc, out = call(E_FIT_MODEL, [(1, 5), (1, 0), (0, 0.05)], clouds=[(len(line_pts), flat_line)])
+check(rc == 0, "fit_model line3D(RANSAC) rc=0")
+lmsg = msg_of(out)
+m = re.search(r"line3D p=\(([-\d.eE+]+), ([-\d.eE+]+), ([-\d.eE+]+)\) "
+              r"dir=\(([-\d.eE+]+), ([-\d.eE+]+), ([-\d.eE+]+)\)", lmsg)
+check(m is not None, "line3D 消息含 p=/dir= 六系数: %s" % lmsg[:80])
+if m:
+    dv = [float(m.group(i)) for i in (4, 5, 6)]
+    dot = sum(dv[k] * DIRU[k] for k in range(3))
+    check(abs(abs(dot) - 1.0) < 1e-3, "line3D 方向与构造直线平行（|dot|=%.6f）" % abs(dot))
+    check(abs(math.sqrt(sum(c * c for c in dv)) - 1.0) < 1e-3, "line3D 方向为单位向量")
+    pv = [float(m.group(i)) for i in (1, 2, 3)]
+    po = [pv[k] - 1.0 for k in range(3)]
+    proj = sum(po[k] * DIRU[k] for k in range(3))
+    perp = math.sqrt(max(0.0, sum(c * c for c in po) - proj * proj))
+    check(perp < 0.05, "line3D 轴上点距构造直线 < 0.05（%.4f）" % perp)
+mm = re.search(r"内点 (\d+)/(\d+)", lmsg)
+check(mm is not None and int(mm.group(1)) >= 50, "line3D 内点 >= 50/60: %s" % (mm.group(1) if mm else "?"))
+
+# fit_model line3D：MSAC / LMS 两种 fit 也支持（api.h：plane/line3D 三种 fit 均支持）
+rc, out = call(E_FIT_MODEL, [(1, 5), (1, 1), (0, 0.05)], clouds=[(len(line_pts), flat_line)])
+check(rc == 0, "fit_model line3D(MSAC) rc=0")
+msg_of(out)
+rc, out = call(E_FIT_MODEL, [(1, 5), (1, 2), (0, 0.05)], clouds=[(len(line_pts), flat_line)])
+check(rc == 0, "fit_model line3D(LMS) rc=0")
+msg_of(out)
+
+# fit_model 错路径：method 6 越界 → 3；method 5 全同点（方向退化）→ 4；未连线 → 1
+rc, out = call(E_FIT_MODEL, [(1, 6), (1, 0), (0, 0.05)], clouds=[(len(line_pts), flat_line)])
+check(rc == 3, "fit_model method=6 越界 → 3: %s" % out_msg(out))
+degen = [1.0, 2.0, 3.0] * 20
+rc, out = call(E_FIT_MODEL, [(1, 5), (1, 0), (0, 0.05)], clouds=[(20, degen)])
+check(rc == 4, "fit_model line3D 全同点退化 → 4: %s" % out_msg(out))
+rc, out = call(E_FIT_MODEL, [(1, 5), (1, 0), (0, 0.05)], clouds=[])
+check(rc == 1, "fit_model 输入未连线 → 1")
+
+# filter_cloud method 10 approxVoxel：复用链 B 的 verts（41×41 格网 1681 点，间隔 0.25）
+rc, out = call(E_FILTER, [(1, 10), (0, 0.5)], clouds=[(nB, [v for p in ptsB for v in p])])
+check(rc == 0, "filter_cloud approxVoxel(leaf=0.5) rc=0: %s" % out_msg(out))
+ptsV = out_cloud(out) if rc == 0 else []
+nV = len(ptsV)
+check(0 < nV < nB, "approxVoxel 点数递减合理：%d -> %d" % (nB, nV))
+if ptsV:
+    vb = bbox_of(ptsV)
+    check(all(abs(vb[i] - EXPECT[i]) <= 0.75 for i in range(6)),
+          "approxVoxel 包围盒 ≈ 构造包围盒（leaf/2 量级偏差）")
+    check(all(0.0 <= p[0] <= 10.0 and 0.0 <= p[1] <= 10.0 and 2.0 <= p[2] <= 2.5
+              for p in ptsV), "approxVoxel 输出点均落在构造范围内")
+# approxVoxel 与 method 0 voxel 同 leaf：输出点数同量级（同为格网质心，格划分可有微小差异）
+rc, out = call(E_FILTER, [(1, 0), (0, 0.5)], clouds=[(nB, [v for p in ptsB for v in p])])
+ptsX = out_cloud(out) if rc == 0 else []
+check(rc == 0 and abs(len(ptsX) - nV) <= max(4, 0.1 * nV),
+      "approxVoxel 与 voxel 同 leaf 点数同量级：%d vs %d" % (nV, len(ptsX)))
+
+# filter_cloud 错路径：leaf<=0 → 3；method 11 越界 → 3；未连线 → 1
+rc, out = call(E_FILTER, [(1, 10), (0, 0.0)], clouds=[(nB, [v for p in ptsB for v in p])])
+check(rc == 3, "filter_cloud approxVoxel leaf=0 → 3: %s" % out_msg(out))
+rc, out = call(E_FILTER, [(1, 11), (0, 0.5)], clouds=[(nB, [v for p in ptsB for v in p])])
+check(rc == 3, "filter_cloud method=11 越界 → 3: %s" % out_msg(out))
+rc, out = call(E_FILTER, [(1, 10), (0, 0.5)], clouds=[])
+check(rc == 1, "filter_cloud 输入未连线 → 1")
+
+for t in (tmp_in_ply, tmp_out_ply, tmp_out_txt, tmp_out_pcd):
+    try:
+        os.remove(t)
+    except OSError:
+        pass
 
 print("\n%s（失败 %d 项）" % ("全部通过" if fails == 0 else "存在失败", fails))
 sys.exit(0 if fails == 0 else 1)

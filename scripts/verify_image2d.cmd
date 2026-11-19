@@ -78,7 +78,18 @@ if not defined DUMPBIN (
     goto :dependents
 )
 echo     dumpbin = !DUMPBIN!
+rem dumpbin output can come back truncated (missing Summary + tail of the
+rem export table under load): retry up to 3 times until the Summary trailer
+rem is present. ASCII-only file by design.
+set "TRY=0"
+:dump_exports
+set /a TRY+=1
 "!DUMPBIN!" /nologo /exports "%OUT%\Image2DAlg.dll" > "%TMPD%\exports.txt" 2>&1
+findstr /c:" Summary" "%TMPD%\exports.txt" >nul 2>&1
+if errorlevel 1 if !TRY! LSS 3 (
+    ping -n 2 127.0.0.1 >nul
+    goto :dump_exports
+)
 set "MISSING="
 for %%s in (Image2DAlg_ToGray Image2DAlg_Gamma Image2DAlg_Threshold Image2DAlg_Blur Image2DAlg_Morphology Image2DAlg_Canny Image2DAlg_Resize Image2DAlg_Crop Image2DAlg_Rotate Image2DAlg_Enhance Image2DAlg_ConnectedComponents Image2DAlg_AnalyzeContours Image2DAlg_MatchTemplate Image2DAlg_FreeBlobs Image2DAlg_FreeContours Image2DAlg_FastFeatures Image2DAlg_ComputeDescriptors Image2DAlg_MatchFeatures Image2DAlg_EstimateAffinePartial Image2DAlg_FindHomography Image2DAlg_SolvePnP Image2DAlg_ComuiFeatureAlign) do (
     findstr /c:"%%s" "%TMPD%\exports.txt" >nul 2>&1
@@ -97,7 +108,13 @@ if not defined DUMPBIN (
     echo     SKIP - dumpbin not found
     goto :ctest
 )
+rem /dependents has produced a 0-byte file before: retry while empty (max 3).
+set "TRY=0"
+:dump_dependents
+set /a TRY+=1
 "!DUMPBIN!" /nologo /dependents "%OUT%\Image2DAlg.dll" > "%TMPD%\dependents.txt" 2>&1
+for %%A in ("%TMPD%\dependents.txt") do set "DSZ=%%~zA"
+if "!DSZ!"=="0" if !TRY! LSS 3 (ping -n 2 127.0.0.1 >nul & goto :dump_dependents)
 for %%d in (ShapelyAlg.dll CommonAlg.dll opencv_world440.dll) do (
     findstr /i /c:"%%d" "%TMPD%\dependents.txt" >nul 2>&1
     if errorlevel 1 (echo     MISS %%d & set "FAILED=1") else (echo     OK   %%d)

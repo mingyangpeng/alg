@@ -1,4 +1,4 @@
-# C API ↔ ComUI 节点覆盖矩阵审计（2026-11-19）
+# C API ↔ ComUI 节点覆盖矩阵审计（2026-11-19；2026-11-20 增补滤波拟合批）
 
 范围：`src/Image2DAlg/include/Image2DAlg_api.h`（2.0.0~2.2.0 全部注释）、
 `src/Point3DAlg/include/Point3DAlg_api.h` + `Point3DAlg_SickApi.h`、
@@ -162,3 +162,17 @@
 2. **WarpAffine 头注释与实现语义表述不一致**：头文件写 dst(x,y)=src(M·[x,y,1]ᵀ)，实现为 cv::warpAffine 默认语义（M 为前向映射 src→dst，按 M 的逆采样）。已在新增节点注释按实现语义写明。
 3. **一致性校验**：83 个 node.json（含并行任务新增 3 个 point3d）id 全局唯一；Image2DAlg.dll 56 个声明 method 全部可解析导出。
 4. build_s2 的 deploy_runtime_dlls 曾在并行任务 Point3DAlg CMake 中间态下重生成失败（"Cannot specify compile definitions for target Point3DAlg"），60s 后重试成功。
+
+---
+
+## 五、增补（2026-11-20 滤波拟合完善批）
+
+本轮覆盖矩阵后续交付的节点化与新 C API 落地记录：
+
+| 项 | 交付 | 状态 |
+|---|---|---|
+| FitCircleEx / FitCircleRobust / HoughLinesPROI / HoughCirclesROI | §一 "A（未入选）下一批首选" 4 项全部节点化：alg.image2d.fit_circle_ex / fit_circle_robust / hough_lines_proi / hough_circles_roi（适配层 2.4.0 段） | ✅ 已闭环 |
+| Image2DAlg_Laplacian / Image2DAlg_Filter2D | 2.3.0 新增 2 个 C API（总数 95→97），当批节点化 alg.image2d.laplacian / filter2d；中值/双边/高斯经审计由 Blur method 0/1/2 覆盖，不另设入口 | ✅ A 类新增即闭环 |
+| Point3DAlg FitModel method 5 = line3D / FilterCloud method 10 = approxVoxel | 1.3.0 无新导出（既有接口扩取值域，C ABI 42 不变）；节点 point3d_fit_model / point3d_filter_cloud 扩 method 上限并登记 | ✅ 已闭环 |
+| Point3DAlg SaveCloudEx / KnnSearch / RadiusSearch / ThicknessMap | §二 A- 类 4 项节点化：alg.point3d.save_cloud_ex / knn_search / radius_search / thickness_map（T2 交付） | ✅ 已闭环 |
+| 节点计数 | 83 → 93（image2d 62 + point3d 29 + business 2）；id 全局唯一复核通过；声明 method 全部可在 DLL 导出表解析（Laplacian/Filter2D 核心 + 62 Comui 入口实测） | ✅ |

@@ -23,6 +23,13 @@ extern "C" {
  *          容器/FreeMesh、网格处理 MeshOp、3D→2D 桥接 CloudToHeightMap/
  *          HeightMapToCloud/ThicknessMap + HeightMap 容器/FreeHeightMap、
  *          多段点云 FreeClouds（全部 PCL 守卫，实现见 Point3DAlg_CloudOps.cpp）
+ *   1.3.0  滤波拟合完善批（无新导出，既有签名扩展取值域）：
+ *          FitModel method 5 = line3D 空间直线拟合（out_coeffs 6 值
+ *          [px,py,pz, dx,dy,dz]，底层 CloudProcessor::fitLine3D，
+ *          SACMODEL_LINE，三种 fit 均支持）；
+ *          FilterCloud method 10 = approxVoxel 近似体素降采样
+ *          （params [0]=leaf>0，底层 CloudProcessor::filterApproxVoxelGrid，
+ *          PCL ApproximateVoxelGrid 大点云快速版）
  *
  * 错误码全局约定（§8.3）：
  *   点云计算族（LoadCloud/SaveCloudEx/Filter/Extract/Transform 等）：
@@ -162,6 +169,9 @@ POINT3DALG_EXPORT int Point3DAlg_SaveCloudEx(const char* path, int type,
  *   9  conditionalXYZ 条件滤波 [0..5]=x_min,x_max,y_min,y_max,z_min,z_max
  *                              （开区间 (min,max)，GT/LT 严格比较；任一
  *                              min>max → -3）                    必填 6 个
+ *   10 approxVoxel  近似体素降采样（1.3.0 新增；PCL ApproximateVoxelGrid，
+ *                              大点云快速，格点质心与 method 0 可有微小偏差）
+ *                              [0]=leaf 体素边长（>0）            必填 1 个
  *
  * 与既有 ComuiVoxel（ComUI 适配层内联体素）的关系：本接口 method=0 是 PCL
  * VoxelGrid 版（CloudProcessor::filterVoxelGrid，体素内质心），ComuiVoxel 是
@@ -172,7 +182,7 @@ POINT3DALG_EXPORT int Point3DAlg_SaveCloudEx(const char* path, int type,
  *   0 成功；
  *   -1 in/out 为 NULL、in->xyz 为 NULL、in->count<=0；
  *   -2 method 越界之外的空结果（滤波后 0 点，如全部被剔除）；
- *   -3 method 不是 0~9、param_count 与布局表不符、参数值非法（见上表逐项）；
+ *   -3 method 不是 0~10、param_count 与布局表不符、参数值非法（见上表逐项）；
  *   -4 内存分配失败；
  *   -99 PCL 异常。 */
 POINT3DALG_EXPORT int Point3DAlg_FilterCloud(const Point3DAlg_PointCloud* in, int method,
@@ -278,8 +288,10 @@ POINT3DALG_EXPORT int Point3DAlg_TransformCloud(const Point3DAlg_PointCloud* in,
  *              out_inliers 自行复算）
  *   4  cone     7  [ax,ay,az, dx,dy,dz, angle]  锥顶点 + 单位轴方向
  *              + 半开角（弧度，0~π/2）
+ *   5  line3D  6  [px,py,pz, dx,dy,dz]  线上一点 + 单位方向（1.3.0 新增，
+ *              PCL SACMODEL_LINE；三种 fit 均支持）
  * 模型支持度（PCL 1.9 限制，底层自动回退，不报错）：
- *   plane 三种 fit 均支持；sphere 支持 RANSAC/LMEDS（MSAC 回退 RANSAC）；
+ *   plane/line3D 三种 fit 均支持；sphere 支持 RANSAC/LMEDS（MSAC 回退 RANSAC）；
  *   cylinder/cone 仅 RANSAC（fit 参数被忽略）；circle3D 的 fit/threshold
  *   复用其内部平面拟合口径。
  *
@@ -289,13 +301,14 @@ POINT3DALG_EXPORT int Point3DAlg_TransformCloud(const Point3DAlg_PointCloud* in,
  *   经二级指针交回调用方**，用 Point3DAlg_FreeBuffer 释放；可传 NULL =
  *   不需要内点（out_inlier_count 仍回填）。
  * out_inlier_count：必填（NULL → -1）；成功 = 内点数（out_inliers 数组长
- *   度——系数个数无需另查，由 method 唯一确定：plane/sphere=4、其余=7）；
+ *   度——系数个数无需另查，由 method 唯一确定：plane/sphere=4、line3D=6、
+ *   其余=7）；
  *   -3 时回填所需系数长度（两段式：先 capacity=0 查长度，再分配重调）。
  * 错误码（本接口口径）：
  *   0 成功；
  *   -1 in/out_inlier_count 为 NULL、in->xyz 为 NULL、in->count<=0；
  *   -2 拟合失败/无局内点/退化（点数不足、投影点共线、圆锥不收敛等）；
- *   -3 method/fit 不是 0~4、distance_threshold<=0、coeffs_capacity 不足
+ *   -3 method/fit 不是 0~5、distance_threshold<=0、coeffs_capacity 不足
  *      （*out_inlier_count = 所需系数长度，两段式回填）；
  *   -4 内存分配失败（出参全部保持 NULL/0，不承载任何有效数据）；
  *   -99 PCL 异常。 */

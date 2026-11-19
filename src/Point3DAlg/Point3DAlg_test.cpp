@@ -60,7 +60,7 @@ static void check(bool ok, const char* name)
 static void TestLifecycle()
 {
     std::printf("---- A1. 版本与生命周期 ----\n");
-    check(std::strcmp(Point3DAlg_GetVersion(), "1.2.0") == 0, "GetVersion 返回 1.2.0");
+    check(std::strcmp(Point3DAlg_GetVersion(), "1.3.0") == 0, "GetVersion 返回 1.3.0");
     check(Point3DAlg_Init() == 0, "Init 返回 0");
     Point3DAlg_Cleanup();   // 占位实现，可安全调用
     Point3DAlg_FreeCloud(nullptr);   // NULL 安全（不崩溃即通过）
@@ -135,7 +135,9 @@ static void TestFilter()
         empty.xyz = nullptr;
         empty.count = 0;
         check(Point3DAlg_FilterCloud(&empty, 0, nullptr, 0, &out) == -1, "FilterCloud 空点云 → -1");
-        check(Point3DAlg_FilterCloud(&in, 10, nullptr, 0, &out) == -3, "method 越界 → -3");
+        check(Point3DAlg_FilterCloud(&in, 11, nullptr, 0, &out) == -3, "method 越界(11) → -3");
+        check(Point3DAlg_FilterCloud(&in, 10, nullptr, 0, &out) == -3,
+              "method=10 无 params → -3（approxVoxel 需 leaf）");
         const double leafBad[1] = { 0.0 };
         check(Point3DAlg_FilterCloud(&in, 0, leafBad, 1, &out) == -3, "voxel leaf<=0 → -3");
         check(Point3DAlg_FilterCloud(&in, 0, leafBad, 0, &out) == -3, "voxel params 缺失 → -3");
@@ -668,8 +670,8 @@ static void TestFitModel()
         const Point3DAlg_PointCloud* nullIn = nullptr;
         check(Point3DAlg_FitModel(nullIn, 0, 0, 0.01, c, 8, &inl, &nC) == -1,
               "FitModel in=NULL → -1");
-        check(Point3DAlg_FitModel(&in, 5, 0, 0.01, c, 8, &inl, &nC) == -3,
-              "method 越界 → -3");
+        check(Point3DAlg_FitModel(&in, 6, 0, 0.01, c, 8, &inl, &nC) == -3,
+              "method 越界(6) → -3");
         check(Point3DAlg_FitModel(&in, 0, 3, 0.01, c, 8, &inl, &nC) == -3,
               "fit 越界 → -3");
         check(Point3DAlg_FitModel(&in, 0, 0, 0.0, c, 8, &inl, &nC) == -3,
@@ -704,6 +706,34 @@ static void TestFitModel()
         check(rc1 == 0 && std::fabs(std::fabs(c[2]) - 1.0) < 1e-3, "plane MSAC 收敛");
         const int rc2 = Point3DAlg_FitModel(&in, 0, 2, 0.02, c, 8, nullptr, &nC);
         check(rc2 == 0 && std::fabs(std::fabs(c[2]) - 1.0) < 1e-3, "plane LMS(LMEDS) 收敛");
+        Point3DAlg_FreeCloud(&in);
+    }
+
+    // 5 line3D（1.3.0）：沿 X 轴直线 + 噪声，三种 fit 全收敛
+    {
+        std::vector<float> v;
+        for (int i = 0; i < 120; ++i) {
+            v.push_back((float)i);
+            v.push_back((float)(i % 3) * 0.01f);
+            v.push_back((float)(i % 5) * 0.01f);
+        }
+        Point3DAlg_PointCloud in = MakeCloudFrom(v);
+        double c[8] = { 0 };
+        int nC = 0;
+        int* inl = nullptr;
+        const int rc = Point3DAlg_FitModel(&in, 5, 0, 0.05, c, 6, &inl, &nC);
+        check(rc == 0 && nC >= 100, "line3D RANSAC 收敛（内点 >= 100/120）");
+        check(rc == 0 && std::fabs(std::fabs(c[3]) - 1.0) < 1e-3,
+              "line3D 方向 ≈ ±X（单位方向分量 |dx| = 1）");
+        check(rc == 0 && std::fabs(c[4]) * std::fabs(c[4]) + std::fabs(c[5]) * std::fabs(c[5]) < 1e-6,
+              "line3D 方向 Z 分量 ≈ 0");
+        const int rc1 = Point3DAlg_FitModel(&in, 5, 1, 0.05, c, 6, nullptr, &nC);
+        check(rc1 == 0, "line3D MSAC 收敛");
+        const int rcL = Point3DAlg_FitModel(&in, 5, 2, 0.05, c, 6, nullptr, &nC);
+        check(rcL == 0, "line3D LMS(LMEDS) 收敛");
+        check(Point3DAlg_FitModel(&in, 5, 0, 0.05, c, 4, nullptr, &nC) == -3 && nC == 6,
+              "line3D capacity=4 → -3 两段式回填 6");
+        Point3DAlg_FreeBuffer(inl);
         Point3DAlg_FreeCloud(&in);
     }
 

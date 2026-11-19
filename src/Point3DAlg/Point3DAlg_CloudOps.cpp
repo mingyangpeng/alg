@@ -476,6 +476,13 @@ int Point3DAlg_FilterCloud(const Point3DAlg_PointCloud* in, int method,
             dst = CP::filterConditionalXYZ(src, p[0], p[1], p[2], p[3], p[4], p[5]);
             break;
         }
+        case 10: {  // approxVoxel：近似体素降采样（1.3.0 新增；大点云快速，格点质心
+                    // 与精确 voxel 可有微小偏差/格数相差 1~2%）
+            if (!p || n < 1) return -3;
+            if (!(p[0] > 0.0)) return -3;
+            dst = CP::filterApproxVoxelGrid(src, p[0]);
+            break;
+        }
         default:
             return -3;
         }
@@ -684,12 +691,12 @@ int Point3DAlg_FitModel(const Point3DAlg_PointCloud* in, int method, int fit,
     const int rcIn = CheckInOnly(in);
     if (rcIn != 0)
         return rcIn;
-    if (method < 0 || method > 4 || fit < 0 || fit > 2)
+    if (method < 0 || method > 5 || fit < 0 || fit > 2)
         return -3;
     if (!(distance_threshold > 0.0))
         return -3;
-    // 系数布局长度：plane/sphere = 4，cylinder/circle3D/cone = 7（见 api.h 表）
-    const int needed = (method <= 1) ? 4 : 7;
+    // 系数布局长度：plane/sphere = 4，line3D = 6，cylinder/circle3D/cone = 7（见 api.h 表）
+    const int needed = (method <= 1) ? 4 : (method == 5 ? 6 : 7);
     if (!out_coeffs || coeffs_capacity < needed) {
         *out_inlier_count = needed;   // 两段式：先查所需长度再分配重调
         return -3;
@@ -751,6 +758,17 @@ int Point3DAlg_FitModel(const Point3DAlg_PointCloud* in, int method, int fit,
             out_coeffs[4] = (double)normal[1];
             out_coeffs[5] = (double)normal[2];
             out_coeffs[6] = radius;
+            break;
+        }
+        case 5: {   // line3D：[px,py,pz, dx,dy,dz]（1.3.0 新增；三种 fit 均支持）
+            std::vector<float> point, dir;
+            if (!CP::fitLine3D(src, fm, distance_threshold, point, dir, inlierIdx) ||
+                point.size() < 3 || dir.size() < 3)
+                return -2;
+            for (int i = 0; i < 3; ++i) {
+                out_coeffs[i] = (double)point[(size_t)i];        // 线上一点
+                out_coeffs[3 + i] = (double)dir[(size_t)i];      // 单位方向
+            }
             break;
         }
         default: {  // cone：[ax,ay,az, dx,dy,dz, 半开角弧度]（仅 RANSAC）

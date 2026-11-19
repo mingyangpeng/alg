@@ -167,6 +167,11 @@ public:
                                          double y_min, double y_max,
                                          double z_min, double z_max);
 
+    /// 近似体素降采样（PCL ApproximateVoxelGrid）：哈希近似质心，大点云比
+    /// filterVoxelGrid 快数倍；格点质心略有偏差，输出格数与精确版可能相差 1~2%。
+    /// [in]  leaf  体素边长（>0；<=0 或空云 → nullptr，调用方按空结果处理）
+    static CloudPtr filterApproxVoxelGrid(const CloudConstPtr& src, double leaf);
+
     // ---------------- extract：点云提取 ----------------
 
     /// 按索引提取子点云（常用于提取拟合/分割后的局内点）。
@@ -325,6 +330,13 @@ public:
     /// 注意：PCL 1.9 球模型仅支持 RANSAC/LMEDS，传 MSAC 会自动回退 RANSAC。
     static bool fitSphere(const CloudConstPtr& src, FitMethod method, double distance_threshold,
                           std::vector<float>& out_center, double& out_radius,
+                          std::vector<int>& out_inliers);
+
+    /// 拟合空间直线（PCL SACMODEL_LINE：RANSAC/LMEDS/MSAC 三种方法均支持）。
+    /// [out] out_point  直线上一点 [x,y,z]
+    /// [out] out_dir    单位方向 [dx,dy,dz]
+    static bool fitLine3D(const CloudConstPtr& src, FitMethod method, double distance_threshold,
+                          std::vector<float>& out_point, std::vector<float>& out_dir,
                           std::vector<int>& out_inliers);
 
     /// 拟合圆柱。

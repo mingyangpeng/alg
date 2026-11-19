@@ -89,20 +89,24 @@ endif()
 
 # -----------------------------------------------------------------------------
 # 配准算法层单元测试（无 UI，验证 6 种策略）
+# 测试源 include Point3DAlg_Regist.h（直接依赖 PCL）——仅 PCL_FOUND 时构建，
+# 与 RegistTool 及上方工具测试目标的守卫方式一致（工单 002 无 PCL 构建）
 # -----------------------------------------------------------------------------
-add_executable(Point3DAlg_RegistTest tools/Point3DAlg_RegistTest.cpp)
-target_link_libraries(Point3DAlg_RegistTest PRIVATE ${PROJECT_NAME})
-target_include_directories(Point3DAlg_RegistTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
-if(MSVC)
-    target_compile_options(Point3DAlg_RegistTest PRIVATE /bigobj)
-endif()
+if(PCL_FOUND)
+    add_executable(Point3DAlg_RegistTest tools/Point3DAlg_RegistTest.cpp)
+    target_link_libraries(Point3DAlg_RegistTest PRIVATE ${PROJECT_NAME})
+    target_include_directories(Point3DAlg_RegistTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tools)
+    if(MSVC)
+        target_compile_options(Point3DAlg_RegistTest PRIVATE /bigobj)
+    endif()
 
-# ctest：自造演示数据，无外部依赖；SaveTransform 临时文件写在工作目录，
-# 指到 output/Release（与 DLL 同目录，避免 PATH 依赖）
-add_test(NAME Point3DAlg_RegistTest
-    COMMAND Point3DAlg_RegistTest
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output/Release
-)
+    # ctest：自造演示数据，无外部依赖；SaveTransform 临时文件写在工作目录，
+    # 指到 output/Release（与 DLL 同目录，避免 PATH 依赖）
+    add_test(NAME Point3DAlg_RegistTest
+        COMMAND Point3DAlg_RegistTest
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/output/Release
+    )
+endif()
 
 # -----------------------------------------------------------------------------
 # 拱形球顶 bump 拟合测试（合成自检注册 ctest；真实数据模式带文件参数手动跑）

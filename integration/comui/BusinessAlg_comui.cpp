@@ -9,7 +9,15 @@
 // node.json 不声明输出端口。
 #include "AlgExport.h"
 #include "BusinessAlg/include/BusinessAlg_api.h"
+
+// bump NG 判定算子头依赖 PCL（Point3DAlg_DomeFit.h 直接 include <pcl/*>）。
+// PCL 可用性以 SHAPELYALG_HAS_PCL 判定：ShapelyAlg 在 PCL_FOUND 时 PUBLIC 定义，
+// 随本库链接 ShapelyAlg 传入（同 Point3DAlg_comui.cpp 的 POINT3DALG_HAS_PCL 先例）。
+// 无 PCL 时下方 PCL 段入口不编译——宿主加载 business.bump_ng_check 节点会得到
+// 明确的"方法不存在"，而非 DLL 链接失败（工单 002 无 PCL 构建）。
+#ifdef SHAPELYALG_HAS_PCL
 #include "Point3DAlg/tools/Point3DAlg_DomeFit.h"
+#endif
 
 #include <vector>
 #include "comui_native_abi.h"
@@ -68,6 +76,8 @@ BUSINESSALG_EXPORT int BusinessAlg_ComuiRegionRatio(const AlgoCInput* in, AlgoCO
 }
 
 } // extern "C"
+
+#ifdef SHAPELYALG_HAS_PCL   // PCL 段：依赖 Point3DAlg_DomeFit/BumpCompare（PCL 工具层），无 PCL 时入口不编译
 
 // ---------------- 算子入口：bump 高度 NG 判定（node.json: business.bump_ng_check） ----------------
 // 业务编排示例：Point3DAlg_DomeFit（基准/被测各拟合）→ Point3DAlg_BumpCompare（一对一
@@ -152,3 +162,5 @@ extern "C" BUSINESSALG_EXPORT int BusinessAlg_ComuiBumpNgCheck(const AlgoCInput*
     out->error = msgBuf;
     return 0;
 }
+
+#endif   // SHAPELYALG_HAS_PCL（bump NG 判定 PCL 段）

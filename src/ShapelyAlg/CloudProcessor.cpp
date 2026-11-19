@@ -20,6 +20,7 @@
 #include <pcl/filters/crop_box.h>
 #include <pcl/filters/random_sample.h>
 #include <pcl/filters/filter.h>
+#include <pcl/filters/approximate_voxel_grid.h>
 #include <pcl/common/transforms.h>
 #include <pcl/common/io.h>
 #include <pcl/common/centroid.h>
@@ -526,6 +527,22 @@ CloudProcessor<PointT>::filterConditionalXYZ(const CloudConstPtr& src,
 }
 
 // ---------------- extract ----------------
+
+template <typename PointT>
+typename CloudProcessor<PointT>::CloudPtr
+CloudProcessor<PointT>::filterApproxVoxelGrid(const CloudConstPtr& src, double leaf)
+{
+    if (!src || src->empty() || !(leaf > 0.0))
+        return CloudPtr();
+    // ApproximateVoxelGrid：哈希近似质心（无精确 VoxelGrid 的排序开销），大点云
+    // 降采样首选；输出质心与精确版可有微小偏差，格数可能有 1~2% 出入（头文件注释）。
+    pcl::ApproximateVoxelGrid<PointT> veg;
+    veg.setInputCloud(src);
+    veg.setLeafSize((float)leaf, (float)leaf, (float)leaf);
+    CloudPtr out(new pcl::PointCloud<PointT>());
+    veg.filter(*out);
+    return out->empty() ? CloudPtr() : out;
+}
 
 template <typename PointT>
 typename CloudProcessor<PointT>::CloudPtr
@@ -1480,6 +1497,38 @@ bool CloudProcessor<PointT>::segmentPlaneRANSAC(const CloudConstPtr& src, double
     } else {
         out_outliers = extractByIndices(src, outIdx);
     }
+    return true;
+}
+
+template <typename PointT>
+bool CloudProcessor<PointT>::fitLine3D(const CloudConstPtr& src, FitMethod method,
+                                       double distance_threshold,
+                                       std::vector<float>& out_point, std::vector<float>& out_dir,
+                                       std::vector<int>& out_inliers)
+{
+    // SACMODEL_LINE：系数 [线上一点(x,y,z), 单位方向(dx,dy,dz)]；不需要法线，
+    // RANSAC/LMEDS/MSAC 三种方法原生支持（与 fitPlane 同款框架）。
+    CloudPtr clean;
+    std::vector<int> global;
+    if (!fitInputClean<PointT>(src, clean, global))
+        return false;
+    pcl::SACSegmentation<PointT> seg;
+    seg.setInputCloud(clean);
+    seg.setModelType(pcl::SACMODEL_LINE);
+    seg.setMethodType(toSacMethod(method));
+    seg.setDistanceThreshold(distance_threshold);
+    seg.setOptimizeCoefficients(true);
+    pcl::PointIndices inliers;
+    pcl::ModelCoefficients coeffs;
+    seg.segment(inliers, coeffs);
+    if (inliers.indices.empty() || coeffs.values.size() < 6)
+        return false;
+    out_point.assign(coeffs.values.begin(), coeffs.values.begin() + 3);
+    out_dir.assign(coeffs.values.begin() + 3, coeffs.values.begin() + 6);
+    out_inliers.clear();
+    out_inliers.reserve(inliers.indices.size());
+    for (int i : inliers.indices)
+        out_inliers.push_back(global[(size_t)i]);   // 映射回原始 src 行号（inlier 索引契约）
     return true;
 }
 

@@ -1691,6 +1691,12 @@ static void testImageProcessor()
 }
 
 // ---------------- CloudProcessor ----------------
+// 工单 002：本节起至文件尾的点云用例（CloudProcessor/Open3D 对照/契约/
+// 拟合配准变体/多点型/边界）全部依赖 PCL——无 PCL 构建时整段不编译。
+// SHAPELYALG_HAS_PCL 由 ShapelyAlg 目标在 PCL_FOUND 时 PUBLIC 定义，随
+// 测试 exe 链接传入，无需单独定义。
+
+#ifdef SHAPELYALG_HAS_PCL
 
 static void testCloudProcessor()
 {
@@ -1712,6 +1718,26 @@ static void testCloudProcessor()
     // 体素滤波（leaf 0.5 → 网格不变但离群点保留；用 1.0 验证降采样）
     CloudPtr voxel = CP::filterVoxelGrid(plane, 1.0);
     check(voxel && voxel->size() == 101, "filterVoxelGrid 1.0 → 101（网格合并+离群）");
+
+    // 近似体素（ApproximateVoxelGrid）：降采样生效、点数不增、与精确版同量级
+    CloudPtr avx = CP::filterApproxVoxelGrid(plane, 1.0);
+    check(avx && avx->size() >= 80 && avx->size() <= 110, "filterApproxVoxelGrid 降采样生效");
+    check(avx && avx->size() <= plane->size(), "filterApproxVoxelGrid 点数不增");
+
+    // 空间直线拟合（fitLine3D）：X 轴向 + 噪声
+    {
+        CloudPtr line(new pcl::PointCloud<pcl::PointXYZ>);
+        for (int i = 0; i < 100; ++i) {
+            float t = (float)i;
+            line->push_back(pcl::PointXYZ(t, (float)(i % 3) * 0.01f, (float)(i % 5) * 0.01f));
+        }
+        std::vector<float> lp, ld;
+        std::vector<int> li;
+        check(CP::fitLine3D(line, shapely::FitMethod::RANSAC, 0.05, lp, ld, li) &&
+              li.size() >= 90, "fitLine3D RANSAC 内点 >= 90/100");
+        check(ld.size() >= 3 && std::fabs(std::fabs(ld[0]) - 1.0) < 1e-3,
+              "fitLine3D 方向 ≈ ±X（|dx| = 1）");
+    }
 
     // 直通滤波：z ∈ [-0.1, 0.1] → 100 点（去离群）
     CloudPtr pt = CP::filterPassThrough(plane, "z", -0.1, 0.1);
@@ -4066,17 +4092,21 @@ static void testCloudProcessorEdgeCases()
     }
 }
 
+#endif // SHAPELYALG_HAS_PCL（点云用例段）
+
 int main()
 {
     testGeom();
     testStereo();
     testImageProcessor();
+#ifdef SHAPELYALG_HAS_PCL
     testCloudProcessor();
     testCloudProcessorOpen3D();
     testCloudProcessorContracts();
     testCloudProcessorFitRegistVariants();
     testCloudProcessorPointTypes();
     testCloudProcessorEdgeCases();
+#endif
     std::printf("\n%s（失败 %d 项）\n", g_fail == 0 ? "全部测试通过" : "存在失败", g_fail);
     return g_fail == 0 ? 0 : 1;
 }

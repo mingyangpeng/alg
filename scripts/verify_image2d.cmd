@@ -143,6 +143,16 @@ powershell -NoProfile -Command "Get-Content -LiteralPath '%TMPD%\check.txt' -Tai
 
 rem ------------------------------------------------------------
 echo.
+echo [6] version sync
+python -I "%ROOT%\scripts\check_version_sync.py" Image2DAlg > "%TMPD%er.log" 2>&1
+set "VEXIT=%ERRORLEVEL%"
+echo     exit = !VEXIT!
+findstr /c:"PASS" "%TMPD%er.log"
+findstr /c:"[MISS]" "%TMPD%er.log"
+if not "!VEXIT!"=="0" set "FAILED=1"
+
+rem ------------------------------------------------------------
+echo.
 echo ============================================================
 if "!FAILED!"=="0" (echo  RESULT: ALL CHECKS PASSED) else (echo  RESULT: SOMETHING FAILED - see above)
 echo  logs: %TMPD%

@@ -198,6 +198,7 @@ Point3DAlg_RegistRun(session, src, dst, params, &step);   // 策略 1~6
 - **1.2.0 表面重建的两处登记偏差**：① type 0/1（凸包/凹包）在 C 封装层直接调 PCL ConvexHull/ConcaveHull 取回面片——CloudProcessor 同名算子只回顶点云；② type 3~7（法线重建）在封装层自动组合"KNN k=10 估法线 + MST 朝向一致化 k=30"（§9.12 强制约束；SoA 容器无法传入法线），不暴露法线参数
 - `ReconstructSurface` type 8（organizedFastMesh）**恒返回 -2**：SoA 点云容器表达不了有序点云（height 恒 1），保留枚举供宿主显式感知
 - `FitModel(circle3D)` 未暴露底层圆周残差 RMS（布局保持草案的 7 值），需要时可用 out_inliers 复算
+- **FilterCloud(voxel) 与 ComuiVoxel（voxel_downsample 节点）的数值口径**：语义一致（分格/每格质心），逐格质心差 ≤~1.7e-5——PCL 为 float32 顺序累加、ComuiVoxel 为 double 累加，mm 级 leaf 下 ≤20nm 工业无感；非 dyadic leaf 且坐标恰为 leaf 整数倍时分格可能不同（一致性脚本 scripts/_test_comui_voxel_consistency.py 可复查），建议优先 2 的幂 leaf
 - `DetectKeypoints(ISS3D)` 数据口径：ISS 显著性要求邻域散布矩阵最小特征值严格 > 0——**无噪声的精确解析曲面**（邻域严格共面，如理想圆柱单层邻域）e3 恒为 0 → 恒 0 关键点（-2）；真实扫描/带噪数据正常（测试用带 z 微噪声圆柱验证，合成无噪数据上定位到的口径坑已在 api.h 注明）
 - MeshOp 的法线/距离输出走独立 float 数组（`out_array`，FreeBuffer 释放）——Mesh 容器无顶点属性位，写回不可行
 - `ComuiVoxel` ↔ FilterCloud(voxel) 数值一致性已由测试 A6 段守卫（PCL 版 ↔ 参考实现）；ComUI 适配层侧的对账属 integration 侧遗留

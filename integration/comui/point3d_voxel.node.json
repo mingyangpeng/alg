@@ -4,7 +4,7 @@
     "name": "体素下采样",
     "group": "3D 点云",
     "category": "处理",
-    "description": "点云体素网格下采样：哈希格网取每格质心+颜色均值（PCL VoxelGrid 等价实现，SoA 直进直出）"
+    "description": "点云体素网格下采样：哈希格网取每格质心+颜色均值（SoA 直进直出）。与 FilterCloud(voxel) 语义一致；数值口径：质心差 ≤~1.7e-5（本节点 double 累加 vs PCL float32 累加），非 dyadic leaf 格界可能不同——建议优先 2 的幂 leaf"
   },
   "runtime": "native",
   "assembly": "Point3DAlg.dll",

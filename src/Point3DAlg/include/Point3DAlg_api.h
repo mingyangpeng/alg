@@ -175,8 +175,10 @@ POINT3DALG_EXPORT int Point3DAlg_SaveCloudEx(const char* path, int type,
  *
  * 与既有 ComuiVoxel（ComUI 适配层内联体素）的关系：本接口 method=0 是 PCL
  * VoxelGrid 版（CloudProcessor::filterVoxelGrid，体素内质心），ComuiVoxel 是
- * 等价简化实现（哈希格网质心）——两者结果应一致（同 leaf 下每格质心），节点
- * 与本接口可择一使用，避免语义漂移。
+ * 等价简化实现（哈希格网质心）——**语义一致、数值口径有差异**（一致性直查
+ * 实测：逐格质心差 ≤~1.7e-5，PCL 为 float32(Vector4f) 顺序累加、ComuiVoxel
+ * 为 double 累加；非 dyadic leaf 且坐标恰为 leaf 整数倍时分格可能不同，建议
+ * 优先 2 的幂 leaf）。节点与本接口可择一使用，避免语义漂移。
  *
  * 错误码（本接口口径）：
  *   0 成功；

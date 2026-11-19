@@ -3066,3 +3066,433 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiConvexityDefects(const AlgoCInput* in, Alg
 }
 
 } // extern "C"（2.3.0 追加段）
+
+// =====================================================================
+// 2.4.0 扩展/稳健/ROI 族接入（2026-11-19，4 个入口，追加在文件尾部，
+// 覆盖矩阵 A 类首选批——与 2.3.0 段同规则：只做参数组装、错误码映射与
+// 消息拼装，不新增算法）：
+//   alg.image2d.fit_circle_ex     —— FitCircleEx（高精度单圆：Kåsa + Gauss-Newton）
+//   alg.image2d.fit_circle_robust —— FitCircleRobust（RANSAC 抗外点单圆 + 内点回显）
+//   alg.image2d.hough_lines_proi  —— HoughLinesPROI（ROI 概率霍夫直线）
+//   alg.image2d.hough_circles_roi —— HoughCirclesROI（ROI 霍夫圆）
+// 圆拟合族输出形态沿用 point3d_fit_circle_2d 先例：圆心+半径打包成单点云
+//（x=圆心x y=圆心y z=半径）+ 详情进消息；ROI 族沿用 find_matches_roi 先例
+//（roi_x/y/w/h ≤0 = 全图，结果坐标已由核心层平移回全图系）。
+// =====================================================================
+
+extern "C" {
+
+// 单圆结果 -> 输出单点云（x=圆心x y=圆心y z=半径，rgb=NULL；malloc 配 algo_free）。
+// 返回 false = 内存不足（out 保持空）。
+static bool CircleToCloudOut(const Image2DAlg_CircleFit& st, AlgoCOutput* out) {
+    float* xyz = (float*)malloc(sizeof(float) * 3);
+    if (!xyz) return false;
+    xyz[0] = (float)st.cx;
+    xyz[1] = (float)st.cy;
+    xyz[2] = (float)st.r;   // z 承载半径（point3d_fit_circle_2d 同款约定）
+    AlgoCCloudOut* arr = (AlgoCCloudOut*)malloc(sizeof(AlgoCCloudOut));
+    if (!arr) { free(xyz); return false; }
+    arr->count = 1;
+    arr->xyz = xyz;
+    arr->rgb = NULL;
+    out->clouds = arr;
+    out->cloudCount = 1;
+    return true;
+}
+
+// ---------------- 算子入口：单目标圆拟合高精度版（node.json: alg.image2d.fit_circle_ex） ----------------
+// 输入：clouds[0]=点集（xy 取自 xyz，z 分量忽略；count >= 3）。参数：无。
+// 输出：单点云（x=圆心x y=圆心y z=半径）；详情并入消息通道，形态与 fit_circle 一致：
+//   "count=1; [0]c=(cx,cy) r=R rms=RMS"
+//   （Kåsa 初值 + Gauss-Newton 几何精化，残差比 fit_circle 的纯代数解更小；
+//     共线/近共线/点数 < 3 报错，结合 rms 判断拟合质量）。
+// 错误码：1 输入未连线；2 点集不足/内存不足；3 拟合失败（点数不足/共线退化）。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiFitCircleEx(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->cloudCount < 1 || !in->clouds || !in->clouds[0].xyz) {
+        out->error = "输入未连线（点集）"; return 1;
+    }
+    const AlgoCCloud* src = &in->clouds[0];
+    if (src->count < 3) { out->error = "圆拟合至少需要 3 个点"; return 2; }
+
+    float* xy = FlattenCloudXy(*src);
+    if (!xy) { out->error = "内存不足"; return 2; }
+    Image2DAlg_CircleFit st = {};
+    const int rc = Image2DAlg_FitCircleEx(xy, src->count, &st);
+    free(xy);
+    if (rc == -3) { out->error = "圆拟合失败（点数不足或共线/近共线退化）"; return 3; }
+    if (rc != 0) { out->error = "圆拟合失败"; return 2; }
+    if (!CircleToCloudOut(st, out)) { out->error = "内存不足"; return 2; }
+
+    static char msg[160];
+    snprintf(msg, sizeof(msg), "count=1; [0]c=(%.2f,%.2f) r=%.2f rms=%.3f",
+             st.cx, st.cy, st.r, st.rms);
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：单目标圆拟合抗外点版（node.json: alg.image2d.fit_circle_robust） ----------------
+// 输入：clouds[0]=点集（xy 取自 xyz，z 分量忽略；count >= 3）。
+// 参数（按声明顺序）：
+//   threshold  number  默认 2.0  [0.01,1000]  内点判定：点到圆周距离 <= threshold（像素；<=0 → 3）
+//   max_iters  int     默认 1000 [1,100000]    RANSAC 迭代上限（<1 由核心层按 1000 处理）
+//   seed       int     默认 42   [0,2^31-1]    随机种子（固定值结果可复现）
+// 输出：单点云（x=圆心x y=圆心y z=半径）；内点索引无跨节点意义不输出，仅计数并入消息：
+//   "count=1; [0]c=(cx,cy) r=R rms=RMS inliers=K/N"
+//   （RANSAC 抗毛刺/粘连外点——纯最小二乘会被外点拉偏；内点 < 3 判无有效圆报错）。
+// 错误码：1 输入未连线；2 点集不足/内存不足；3 参数非法/无有效圆。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiFitCircleRobust(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->cloudCount < 1 || !in->clouds || !in->clouds[0].xyz) {
+        out->error = "输入未连线（点集）"; return 1;
+    }
+    const AlgoCCloud* src = &in->clouds[0];
+    if (src->count < 3) { out->error = "圆拟合至少需要 3 个点"; return 2; }
+    double threshold = 2.0;
+    int max_iters = 1000, seed = 42;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) threshold = p->d;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) max_iters = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 1)) seed = p->i;
+
+    float* xy = FlattenCloudXy(*src);
+    if (!xy) { out->error = "内存不足"; return 2; }
+    Image2DAlg_CircleFit st = {};
+    int* inliers = NULL;
+    int inlier_count = 0;
+    const int rc = Image2DAlg_FitCircleRobust(xy, src->count, threshold, max_iters,
+                                              (unsigned int)seed, &st,
+                                              &inliers, &inlier_count);
+    free(xy);
+    if (rc == -3) { out->error = "稳健圆拟合失败（threshold 需 > 0；点数不足或内点 < 3）"; return 3; }
+    if (rc != 0) { out->error = "稳健圆拟合失败"; return 2; }
+    Image2DAlg_FreeInliers(inliers);
+    if (!CircleToCloudOut(st, out)) { out->error = "内存不足"; return 2; }
+
+    static char msg[192];
+    snprintf(msg, sizeof(msg), "count=1; [0]c=(%.2f,%.2f) r=%.2f rms=%.3f inliers=%d/%d",
+             st.cx, st.cy, st.r, st.rms, inlier_count, src->count);
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：ROI 概率霍夫直线（node.json: alg.image2d.hough_lines_proi） ----------------
+// hough_lines 的 ROI 版：仅在 ROI 内检测（检测参数语义与全图版逐字一致），线段端点
+// 已由核心层平移回全图坐标系——限区检测省时并屏蔽区外干扰（find_matches_roi 先例）。
+// 输入：二值/边缘图（链路上先接 Canny/Sobel/Threshold）。
+// 参数（按声明顺序）：
+//   roi_x/roi_y      int     默认 0  [0,100000]  ROI 左上角
+//   roi_w/roi_h      int     默认 0  [0,100000]  ROI 尺寸（<=0 = 全图，同 find_matches_roi）
+//   rho              number  默认 1   [0.1,10]   距离分辨率（像素）
+//   theta_deg        number  默认 1   [0.1,10]   角度分辨率（度）
+//   threshold        int     默认 50  [1,10000]  投票阈值
+//   min_line_length  int     默认 20  [0,10000]  最短线长（0 不限）
+//   max_line_gap     int     默认 5   [0,10000]  线最大断距（0 不限）
+// 输出：输入图克隆叠加检出线段（绿色，全图坐标）。
+// 消息通道："count=N; [i](x1,y1)-(x2,y2) ang=A; ..."（900 字节截断；角度为端点
+//            推算的线段方向角（度，0~180）；票数 C API 不回传，不进消息）。
+// 错误码：1 输入未连线；2 检测失败；3 参数非法（rho/theta <= 0 或 ROI 与图像无交集）。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiHoughLinesPRoi(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 1 || !in->images) { out->error = "输入未连线"; return 1; }
+    int rx = 0, ry = 0, rw = 0, rh = 0, threshold = 50, min_len = 20, max_gap = 5;
+    double rho = 1.0, theta = 1.0;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) rx = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 1)) ry = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 2)) rw = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 3)) rh = p->i;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) rho = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 1)) theta = p->d;
+    if (const AlgoCParam* p = FindParam(in, 1, 4)) threshold = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 5)) min_len = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 6)) max_gap = p->i;
+
+    Image2DAlg_Image input = CoreInputFrom(in->images[0]);
+    Image2DAlg_Line4* lines = NULL;
+    int count = 0;
+    const int rc = Image2DAlg_HoughLinesPROI(&input, rx, ry, rw, rh, rho, theta,
+                                             threshold, min_len, max_gap, &lines, &count);
+    if (rc == -3) { out->error = "霍夫直线失败（rho/theta 需 > 0，或 ROI 与图像无交集）"; return 3; }
+    if (rc != 0) { out->error = "霍夫直线失败"; return 2; }
+
+    cv::Mat vis(in->images[0].height, in->images[0].width, CV_8UC4,
+                (void*)in->images[0].bgra);
+    cv::Mat drawn = vis.clone();
+    for (int i = 0; i < count; ++i)
+        cv::line(drawn, cv::Point(lines[i].x1, lines[i].y1),
+                 cv::Point(lines[i].x2, lines[i].y2), cv::Scalar(0, 255, 0, 255), 1);
+
+    static char msg[900];
+    int pos = snprintf(msg, sizeof(msg), "count=%d", count);
+    for (int i = 0; i < count && pos < (int)sizeof(msg) - 80; ++i) {
+        const double ang = std::fmod(std::atan2((double)(lines[i].y2 - lines[i].y1),
+                                                (double)(lines[i].x2 - lines[i].x1))
+                                     * 180.0 / 3.14159265358979323846 + 360.0, 180.0);
+        pos += snprintf(msg + pos, sizeof(msg) - (size_t)pos,
+                        "; [%d](%d,%d)-(%d,%d) ang=%.1f",
+                        i, lines[i].x1, lines[i].y1, lines[i].x2, lines[i].y2, ang);
+    }
+    Image2DAlg_FreeLines(lines);
+
+    const size_t n = (size_t)drawn.rows * drawn.cols * 4;
+    uint8_t* px = (uint8_t*)malloc(n);
+    if (!px) { out->error = "内存不足"; return 2; }
+    memcpy(px, drawn.data, n);
+    out->images = AllocImageOut(drawn.cols, drawn.rows, px);
+    if (!out->images) { free(px); out->error = "内存不足"; return 2; }
+    out->imageCount = 1;
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：ROI 霍夫圆（node.json: alg.image2d.hough_circles_roi） ----------------
+// hough_circles 的 ROI 版：仅在 ROI 内检测（dp/param/半径语义与全图版逐字一致），
+// 圆心已由核心层平移回全图坐标系；同样内部 3x3 高斯预平滑（HOUGH_GRADIENT
+// 对锐利二值图可能无果），圆叠加在原输入图上。
+// 输入：灰度语义图（彩色先转灰度）。
+// 参数（按声明顺序）：
+//   roi_x/roi_y  int     默认 0  [0,100000]  ROI 左上角
+//   roi_w/roi_h  int     默认 0  [0,100000]  ROI 尺寸（<=0 = 全图）
+//   dp           number  默认 1   [0.1,4]     分辨率倒数
+//   min_dist     number  默认 10  [1,10000]   圆心最小间距
+//   param1       number  默认 50  [1,1000]    内部 Canny 高阈值（同全图版实测口径）
+//   param2       number  默认 20  [1,1000]    圆心投票阈值（越小圆越多）
+//   min_r        number  默认 5   [0,10000]   最小半径
+//   max_r        number  默认 0   [0,10000]   最大半径（<=0 不限）
+// 输出：平滑后检出的圆叠加在原输入图上（绿色圆周，全图坐标）。
+// 消息通道："count=N; [i]c=(cx,cy) r=R; ..."（900 字节截断）。
+// 错误码：1 输入未连线；2 检测失败/预平滑失败；3 参数非法（dp/min_dist <= 0 或 ROI 与图像无交集）。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiHoughCirclesRoi(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 1 || !in->images) { out->error = "输入未连线"; return 1; }
+    int rx = 0, ry = 0, rw = 0, rh = 0;
+    double dp = 1.0, min_dist = 10.0, param1 = 50.0, param2 = 20.0, min_r = 5.0, max_r = 0.0;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) rx = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 1)) ry = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 2)) rw = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 3)) rh = p->i;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) dp = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 1)) min_dist = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 2)) param1 = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 3)) param2 = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 4)) min_r = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 5)) max_r = p->d;
+
+    Image2DAlg_Image input = CoreInputFrom(in->images[0]);
+    Image2DAlg_Image blurred = {};   // HOUGH_GRADIENT 需平滑输入（同全图版口径）
+    if (Image2DAlg_Blur(&input, 0, 3, 0, 0, &blurred) != 0) {
+        out->error = "预平滑失败";
+        return 2;
+    }
+    Image2DAlg_HoughCircle* circles = NULL;
+    int count = 0;
+    const int rc = Image2DAlg_HoughCirclesROI(&blurred, rx, ry, rw, rh, dp, min_dist,
+                                              param1, param2, min_r, max_r,
+                                              &circles, &count);
+    Image2DAlg_FreeImage(&blurred);
+    if (rc == -3) { out->error = "霍夫圆失败（dp/min_dist 需 > 0，或 ROI 与图像无交集）"; return 3; }
+    if (rc != 0) { out->error = "霍夫圆失败"; return 2; }
+
+    cv::Mat vis(in->images[0].height, in->images[0].width, CV_8UC4,
+                (void*)in->images[0].bgra);
+    cv::Mat drawn = vis.clone();
+    for (int i = 0; i < count; ++i)
+        cv::circle(drawn, cv::Point2f((float)circles[i].cx, (float)circles[i].cy),
+                   (float)circles[i].r, cv::Scalar(0, 255, 0, 255), 1, cv::LINE_AA);
+
+    static char msg[900];
+    int pos = snprintf(msg, sizeof(msg), "count=%d", count);
+    for (int i = 0; i < count && pos < (int)sizeof(msg) - 64; ++i)
+        pos += snprintf(msg + pos, sizeof(msg) - (size_t)pos,
+                        "; [%d]c=(%.1f,%.1f) r=%.1f",
+                        i, circles[i].cx, circles[i].cy, circles[i].r);
+    Image2DAlg_FreeCirclesHough(circles);
+
+    const size_t n = (size_t)drawn.rows * drawn.cols * 4;
+    uint8_t* px = (uint8_t*)malloc(n);
+    if (!px) { out->error = "内存不足"; return 2; }
+    memcpy(px, drawn.data, n);
+    out->images = AllocImageOut(drawn.cols, drawn.rows, px);
+    if (!out->images) { free(px); out->error = "内存不足"; return 2; }
+    out->imageCount = 1;
+    out->error = msg;
+    return 0;
+}
+
+} // extern "C"（2.4.0 追加段）
+
+// =====================================================================
+// 2.3.0 滤波扩展接入（2026-11-19 起，3 个入口，追加在 2.4.0 段之后；封装
+// Image2DAlg 2.3.0 滤波扩展 C API。中值/双边/高斯不设节点——Blur 节点
+// method 0/1/2 已覆盖（含 4ch 双边拆 BGR 保 alpha），避免同一语义双入口
+// 漂移，见 api.h 2.3.0 版本说明）：
+//   alg.image2d.laplacian —— Laplacian（二阶导：边缘/纹理增强）
+//   alg.image2d.filter2d  —— Filter2D（自定义 k×k 卷积核：锐化/平滑/边缘核）
+//   alg.image2d.denoise_nlmeans —— DenoiseNLMeans（非局部均值降噪；Blur 未
+//                                  覆盖 NLMeans 块匹配语义，单设入口）
+// 与 2.4.0 段同规则：只做参数组装、错误码映射与消息拼装，不新增算法。
+// =====================================================================
+
+extern "C" {
+
+// ---------------- 算子入口：Laplacian 边缘增强（node.json: alg.image2d.laplacian） ----------------
+// 二阶导算子：对灰度突变（边缘/孤立点/细线）响应最强、平坦区响应≈0；
+// 与 Sobel（一阶导幅值）互补，对噪声更敏感——强噪声输入先接 blur。
+// 参数（按声明顺序）：
+//   ksize  int     默认 3   [1,7]         核边长（1/3/5/7，其余核心层 -3）
+//   scale  number  默认 1.0 [0.001,1000]  响应缩放系数（1 = 原始值；弱边缘
+//                                         可放大、强噪声场景可衰减）
+// 输出：|响应| 图转 BGRA（边缘亮、平坦黑）。深度规则（核心层口径，api.h 2.3.0）：
+//   浮点输入同深度保留符号；8U/16U 输入 CV_16S 中间取 |响应|×scale 饱和回
+//   原深度（负响应折叠为正，工业边缘增强常用口径）。
+// 错误码：1 输入未连线；2 处理失败（核心层 -99 异常）；3 参数非法（ksize 非
+//         1/3/5/7 或 scale<=0，核心层 -3）/内存不足。
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiLaplacian(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 1 || !in->images) { out->error = "输入未连线"; return 1; }
+    int ksize = 3;
+    double scale = 1.0;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) ksize = p->i;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) scale = p->d;
+
+    Image2DAlg_Image input = CoreInputFrom(in->images[0]);
+    Image2DAlg_Image result = {};
+    const int rc = Image2DAlg_Laplacian(&input, ksize, scale, &result);
+    if (rc == -3) { out->error = "Laplacian 失败（ksize 仅 1/3/5/7，scale 须 > 0）"; return 3; }
+    if (rc != 0)  { out->error = "Laplacian 处理失败"; return 2; }
+    out->images = MakeBgraOut(result);
+    Image2DAlg_FreeImage(&result);
+    if (!out->images) { out->error = "内存不足"; return 2; }
+    out->imageCount = 1;
+    return 0;
+}
+
+// ---------------- 算子入口：自定义卷积核滤波（node.json: alg.image2d.filter2d） ----------------
+// filter2D 任意线性滤波单一入口：锐化（Laplacian 锐化核）/平滑（高斯核）/
+// 边缘核/模板核。核布局 k×k 行主序，锚点 = 核中心。
+// 参数（按声明顺序）：
+//   kernel  text  默认 "0,0,0,0,1,0,0,0,0"（3×3 恒等核 = 原图直通）——
+//                 ksize*ksize 个逗号分隔数值（ParseDoubleList 解析，同
+//                 warp_affine m 先例；常用核示例——3×3 锐化
+//                 0,-1,0,-1,5,-1,0,-1,0；3×3 高斯须预归一化（÷16）
+//                 0.0625,0.125,0.0625,0.125,0.25,0.125,0.0625,0.125,0.0625，
+//                 未归一化核会把亮度整体放大至饱和）
+//   ksize   int   默认 3  [1,51]  核边长（奇数；偶数核心层 -3）
+// 输出：|响应| 图转 BGRA。深度规则（核心层口径）：浮点输入同深度保留符号；
+//   8U/16U 输入 CV_16S 中间取 |响应| 饱和回原深度（核全 0 合法 = 输出全 0 图）。
+// 错误码：1 输入未连线；2 处理失败（核心层 -99 异常）；3 参数非法（kernel
+//         文本非数值 / 值个数 ≠ ksize*ksize / ksize 非 1~51 奇数）/内存不足。
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiFilter2D(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 1 || !in->images) { out->error = "输入未连线"; return 1; }
+    int ksize = 3;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) ksize = p->i;
+    if (ksize < 1 || ksize > 51 || ksize % 2 == 0) {
+        out->error = "ksize 须为 1~51 奇数（卷积核边长）";
+        return 3;
+    }
+    // 先按上限容量解析（ksize 已校验 ≤51，kd/kern 上限 51*51 恒够），
+    // 个数不符与坏值分别报错——ParseDoubleList 超容量统一 -1，故容量取
+    // 全域上限 51*51 而非 ksize*ksize，区分"非数值"与"个数多给了"。
+    double kd[51 * 51];
+    const AlgoCParam* pk = FindParam(in, 2, 0);
+    const int n = pk ? ParseDoubleList(pk->s, kd, 51 * 51) : 0;
+    if (n < 0) { out->error = "kernel 含非数值内容或个数超上限（需逗号分隔数字）"; return 3; }
+    if (n != ksize * ksize) {
+        static char ebuf[128];
+        snprintf(ebuf, sizeof(ebuf),
+                 "kernel 需 %d 个数值（ksize=%d 的 k×k 行主序），实得 %d 个",
+                 ksize * ksize, ksize, n);
+        out->error = ebuf;
+        return 3;
+    }
+    float kern[51 * 51];
+    for (int i = 0; i < n; ++i) kern[i] = (float)kd[i];
+
+    Image2DAlg_Image input = CoreInputFrom(in->images[0]);
+    Image2DAlg_Image result = {};
+    const int rc = Image2DAlg_Filter2D(&input, kern, ksize, &result);
+    if (rc == -3) { out->error = "Filter2D 失败（ksize 须 1~51 奇数）"; return 3; }
+    if (rc != 0)  { out->error = "Filter2D 处理失败"; return 2; }
+    out->images = MakeBgraOut(result);
+    Image2DAlg_FreeImage(&result);
+    if (!out->images) { out->error = "内存不足"; return 2; }
+    out->imageCount = 1;
+    return 0;
+}
+
+// ---------------- 算子入口：非局部均值降噪（node.json: alg.image2d.denoise_nlmeans） ----------------
+// NLMeans 块匹配加权去高斯白噪声：在搜索窗内找与模板块最相似的块做加权平均，
+// 孤立噪声点权重趋 0、结构块相似块权重高——保细节优于局部滤波，与 Blur 双边
+// 互补的另一条降噪路径（Blur 未覆盖 NLMeans 语义，故单设节点）。
+// 参数（按 node.json params 声明顺序）：
+//   h                number  默认 3.0  [0.1,100]  亮度分量强度（大 = 去噪强但
+//                                                     细节损失多，建议 3 起调）
+//   h_color          number  默认 3.0  [0.1,100]  彩色分量强度（3/4 通道生效，
+//                                                     通常 = h）
+//   template_window  int     默认 7    [3,15]     模板窗边长（奇数，偶数自动补奇）
+//   search_window    int     默认 21   [5,51]     搜索窗边长（奇数，须 >
+//                                                     template_window，性能随其
+//                                                     线性下降）
+// 输出：BGRA（核心层 1/3/4 通道结果经 MakeBgraOut 统一转 BGRA；4ch 输入 alpha
+//       原样保留——核心层拆 BGR 走 Colored 后回贴，同 Blur 双边先例）。
+// 消息：降噪前后灰度均值/标准差对比（stddev 下降 ≈ 噪声减弱的简单质量指标）+
+//       参数回显（成功时并入 error 消息通道，manual_regist 先例）。
+// 错误码：1 输入未连线；2 处理失败（核心层 -99 异常）/内存不足；3 参数非法
+//         （h/h_color<=0、search_window<=template_window，核心层 -3）。
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiDenoiseNLMeans(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 1 || !in->images) { out->error = "输入未连线"; return 1; }
+    double h = 3.0, h_color = 3.0;
+    int template_window = 7, search_window = 21;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) h = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 1)) h_color = p->d;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) template_window = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 1)) search_window = p->i;
+    if (h <= 0 || h_color <= 0) {
+        out->error = "h / h_color 须 > 0（降噪强度）";
+        return 3;
+    }
+    if (search_window <= template_window) {
+        out->error = "search_window 须 > template_window（降噪窗口）";
+        return 3;
+    }
+
+    Image2DAlg_Image input = CoreInputFrom(in->images[0]);
+    Image2DAlg_Image result = {};
+    const int rc = Image2DAlg_DenoiseNLMeans(&input, h, h_color, template_window,
+                                             search_window, &result);
+    if (rc == -3) {
+        out->error = "NLMeans 失败（h/h_color 须 > 0，search_window 须 > template_window）";
+        return 3;
+    }
+    if (rc != 0)  { out->error = "NLMeans 处理失败"; return 2; }
+
+    // 质量消息：降噪前后灰度均值/标准差对比 + 参数回显（宿主 rc=0 时也可能回读）
+    cv::Mat before(input.height, input.width, CV_8UC4, input.data);
+    cv::Mat after(result.height, result.width, CV_8UC(result.channels), result.data);
+    cv::Mat g0, g1;
+    cv::cvtColor(before, g0, cv::COLOR_BGRA2GRAY);
+    if (result.channels == 1)      g1 = after.clone();
+    else if (result.channels == 3) cv::cvtColor(after, g1, cv::COLOR_BGR2GRAY);
+    else                           cv::cvtColor(after, g1, cv::COLOR_BGRA2GRAY);
+    cv::Scalar m0, s0, m1, s1;
+    cv::meanStdDev(g0, m0, s0);
+    cv::meanStdDev(g1, m1, s1);
+    static char msg[256];   // 静态存储（宿主只读不释放）
+    snprintf(msg, sizeof(msg),
+             "denoise: mean %.1f->%.1f stddev %.1f->%.1f; h=%.1f h_color=%.1f tw=%d sw=%d",
+             m0[0], m1[0], s0[0], s1[0], h, h_color, template_window, search_window);
+
+    out->images = MakeBgraOut(result);
+    Image2DAlg_FreeImage(&result);
+    if (!out->images) { out->error = "内存不足"; return 2; }
+    out->imageCount = 1;
+    out->error = msg;
+    return 0;
+}
+
+} // extern "C"（2.3.0 滤波扩展追加段）

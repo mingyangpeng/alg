@@ -774,7 +774,7 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiLoadCloud(const AlgoCInput* in,
 #endif   // POINT3DALG_HAS_PCL（LoadCloud）
 
 // ---------------- 算子入口：点云滤波/降采样（node.json: alg.point3d.filter_cloud） ----------------
-// method 与 params 布局以 Point3DAlg_api.h 注释表为权威口径（method 0~9 全量开放）。
+// method 与 params 布局以 Point3DAlg_api.h 注释表为权威口径（method 0~10 全量开放）。
 // 固定参数集：node.json 声明 1 个 method(int) + 1 个 field(int) + 20 个 number，
 // 适配层按 method 分支组装该布局的 params 数组：
 //   0 voxel              [leaf_size, min_points_per_voxel]
@@ -787,6 +787,9 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiLoadCloud(const AlgoCInput* in,
 //   7 statisticalOutlier [mean_k, std_dev_mul]
 //   8 radiusOutlier      [radius, min_neighbors]
 //   9 conditionalXYZ     [x_min,x_max,y_min,y_max,z_min,z_max]（开区间）
+//   10 approxVoxel       [leaf]（1.3.0 新增；leaf 复用 node.json 的 leaf_size
+//                        参数——语义同为体素边长，格点质心与 method 0 可有
+//                        微小偏差，PCL ApproximateVoxelGrid 大点云快速版）
 // 消息通道："filter in=N out=M method=K"。
 // 错误码：1 输入未连线；2 点云为空/核心层内存不足（-4/-99）；3 参数非法（-3）/输出组装内存不足；
 //         4 滤波后无点（-2）。（接口文档口径：输出组装 OOM 归 3，MoveCloudOut 先例）
@@ -801,7 +804,7 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiFilterCloud(const AlgoCInput* i
     int method = 0, field = 2;
     if (const AlgoCParam* p = FindParam(in, 1, 0)) method = p->i;
     if (const AlgoCParam* p = FindParam(in, 1, 1)) field = p->i;
-    if (method < 0 || method > 9) { out->error = "method 仅支持 0~9（见节点参数说明）"; return 3; }
+    if (method < 0 || method > 10) { out->error = "method 仅支持 0~10（见节点参数说明）"; return 3; }
     if (field < 0 || field > 2) { out->error = "field 仅支持 0=x/1=y/2=z"; return 3; }
 
     double v[20] = { 0 };
@@ -826,6 +829,7 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiFilterCloud(const AlgoCInput* i
                  params[1] = v[8];  params[2] = v[9];  pc = 3; break;   // passThrough
         case 7:  params[0] = v[10]; params[1] = v[11]; pc = 2; break;   // statisticalOutlier
         case 8:  params[0] = v[12]; params[1] = v[13]; pc = 2; break;   // radiusOutlier
+        case 10: params[0] = v[0];                     pc = 1; break;   // approxVoxel（leaf 复用 leaf_size）
         default: params[0] = v[14]; params[1] = v[15]; params[2] = v[16];
                  params[3] = v[17]; params[4] = v[18]; params[5] = v[19];
                  pc = 6; break;                                         // conditionalXYZ
@@ -1279,9 +1283,11 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiFitCircle2D(const AlgoCInput* i
 //   method 2 cylinder [px,py,pz, dx,dy,dz(单位轴), r]
 //   method 3 circle3D [cx,cy,cz, nx,ny,nz(圆平面单位法向), r]
 //   method 4 cone     [ax,ay,az, dx,dy,dz(单位轴), angle(半开角弧度)]
+//   method 5 line3D   [px,py,pz, dx,dy,dz(单位方向)]（1.3.0 新增，6 值）
 // 模型支持度（PCL 1.9 限制，底层自动回退不报错）：sphere 的 MSAC 回退 RANSAC；
 // cylinder/cone 仅 RANSAC（fit 参数被忽略）；circle3D 的 fit/threshold 复用内部
-// 平面拟合口径。out_coeffs 预分配 8（>= 布局最长 7）免两段式调用。
+// 平面拟合口径；plane/line3D 三种 fit 均支持。out_coeffs 预分配 8（>= 布局最长
+// 7）免两段式调用。
 // 输入：一片点云；无云输出，系数与内点数并入节点消息（manual_regist 先例）。
 // 错误码：1 输入未连线；2 点云为空/内存不足；3 参数非法（-3）；4 拟合失败（-2：
 //         无局内点/退化——点数不足、投影共线、圆锥不收敛）。
@@ -1298,8 +1304,8 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiFitModel(const AlgoCInput* in, 
     if (const AlgoCParam* p = FindParam(in, 1, 0)) method = p->i;
     if (const AlgoCParam* p = FindParam(in, 1, 1)) fit = p->i;
     if (const AlgoCParam* p = FindParam(in, 0, 0)) dist_thr = p->d;
-    if (method < 0 || method > 4) {
-        out->error = "method 仅支持 0=plane/1=sphere/2=cylinder/3=circle3D/4=cone"; return 3;
+    if (method < 0 || method > 5) {
+        out->error = "method 仅支持 0=plane/1=sphere/2=cylinder/3=circle3D/4=cone/5=line3D"; return 3;
     }
     if (fit < 0 || fit > 2) { out->error = "fit 仅支持 0=RANSAC/1=MSAC/2=LMS"; return 3; }
     if (dist_thr <= 0.0) { out->error = "distance_threshold 须 > 0"; return 3; }
@@ -1341,10 +1347,16 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiFitModel(const AlgoCInput* in, 
                      coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5], coeffs[6],
                      inlier_count, src->count);
             break;
-        default:
+        case 4:
             snprintf(msg, sizeof(msg),
                      "cone apex=(%.6f, %.6f, %.6f) dir=(%.6f, %.6f, %.6f) angle=%.6f rad | 内点 %d/%d",
                      coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5], coeffs[6],
+                     inlier_count, src->count);
+            break;
+        case 5:
+            snprintf(msg, sizeof(msg),
+                     "line3D p=(%.6f, %.6f, %.6f) dir=(%.6f, %.6f, %.6f) | 内点 %d/%d",
+                     coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5],
                      inlier_count, src->count);
             break;
     }
@@ -2053,3 +2065,249 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiSickRaw(const AlgoCInput* in, A
     out->error = msg;
     return 0;
 }
+
+// =====================================================================
+// A 类覆盖补缺接入（2026-11-19，4 个入口，追加在文件尾部）：
+//   alg.point3d.save_cloud_ex  —— SaveCloudEx（load_cloud 的反向闭环：处理结果落盘交付）
+//   alg.point3d.knn_search     —— KnnSearch + FreeSearchResult（KdTree K 近邻，欧氏距离）
+//   alg.point3d.radius_search  —— RadiusSearch + FreeSearchResult（半径搜索，0 命中属成功）
+//   alg.point3d.thickness_map  —— ThicknessMap + FreeHeightMap（HeightMap 容器无法跨
+//                                 节点流转，入口内归一化出 8U BGRA，height_map 同款口径）
+// 本段只做参数组装、错误码映射与消息拼装，不新增算法；Knn/Radius 的
+// out_indices/out_dists 为库 malloc（api.h §9.9 契约），成功路径拼完消息、
+// 失败路径出口前均配对 FreeSearchResult 回收；thickness_map 的 HeightMap
+// 全部路径 FreeHeightMap 回收（height_map 先例）。knn/radius 无输出端口，
+// 结果走消息通道——900 字节截断安全：k 恒 ≤30，消息列前 min(k,30) 组
+// "idx:dist"，总数恒在消息头部。
+// =====================================================================
+
+// ---------------- 算子入口：点云文件保存（node.json: alg.point3d.save_cloud_ex） ----------------
+// Point3DAlg_SaveCloudEx（1.1.0 泛化保存；既有 SaveCloud 只写 PLY，本接口 PCD/PLY/TXT）：
+//   type 0=PCD（恒二进制）1=PLY（binary 参数生效）2=TXT（恒文本，分隔符固定单空格）。
+// 参数（按 node.json params 声明顺序）：path(path) type(int 0/1/2) binary(int 0=ASCII/1=二进制)。
+// 输入：一片点云；无输出端口——纯副作用节点（save_transform 先例），落盘确认
+// 并入节点消息："saved points=N type=.. mode=.. file=.."（mode 回显实际生效口径）。
+// C API 错误码口径见 Point3DAlg_api.h SaveCloudEx 注释块。
+// 错误码：1 输入未连线 / 未设置保存路径；2 点云为空 / 写文件失败（-2：路径
+//         不存在/无权限/磁盘满）/ 内存不足或内部异常（-4/-99）；3 type 非法（-3）。
+
+#ifdef POINT3DALG_HAS_PCL
+extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiSaveCloudEx(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->cloudCount < 1 || !in->clouds) { out->error = "输入未连线"; return 1; }
+    const AlgoCCloud* src = &in->clouds[0];
+    if (src->count <= 0 || !src->xyz) { out->error = "输入点云为空"; return 2; }
+
+    const AlgoCParam* p_path = FindParam(in, 2, 0);
+    const char* path = (p_path && p_path->s && p_path->s[0]) ? p_path->s : nullptr;
+    if (!path) { out->error = "未设置保存路径"; return 1; }
+    int type = 0;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) type = p->i;
+    int binary = 0;
+    if (const AlgoCParam* p = FindParam(in, 1, 1)) binary = p->i;
+
+    Point3DAlg_PointCloud pin = CloudViewOf(src);
+    const int rc = Point3DAlg_SaveCloudEx(path, type, &pin, binary);
+    if (rc == -3) { out->error = "保存失败（type 仅支持 0=PCD/1=PLY/2=TXT）"; return 3; }
+    if (rc == -2) { out->error = "保存失败：路径不存在/无权限/磁盘满或格式器拒绝"; return 2; }
+    if (rc != 0)  { out->error = "保存失败（内存不足或内部异常）"; return 2; }
+
+    // mode 回显实际生效口径：PCD 恒二进制、TXT 恒文本（binary 仅 PLY 生效，api.h 注释）
+    const char* mode = (type == 0) ? "binary(PCD恒)"
+                     : (type == 1) ? (binary == 1 ? "binary" : "ascii")
+                                   : "ascii(TXT恒)";
+    static char msg[512];
+    snprintf(msg, sizeof(msg), "saved points=%d type=%s mode=%s file=%.300s",
+             src->count,
+             type == 0 ? "PCD" : (type == 1 ? "PLY" : "TXT"),
+             mode, path);
+    out->error = msg;
+    return 0;
+}
+#endif   // POINT3DALG_HAS_PCL（SaveCloudEx）
+
+// ---------------- 算子入口：KdTree K 近邻搜索（node.json: alg.point3d.knn_search） ----------------
+// Point3DAlg_KnnSearch（api.h §9.9 tree 组）：query 3 个 double 转 float 进 KdTree；
+// out_dists 为欧氏距离（底层 KdTree 平方距离由核心层开方，非 PCL 原始口径），升序。
+// 参数（按 node.json params 声明顺序）：query_x query_y query_z(number) k(int)。
+// 输入：一片点云；无输出端口，近邻列表并入节点消息：
+//   "knn k=K hits=H query=(x,y,z) idx:dist idx:dist ..."——消息头恒含总 k 与命中
+//   数，随后列 min(k,30) 组（900 字节截断安全：k 上限 30，超出按 30 取）。
+// 定位：估点距选参（voxel leaf / 聚类 tolerance 等）/ 局部诊断。
+// 错误码：1 输入未连线；2 点云为空 / 内存不足或内部异常（-4/-99）；3 k<1（-3 同口径）。
+// 内存契约：out_indices/out_dists 库 malloc，成功与失败路径均 FreeSearchResult 回收。
+
+#ifdef POINT3DALG_HAS_PCL
+extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiKnnSearch(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->cloudCount < 1 || !in->clouds) { out->error = "输入未连线"; return 1; }
+    const AlgoCCloud* src = &in->clouds[0];
+    if (src->count <= 0 || !src->xyz) { out->error = "输入点云为空"; return 2; }
+
+    double q[3] = { 0.0, 0.0, 0.0 };
+    for (int i = 0; i < 3; ++i)
+        if (const AlgoCParam* p = FindParam(in, 0, i)) q[i] = p->d;
+    int k = 10;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) k = p->i;
+    if (k < 1) { out->error = "k 须 >= 1（K 近邻个数）"; return 3; }
+    if (k > 30) k = 30;   // 消息通道 900 字节截断安全上限（30 组 idx:dist 恒 < 900B）
+
+    Point3DAlg_PointCloud pin = CloudViewOf(src);
+    int* idxs = NULL;
+    float* dists = NULL;
+    int count = 0;
+    const int rc = Point3DAlg_KnnSearch(&pin, q, k, &idxs, &dists, &count);
+    if (rc == -3) { out->error = "k 须 >= 1（K 近邻个数）"; return 3; }
+    if (rc != 0)  { out->error = "KNN 搜索失败（内存不足或内部异常）"; return 2; }
+
+    static char msg[900];
+    int pos = snprintf(msg, sizeof(msg), "knn k=%d hits=%d query=(%.4g,%.4g,%.4g) ",
+                       k, count, q[0], q[1], q[2]);
+    for (int i = 0; i < count && pos < (int)sizeof(msg) - 32; ++i)
+        pos += snprintf(msg + pos, sizeof(msg) - (size_t)pos, "%s%d:%.4g",
+                        i ? " " : "", idxs[i], (double)dists[i]);
+    Point3DAlg_FreeSearchResult(idxs, dists);   // 库 malloc，配对回收（NULL 安全）
+    out->error = msg;
+    return 0;
+}
+#endif   // POINT3DALG_HAS_PCL（KnnSearch）
+
+// ---------------- 算子入口：KdTree 半径搜索（node.json: alg.point3d.radius_search） ----------------
+// Point3DAlg_RadiusSearch（api.h §9.9 tree 组）：半径内全部近邻（欧氏距离，升序）。
+// 参数（按 node.json params 声明顺序）：query_x query_y query_z radius(number)。
+// 输入：一片点云；无输出端口，消息形态与 knn_search 同（消息头含命中总数 +
+// 前 30 组 "idx:dist"）；0 命中属正常成功（api.h 口径："半径内无点 → 0 成功 +
+// *out_count=0"），不报错。
+// 错误码：1 输入未连线；2 点云为空 / 内存不足或内部异常（-4/-99）；3 radius<=0（-3 同口径）。
+// 内存契约：同 knn_search——FreeSearchResult 成功/失败路径配对回收。
+
+#ifdef POINT3DALG_HAS_PCL
+extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiRadiusSearch(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->cloudCount < 1 || !in->clouds) { out->error = "输入未连线"; return 1; }
+    const AlgoCCloud* src = &in->clouds[0];
+    if (src->count <= 0 || !src->xyz) { out->error = "输入点云为空"; return 2; }
+
+    double q[3] = { 0.0, 0.0, 0.0 };
+    for (int i = 0; i < 3; ++i)
+        if (const AlgoCParam* p = FindParam(in, 0, i)) q[i] = p->d;
+    double radius = 0.5;
+    if (const AlgoCParam* p = FindParam(in, 0, 3)) radius = p->d;
+    if (radius <= 0.0) { out->error = "radius 须 > 0（搜索半径，与坐标同单位）"; return 3; }
+
+    Point3DAlg_PointCloud pin = CloudViewOf(src);
+    int* idxs = NULL;
+    float* dists = NULL;
+    int count = 0;
+    const int rc = Point3DAlg_RadiusSearch(&pin, q, radius, &idxs, &dists, &count);
+    if (rc != 0)  { out->error = "半径搜索失败（内存不足或内部异常）"; return 2; }
+
+    static char msg[900];
+    int pos = snprintf(msg, sizeof(msg), "radius=%.4g hits=%d query=(%.4g,%.4g,%.4g) ",
+                       radius, count, q[0], q[1], q[2]);
+    for (int i = 0; i < count && i < 30 && pos < (int)sizeof(msg) - 32; ++i)
+        pos += snprintf(msg + pos, sizeof(msg) - (size_t)pos, "%s%d:%.4g",
+                        i ? " " : "", idxs[i], (double)dists[i]);
+    Point3DAlg_FreeSearchResult(idxs, dists);   // 库 malloc，配对回收（NULL 安全）
+    out->error = msg;
+    return 0;
+}
+#endif   // POINT3DALG_HAS_PCL（RadiusSearch）
+
+// ---------------- 算子入口：厚度图（node.json: alg.point3d.thickness_map） ----------------
+// Point3DAlg_ThicknessMap（api.h §9.13 heightmap 组）：同一工件上/下表面两点云
+// 沿 Z 配对求差（板厚/锡膏厚度）——栅格范围 = 两云有效点 XY 包围盒并集，上云
+// 每格取最高 z、下云每格取最低 z，同格双有效 → 厚度 = zTop - zBottom（**负厚度
+// 保留不钳制**，数据异常由业务按消息里 min/max 判定）。
+// HeightMap 容器无法跨节点流转（height_map 节点同款限制），本入口在节点内
+// 归一化出 8U BGRA image：厚度 tmin→0 / tmax→255、无效格黑（口径与 height_map
+// 的 zmin/zmax 归一化一致；tmin==tmax 等厚时有效格按 0 灰度，不把整图拉满）。
+// 参数（按 node.json params 声明顺序）：cell(number>0)。
+// 输入：两片点云（clouds[0]=顶面/上表面，clouds[1]=底面/下表面——cloud_diff
+// 双云输入先例）；输出：厚度灰度图（BGRA，row 0 = y 最小）。
+// 消息通道："width=W height=H cell=C thickness=[tmin~tmax] valid=P/T(R%)"。
+// 错误码：1 输入未连线；2 点云为空 / 内存不足或内部异常；3 cell<=0（-3）；
+//         4 栅格化失败（-2：无有效点/超 2000 万格上限）或上下表面无重叠格。
+// 内存契约：hm 由库 malloc，全部路径 FreeHeightMap 回收（height_map 先例）。
+
+#ifdef POINT3DALG_HAS_PCL
+extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiThicknessMap(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->cloudCount < 2 || !in->clouds) { out->error = "需要两片输入点云（顶面/底面）"; return 1; }
+    const AlgoCCloud* ctop = &in->clouds[0];
+    const AlgoCCloud* cbot = &in->clouds[1];
+    if (ctop->count <= 0 || !ctop->xyz) { out->error = "顶面点云为空"; return 2; }
+    if (cbot->count <= 0 || !cbot->xyz) { out->error = "底面点云为空"; return 2; }
+
+    double cell = 0.1;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) cell = p->d;
+    if (cell <= 0.0) { out->error = "cell 须 > 0（栅格边长，与点云坐标同单位）"; return 3; }
+
+    Point3DAlg_PointCloud ptop = CloudViewOf(ctop);
+    Point3DAlg_PointCloud pbot = CloudViewOf(cbot);
+    Point3DAlg_HeightMap hm = {};
+    const int rc = Point3DAlg_ThicknessMap(&ptop, &pbot, cell, &hm);
+    if (rc == -3) { out->error = "栅格化失败（cell<=0）"; return 3; }
+    if (rc == -2) { out->error = "栅格化失败：无有效点或超 2000 万格上限（调大 cell）"; return 4; }
+    if (rc != 0)  { out->error = "厚度图失败（内存不足或内部异常）"; return 2; }
+    if (hm.cells == NULL || hm.mask == NULL || hm.width <= 0 || hm.height <= 0) {
+        Point3DAlg_FreeHeightMap(&hm);
+        out->error = "厚度图失败：返回图无效";
+        return 2;
+    }
+
+    // 厚度 min/max（仅 mask=1 同格双有效格参与；负值保留不钳制）
+    const int total = hm.width * hm.height;
+    double tmin = 0.0, tmax = 0.0;
+    int valid_n = 0;
+    for (int i = 0; i < total; ++i) {
+        if (!hm.mask[i]) continue;
+        const double t = (double)hm.cells[i];
+        if (valid_n == 0) { tmin = tmax = t; }
+        else {
+            if (t < tmin) tmin = t;
+            if (t > tmax) tmax = t;
+        }
+        ++valid_n;
+    }
+    if (valid_n == 0) {   // rc=0 但无同格双有效格：两云 XY 范围不相交（接口语义允许）
+        Point3DAlg_FreeHeightMap(&hm);
+        out->error = "上下表面无重叠格（两云 XY 范围不相交或无同格有效对），厚度图为空";
+        return 4;
+    }
+    const double range = tmax - tmin;
+    uint8_t* px = (uint8_t*)malloc((size_t)total * 4);
+    if (!px) { Point3DAlg_FreeHeightMap(&hm); out->error = "内存不足"; return 2; }
+    for (int i = 0; i < total; ++i) {
+        uint8_t g = 0;
+        if (hm.mask[i] && range > 0.0) {
+            double t = ((double)hm.cells[i] - tmin) / range;
+            if (t < 0.0) t = 0.0;
+            if (t > 1.0) t = 1.0;
+            g = (uint8_t)(t * 255.0 + 0.5);
+        }
+        px[i * 4] = g; px[i * 4 + 1] = g; px[i * 4 + 2] = g; px[i * 4 + 3] = 255;
+    }
+
+    AlgoCImageOut* arr = (AlgoCImageOut*)malloc(sizeof(AlgoCImageOut));
+    if (!arr) {
+        free(px);
+        Point3DAlg_FreeHeightMap(&hm);
+        out->error = "内存不足"; return 2;
+    }
+    arr->width = hm.width;
+    arr->height = hm.height;
+    arr->bgra = px;
+    out->images = arr;
+    out->imageCount = 1;
+
+    static char msg[256];
+    snprintf(msg, sizeof(msg),
+             "width=%d height=%d cell=%.4g thickness=[%.4g~%.4g] valid=%d/%d(%.1f%%)",
+             hm.width, hm.height, hm.cell, tmin, tmax,
+             valid_n, total, total > 0 ? 100.0 * valid_n / total : 0.0);
+    Point3DAlg_FreeHeightMap(&hm);
+    out->error = msg;
+    return 0;
+}
+#endif   // POINT3DALG_HAS_PCL（ThicknessMap）

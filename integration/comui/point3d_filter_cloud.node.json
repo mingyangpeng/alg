@@ -4,7 +4,7 @@
     "name": "点云滤波",
     "group": "3D 点云",
     "category": "处理",
-    "description": "点云滤波/降采样（PCL，method 0~9 全量）：体素质心/随机/等间隔/最远点采样、剔除非有限点、去重、直通/条件滤波、统计/半径离群剔除；未用参数保持默认跳过；输出无颜色（查看器按高度伪彩上色），in/out 点数并入节点消息"
+    "description": "点云滤波/降采样（PCL，method 0~10 全量）：体素质心/随机/等间隔/最远点采样、剔除非有限点、去重、直通/条件滤波、统计/半径离群剔除、近似体素降采样（大点云快速）；未用参数保持默认跳过；输出无颜色（查看器按高度伪彩上色），in/out 点数并入节点消息"
   },
   "runtime": "native",
   "assembly": "Point3DAlg.dll",
@@ -22,17 +22,17 @@
       "type": "int",
       "default": 0,
       "min": 0,
-      "max": 9,
-      "description": "0=voxel体素质心降采样 1=random随机采样 2=uniform等间隔采样 3=farthest最远点采样 4=removeNonFinite剔除非有限点 5=removeDuplicates去重 6=passThrough直通滤波 7=statisticalOutlier统计离群剔除 8=radiusOutlier半径离群剔除 9=conditionalXYZ条件滤波"
+      "max": 10,
+      "description": "0=voxel体素质心降采样 1=random随机采样 2=uniform等间隔采样 3=farthest最远点采样 4=removeNonFinite剔除非有限点 5=removeDuplicates去重 6=passThrough直通滤波 7=statisticalOutlier统计离群剔除 8=radiusOutlier半径离群剔除 9=conditionalXYZ条件滤波 10=approxVoxel近似体素降采样（大点云快速）"
     },
     {
       "name": "leaf_size",
-      "label": "体素边长(method 0)",
+      "label": "体素边长(method 0/10)",
       "type": "number",
       "default": 0.01,
       "min": 0.0001,
       "max": 1000000,
-      "description": "method 0：体素边长（三轴同值，>0；每格输出质心）"
+      "description": "method 0/10：体素边长（三轴同值，>0；method 0 每格输出质心，method 10 近似体素）"
     },
     {
       "name": "min_points_per_voxel",

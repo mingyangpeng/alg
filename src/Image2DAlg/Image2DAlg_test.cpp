@@ -214,7 +214,7 @@ static void testVersionAndLifecycle()
 
     check(ver != NULL && ver[0] != '\0', "GetVersion 非空");
 
-    check(ver != NULL && std::strcmp(ver, "2.3.0") == 0, "GetVersion = 2.3.0（2.3.0 滤波扩展：Laplacian/Filter2D）");
+    check(ver != NULL && std::strcmp(ver, "2.4.0") == 0, "GetVersion = 2.4.0（2.4.0 扩展：DistanceTransform/FloodFill/Remap/WarpPolar/ContourHausdorff/FitCircleBatch）");
 
     bool hasDigit = false;
 
@@ -5382,6 +5382,332 @@ static void testFitLinesFromBinary()
 
 
 
+// ---------------- 2.4.0 批次：几何变换扩展（距离变换 / 泛洪填充 / 重映射 / 极坐标变换） ----------------
+
+static void testDistanceFloodRemapWarp()
+{
+    std::printf("== DistanceTransform ==\n");
+
+    // 16x16 灰度全 255，中心 4x4（行/列 6..9）置 0 为背景：
+    // 距离场 = 各像素到方块最近点的距离（L1 最近点 = clamp 进方块）
+    cv::Mat dtm(16, 16, CV_8UC1, cv::Scalar(255));
+    for (int y = 6; y <= 9; ++y)
+        for (int x = 6; x <= 9; ++x)
+            dtm.at<unsigned char>(y, x) = 0;
+    Image2DAlg_Image din = MakeImage(dtm);
+    Image2DAlg_Image dout;
+    std::memset(&dout, 0, sizeof(dout));
+
+    // L2 mask=3 为近似口径：抽查轴向紧邻像素（真值恰为 1.0，容差 0.1）
+    check(Image2DAlg_DistanceTransform(&din, 2, 3, 5, &dout) == 0,
+          "DistanceTransform L2 mask3 dst=CV32F 返回 0");
+    check(dout.width == 16 && dout.height == 16 && dout.channels == 1,
+          "距离场输出 1 通道同尺寸");
+    {
+        const float* f = (const float*)dout.data;
+        check(std::fabs(f[6 * 16 + 10] - 1.0f) < 0.1f &&
+              std::fabs(f[7 * 16 + 5] - 1.0f) < 0.1f &&
+              std::fabs(f[10 * 16 + 7] - 1.0f) < 0.1f,
+              "L2 与方块边相距 1 的像素 ≈ 1.0（容差 0.1）");
+        check(std::fabs(f[8 * 16 + 8]) < 1e-3f, "背景方块内部距离 0（数据按 float 解释）");
+    }
+    Image2DAlg_FreeImage(&dout);
+
+    // L1 mask=3：整数 L1 距离场逐像素对照解析值（精确口径）
+    std::memset(&dout, 0, sizeof(dout));
+    check(Image2DAlg_DistanceTransform(&din, 1, 3, 5, &dout) == 0 && dout.channels == 1,
+          "DistanceTransform L1 mask3 dst=CV32F 返回 0 且 1 通道");
+    {
+        const float* f = (const float*)dout.data;
+        bool exact = true;
+        for (int y = 0; y < 16 && exact; ++y)
+            for (int x = 0; x < 16 && exact; ++x) {
+                const int bx = x < 6 ? 6 : (x > 9 ? 9 : x);
+                const int by = y < 6 ? 6 : (y > 9 ? 9 : y);
+                const double expect = AbsInt(x - bx) + AbsInt(y - by);
+                if (std::fabs(f[y * 16 + x] - expect) > 1e-3) exact = false;
+            }
+        check(exact, "L1 距离场与解析值逐像素相等（0..12 整数）");
+    }
+    Image2DAlg_FreeImage(&dout);
+
+    // dst=CV_8U：整数值输出
+    std::memset(&dout, 0, sizeof(dout));
+    check(Image2DAlg_DistanceTransform(&din, 1, 3, 0, &dout) == 0 && dout.channels == 1,
+          "DistanceTransform L1 dst=CV8U 返回 0 且 1 通道");
+    check(Pix(dout, 10, 6) == 1 && Pix(dout, 11, 7) == 2 &&
+          Pix(dout, 0, 0) == 12 && Pix(dout, 8, 8) == 0,
+          "CV8U 整数距离抽查（1/2/12/0）");
+    Image2DAlg_FreeImage(&dout);
+
+    // 错误路径
+    cv::Mat dt3(4, 4, CV_8UC3, cv::Scalar(10, 20, 30));
+    Image2DAlg_Image din3 = MakeImage(dt3);
+    std::memset(&dout, 0, sizeof(dout));
+    check(Image2DAlg_DistanceTransform(NULL, 1, 3, 5, &dout) == -1,
+          "DistanceTransform in=NULL -> -1");
+    check(Image2DAlg_DistanceTransform(&din, 1, 3, 5, NULL) == -1,
+          "DistanceTransform out=NULL -> -1");
+    check(Image2DAlg_DistanceTransform(&din, 7, 3, 5, &dout) == -3,
+          "DistanceTransform distance_type=7 -> -3");
+    check(Image2DAlg_DistanceTransform(&din, 1, 5, 5, &dout) == -3,
+          "DistanceTransform L1+mask=5 -> -3");
+    check(Image2DAlg_DistanceTransform(&din, 2, 0, 0, &dout) == -3,
+          "DistanceTransform L2+mask=0(PRECISE)+dst=CV8U -> -3");
+    check(Image2DAlg_DistanceTransform(&din3, 1, 3, 5, &dout) == -3,
+          "DistanceTransform 3 通道 -> -3");
+    Image2DAlg_FreeImage(&din3);
+    Image2DAlg_FreeImage(&din);
+
+    std::printf("== FloodFill ==\n");
+
+    // 32x32 灰度：全 200 背景，中心 10x10（行/列 11..20）置 50；
+    // 种子 (16,16)，new=255，lo=up=10 → 只填 50 区域（4 连通 100 像素）
+    cv::Mat ffm(32, 32, CV_8UC1, cv::Scalar(200));
+    for (int y = 11; y <= 20; ++y)
+        for (int x = 11; x <= 20; ++x)
+            ffm.at<unsigned char>(y, x) = 50;
+    Image2DAlg_Image fin = MakeImage(ffm);
+    Image2DAlg_Image fout;
+    std::memset(&fout, 0, sizeof(fout));
+    int rect[4] = { -1, -1, -1, -1 };
+    int filled = -1;
+    check(Image2DAlg_FloodFill(&fin, 16, 16, 255.0, 10.0, 10.0, &fout, rect, &filled) == 0,
+          "FloodFill 返回 0");
+    check(filled == 100, "填充数 = 100（10x10 区域）");
+    check(rect[0] == 11 && rect[1] == 11 && rect[2] == 10 && rect[3] == 10,
+          "out_rect = (11,11,10,10)（cv Rect x,y,w,h 口径）");
+    check(fout.width == 32 && fout.height == 32 && fout.channels == 1,
+          "输出尺寸/通道与输入一致");
+    check(Pix(fout, 16, 16) == 255 && Pix(fout, 11, 11) == 255,
+          "种子与区域角点均填为 255");
+    check(Pix(fout, 2, 2) == 200 && Pix(fout, 25, 25) == 200,
+          "背景 200 不被误填");
+    Image2DAlg_FreeImage(&fout);
+
+    // 错误路径
+    std::memset(&fout, 0, sizeof(fout));
+    filled = -1;
+    check(Image2DAlg_FloodFill(NULL, 16, 16, 255.0, 10.0, 10.0, &fout, rect, &filled) == -1,
+          "FloodFill in=NULL -> -1");
+    check(Image2DAlg_FloodFill(&fin, 16, 16, 255.0, 10.0, 10.0, &fout, rect, NULL) == -1,
+          "FloodFill out_filled=NULL -> -1");
+    check(Image2DAlg_FloodFill(&fin, 32, 16, 255.0, 10.0, 10.0, &fout, rect, &filled) == -3,
+          "FloodFill 种子 x 越界 -> -3");
+    check(Image2DAlg_FloodFill(&fin, 16, -1, 255.0, 10.0, 10.0, &fout, rect, &filled) == -3,
+          "FloodFill 种子 y 越界 -> -3");
+    cv::Mat ff4(4, 4, CV_8UC4, cv::Scalar(200, 200, 200, 255));
+    Image2DAlg_Image fin4 = MakeImage(ff4);
+    std::memset(&fout, 0, sizeof(fout));
+    check(Image2DAlg_FloodFill(&fin4, 1, 1, 255.0, 10.0, 10.0, &fout, rect, &filled) == -3,
+          "FloodFill BGRA 4 通道 -> -3");
+    Image2DAlg_FreeImage(&fin4);
+    Image2DAlg_FreeImage(&fin);
+
+    std::printf("== Remap ==\n");
+
+    // 8x8 灰度唯一编码 v = row*8+col；map 为 1 通道 CV_32F 位流
+    // （MakeImage 输入 CV_32FC1 即 channels=1、每像素 4 字节 float 的 malloc 缓冲）
+    cv::Mat rm(8, 8, CV_8UC1);
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 8; ++x)
+            rm.at<unsigned char>(y, x) = (unsigned char)(y * 8 + x);
+    Image2DAlg_Image rin = MakeImage(rm);
+    cv::Mat mx(8, 8, CV_32FC1), my(8, 8, CV_32FC1);
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 8; ++x) {
+            mx.at<float>(y, x) = (float)x;
+            my.at<float>(y, x) = (float)y;
+        }
+    Image2DAlg_Image m1 = MakeImage(mx);
+    Image2DAlg_Image m2 = MakeImage(my);
+    Image2DAlg_Image rout;
+    std::memset(&rout, 0, sizeof(rout));
+
+    // 恒等映射
+    check(Image2DAlg_Remap(&rin, &m1, &m2, 1, &rout) == 0, "Remap 恒等映射返回 0");
+    check(rout.width == 8 && rout.height == 8 && rout.channels == 1,
+          "Remap 输出尺寸/通道与输入一致");
+    {
+        bool same = true;
+        for (int i = 0; i < 64; ++i)
+            if (rout.data[i] != rin.data[i]) { same = false; break; }
+        check(same, "恒等映射输出与输入逐像素相等");
+    }
+    Image2DAlg_FreeImage(&rout);
+
+    // 平移映射：map1 = x-1（采样左邻）→ 输出 (x,y) = 输入 (x-1,y)；
+    // x=0 采样坐标 -1 落边界（行为取决于实现边框口径），只断言 x>=1 内部区域
+    {
+        float* fx = (float*)m1.data;
+        for (int y = 0; y < 8; ++y)
+            for (int x = 0; x < 8; ++x)
+                fx[y * 8 + x] = (float)(x - 1);
+    }
+    std::memset(&rout, 0, sizeof(rout));
+    check(Image2DAlg_Remap(&rin, &m1, &m2, 1, &rout) == 0, "Remap 平移映射返回 0");
+    {
+        bool ok = true;
+        for (int y = 0; y < 8 && ok; ++y)
+            for (int x = 1; x < 8 && ok; ++x)
+                if (Pix(rout, x, y) != y * 8 + x - 1) ok = false;
+        check(ok, "map1=x-1 输出 (x,y) = 输入 (x-1,y)（内部区域逐像素）");
+    }
+    Image2DAlg_FreeImage(&rout);
+
+    // 错误路径
+    cv::Mat m6(6, 6, CV_32FC1, cv::Scalar(0.0f));
+    Image2DAlg_Image mbad = MakeImage(m6);
+    std::memset(&rout, 0, sizeof(rout));
+    check(Image2DAlg_Remap(&rin, NULL, &m2, 1, &rout) == -1, "Remap map1=NULL -> -1");
+    check(Image2DAlg_Remap(&rin, &mbad, &mbad, 1, &rout) == -3,
+          "Remap map 尺寸与输入不一致 -> -3");
+    check(Image2DAlg_Remap(&rin, &m1, &m2, 9, &rout) == -3, "Remap interpolation=9 -> -3");
+    Image2DAlg_FreeImage(&mbad);
+    Image2DAlg_FreeImage(&m2);
+    Image2DAlg_FreeImage(&m1);
+    Image2DAlg_FreeImage(&rout);
+    Image2DAlg_FreeImage(&rin);
+
+    std::printf("== WarpPolar ==\n");
+
+    // 64x64 灰度：圆心 (32,32) 半径 20 白色实心圆盘，背景 0
+    cv::Mat wpm(64, 64, CV_8UC1, cv::Scalar(0));
+    cv::circle(wpm, cv::Point(32, 32), 20, cv::Scalar(255), -1);
+    Image2DAlg_Image win = MakeImage(wpm);
+    Image2DAlg_Image wout;
+    std::memset(&wout, 0, sizeof(wout));
+
+    // 轴序口径（cv::warpPolar 线性模式，实测校准）：**列 X = rho 半径轴**
+    //（x → rho = max_radius * x / dsize_w），**行 Y = 角度轴**。居中实心圆盘
+    // 的极坐标图每个角度行都含完整径向剖面：rho 0..20（列 0..23）白、
+    // rho 20..30（列 24..35）黑。半径 20 圆盘 / max_radius 30 / dsize_w 36：
+    // 列 0..5（rho≈0..5）深居盘内 → 白；列 31..35（rho≈25.8..30）在盘外 → 黑。
+    // flags=0 = WARP_POLAR_LINEAR（非 LOG）。
+    check(Image2DAlg_WarpPolar(&win, 36, 32, 32.0, 32.0, 30.0, 0, &wout) == 0,
+          "WarpPolar 返回 0");
+    check(wout.width == 36 && wout.height == 32 && wout.channels == 1,
+          "极坐标输出 36x32 1 通道");
+    {
+        double inner = 0.0, outer = 0.0;
+        for (int x = 0; x <= 5; ++x)
+            for (int y = 0; y < 32; ++y)
+                inner += Pix(wout, x, y);
+        for (int x = 31; x <= 35; ++x)
+            for (int y = 0; y < 32; ++y)
+                outer += Pix(wout, x, y);
+        inner /= 6.0 * 32;
+        outer /= 5.0 * 32;
+        check(inner > 200.0, "rho 0..5 列（盘内）均值 > 200（列 X = rho 轴，实测校准）");
+        check(outer < 10.0, "rho 25..30 列（盘外）均值 < 10");
+    }
+    Image2DAlg_FreeImage(&wout);
+
+    // 错误路径
+    std::memset(&wout, 0, sizeof(wout));
+    check(Image2DAlg_WarpPolar(NULL, 36, 32, 32.0, 32.0, 30.0, 0, &wout) == -1,
+          "WarpPolar in=NULL -> -1");
+    check(Image2DAlg_WarpPolar(&win, 0, 32, 32.0, 32.0, 30.0, 0, &wout) == -3,
+          "WarpPolar dsize_w=0 -> -3");
+    check(Image2DAlg_WarpPolar(&win, 36, 32, 32.0, 32.0, 0.0, 0, &wout) == -3,
+          "WarpPolar max_radius=0 -> -3");
+    check(Image2DAlg_WarpPolar(&win, 36, 32, 32.0, 32.0, 30.0, 9, &wout) == -3,
+          "WarpPolar flags=9 -> -3");
+    Image2DAlg_FreeImage(&wout);
+    Image2DAlg_FreeImage(&win);
+}
+
+
+
+// ---------------- 2.4.0 批次：轮廓 Hausdorff 距离 / 批量圆拟合 ----------------
+
+static void testHausdorffCircleBatch()
+{
+    std::printf("== ContourHausdorff ==\n");
+
+    // 正方形 4 顶点 vs 自身 → 0；vs 沿 x 平移 +2 的同形方 → 2.0（轴向平移下
+    // 双向最大-最小 = 平移量；对角 (2,2) 平移的顶点最近距为 √8，非 2.0）
+    const float sqA[8] = { 0.f, 0.f, 10.f, 0.f, 10.f, 10.f, 0.f, 10.f };
+    const float sqB[8] = { 2.f, 0.f, 12.f, 0.f, 12.f, 10.f, 2.f, 10.f };
+    double hd = -1.0;
+    check(Image2DAlg_ContourHausdorff(sqA, 4, sqA, 4, &hd) == 0 && std::fabs(hd) < 1e-9,
+          "同形轮廓 Hausdorff 距离 = 0");
+    hd = -1.0;
+    check(Image2DAlg_ContourHausdorff(sqA, 4, sqB, 4, &hd) == 0 &&
+          std::fabs(hd - 2.0) < 1e-9, "x 平移 +2 的同形方 Hausdorff = 2.0（精确）");
+
+    // 错误路径
+    hd = -1.0;
+    check(Image2DAlg_ContourHausdorff(sqA, 0, sqB, 4, &hd) == -3,
+          "ContourHausdorff count_a=0 -> -3");
+    check(Image2DAlg_ContourHausdorff(sqA, 4, NULL, 4, &hd) == -1,
+          "ContourHausdorff xy_b=NULL -> -1");
+    check(Image2DAlg_ContourHausdorff(sqA, 4, sqB, 4, NULL) == -1,
+          "ContourHausdorff out=NULL -> -1");
+
+    std::printf("== FitCircleBatch ==\n");
+
+    // 组 0：36 点理想圆（心 (10,20) r=8）；组 1：27 点圆（心 (100,50) r=10）+ 3 远外点；
+    // 组 2：2 点退化。group_offsets = {0,36,66,68}（首组起点 + 各组终点）
+    std::vector<float> pts;
+    for (int i = 0; i < 36; ++i) {
+        const double a = 2.0 * 3.14159265358979323846 * i / 36.0;
+        pts.push_back((float)(8.0 * std::cos(a) + 10.0));
+        pts.push_back((float)(8.0 * std::sin(a) + 20.0));
+    }
+    for (int i = 0; i < 27; ++i) {
+        const double a = 2.0 * 3.14159265358979323846 * i / 27.0;
+        pts.push_back((float)(10.0 * std::cos(a) + 100.0));
+        pts.push_back((float)(10.0 * std::sin(a) + 50.0));
+    }
+    pts.push_back(200.0f); pts.push_back(200.0f);   // 组 1 外点 1
+    pts.push_back(0.0f);   pts.push_back(200.0f);   // 组 1 外点 2
+    pts.push_back(200.0f); pts.push_back(0.0f);     // 组 1 外点 3
+    pts.push_back(5.0f);   pts.push_back(5.0f);     // 组 2：2 点，无法定圆
+    pts.push_back(9.0f);   pts.push_back(9.0f);
+
+    const int offsets[4] = { 0, 36, 66, 68 };
+    Image2DAlg_CircleFit fits[3];
+    unsigned char valid[3];
+
+    // threshold>0 走稳健层
+    std::memset(fits, 0, sizeof(fits));
+    std::memset(valid, 0xAA, sizeof(valid));   // 哨兵：核验出口逐组写 defined 0/1
+    check(Image2DAlg_FitCircleBatch(pts.data(), offsets, 3, 0.5, fits, valid, 7u, 100) == 0,
+          "FitCircleBatch 返回 0");
+    check(valid[0] == 1 && valid[1] == 1 && valid[2] == 0,
+          "组 0/1 有效、组 2（2 点退化）无效");
+    check(std::fabs(fits[0].cx - 10.0) < 1e-3 && std::fabs(fits[0].cy - 20.0) < 1e-3 &&
+          std::fabs(fits[0].r - 8.0) < 1e-3 && fits[0].rms < 1e-4,
+          "组 0 理想圆：心 (10,20) r=8（FitCircleEx 口径 1e-3）");
+    check(std::fabs(fits[1].cx - 100.0) < 0.5 && std::fabs(fits[1].cy - 50.0) < 0.5 &&
+          std::fabs(fits[1].r - 10.0) < 0.5,
+          "组 1 稳健拟合抗 3 外点：心/半径不受污染（Robust 口径 0.5）");
+    check(fits[2].cx == 0.0 && fits[2].cy == 0.0 && fits[2].r == 0.0 && fits[2].rms == 0.0,
+          "组 2 退化：拟合字段置 0");
+
+    // threshold<=0：纯最小二乘（组 0 对理想圆仍精确；组 1 会被外点拉偏——
+    // 参数不断言，只核验 valid 语义有定义）
+    std::memset(fits, 0, sizeof(fits));
+    std::memset(valid, 0xAA, sizeof(valid));
+    check(Image2DAlg_FitCircleBatch(pts.data(), offsets, 3, 0.0, fits, valid, 7u, 100) == 0,
+          "threshold=0 纯最小二乘返回 0");
+    check(valid[0] == 1, "threshold=0 组 0 仍有效（LSQ 对理想圆精确）");
+    check(valid[1] == 0 || valid[1] == 1, "threshold=0 组 1 valid 语义有定义（参数不强断言）");
+    check(valid[2] == 0, "threshold=0 组 2 仍无效");
+
+    // 错误路径
+    check(Image2DAlg_FitCircleBatch(pts.data(), NULL, 3, 0.5, fits, valid, 7u, 100) == -1,
+          "FitCircleBatch group_offsets=NULL -> -1");
+    check(Image2DAlg_FitCircleBatch(pts.data(), offsets, 0, 0.5, fits, valid, 7u, 100) == -3,
+          "FitCircleBatch group_count=0 -> -3");
+    const int bad_offsets[4] = { 0, 36, 30, 68 };
+    check(Image2DAlg_FitCircleBatch(pts.data(), bad_offsets, 3, 0.5, fits, valid, 7u, 100) == -3,
+          "FitCircleBatch offsets 非单调递增 -> -3");
+}
+
+
+
 int main()
 
 {
@@ -5433,6 +5759,10 @@ int main()
     testFitEllipsesFromBinary();
 
     testFitLinesFromBinary();
+
+    testDistanceFloodRemapWarp();
+
+    testHausdorffCircleBatch();
 
     testRoiFamily();
 

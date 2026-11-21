@@ -46,6 +46,12 @@
 //            高斯已由 Blur method 0/1/2 覆盖，不另设入口避免语义漂移）+
 //            DenoiseNLMeans 非局部均值降噪
 //
+//   2.4.0  + GD&T 几何测量扩展 6 算子：DistanceTransform 距离变换 /
+//            FloodFill 泛洪填充（孔洞封闭）/ Remap 任意重映射（畸变校正
+//            通用底座）/ WarpPolar 极坐标展开（环形工件检测）/
+//            ContourHausdorff 双轮廓 Hausdorff 距离（形状偏差量化）/
+//            FitCircleBatch 批量圆拟合（焊盘/孔阵列）
+//
 // 【通道语义】Image2DAlg_Image.channels 支持 1（灰度）/ 3（BGR）/ 4（BGRA），
 //   data 为紧排像素（行步长 = width * channels，无对齐填充）：
 //   * 通用算子保持输入真实通道数（1→1、3→3、4→4，alpha 随通道参与运算）；
@@ -1291,6 +1297,119 @@ IMAGE2DALG_EXPORT int Image2DAlg_DenoiseNLMeans(const Image2DAlg_Image* in,
                                                 double h, double h_color,
                                                 int template_window, int search_window,
                                                 Image2DAlg_Image* out);
+
+// ---------------- 2.4.0 批次：距离变换 / 泛洪填充 / 重映射 / 极坐标 / Hausdorff / 批量圆拟合 ----------------
+
+/// 距离变换（cv::distanceTransform 透传）：每个前景像素的值 = 到最近背景
+/// 像素的距离（背景 0）——骨架提取、自适应腐蚀半径、焊球内切圆半径估计。
+/// [in]  in             8U 单通道二值图（非 0 视为前景；其余深度/通道 -> -3）
+/// [in]  distance_type  1 = DIST_L1（快）/ 2 = DIST_L2（欧氏，精确）/ 3 = DIST_C
+///                      （棋盘距离；其他 -> -3）
+/// [in]  mask_size      3 / 5 = 近似掩膜（5 仅 L2 更准）；0 = DIST_MASK_PRECISE
+///                      （精确欧氏算法，仅 L2 支持）。distance_type 非 L2 时
+///                      必须为 3（否则 -3）
+/// [in]  dst_type       输出深度：5 = CV_32F（浮点距离，推荐）/ 0 = CV_8U
+///                      （整型距离，仅 L1 近似组合受 cv 支持）。mask_size = 0
+///                      时必须 5（否则 -3）
+/// [out] out            距离图：width/height 同输入、1 通道、data 为 dst_type
+///                      深度的紧排缓冲（CV_32F 时按 float 位流解读），用
+///                      Image2DAlg_FreeImage 释放
+/// 返回：0 成功；-1 空指针/空图；-3 参数/组合非法（distance_type、mask_size、
+///       dst_type 取值或与 distance_type 的搭配不支持）；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_DistanceTransform(const Image2DAlg_Image* in, int distance_type,
+                                                   int mask_size, int dst_type,
+                                                   Image2DAlg_Image* out);
+
+/// 泛洪填充（cv::floodFill 透传）：从种子点出发，把与当前像素差在
+/// [lo_diff, up_diff] 容差内的连通同色区域重绘为 new_val——二值图孔洞封闭
+/// /区域填充的经典入口。
+/// [in]  in               仅支持 8U 单通道（其余 -> -3；cv::floodFill 的多通道
+///                        差值语义在工业孔洞封闭场景无稳定口径，不开放）
+/// [in]  seed_x/seed_y    种子点（像素坐标；越界 -> -3）
+/// [in]  new_val          重绘值（任意值合法，不做校验）
+/// [in]  lo_diff/up_diff  允许差下/上限（任意值合法，可为负/0）
+/// [out] out              填充后的图（width/height/channels 同输入，malloc 新
+///                        紧排缓冲，用 Image2DAlg_FreeImage 释放）
+/// [out] out_rect         被填充区域包围盒 [x, y, w, h]（cv::Rect 口径；可为
+///                        NULL 不接收）
+/// [out] out_filled       重绘像素个数（必填，NULL -> -1）
+/// 输入不被修改（内部拷贝工作副本后就地填充）。
+/// 返回：0 成功；-1 空指针/空图（含 out_filled）；-2 填充失败（底层返回 -1）；
+///       -3 非 1 通道/种子越界；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_FloodFill(const Image2DAlg_Image* in, int seed_x, int seed_y,
+                                           double new_val, double lo_diff, double up_diff,
+                                           Image2DAlg_Image* out, int out_rect[4], int* out_filled);
+
+/// 任意重映射（cv::remap 透传）：out(x, y) = in(map1(x, y), map2(x, y))——
+/// 标定畸变校正（initUndistortRectifyMap 输出直接喂入）、自定义几何变换的
+/// 通用底座。
+/// [in]  in             输入图（1/3/4 通道）
+/// [in]  map1/map2      每像素源坐标 X/Y 图。契约：channels == 1 且 data 为
+///                      CV_32F 位流（w*h 个连续 float，缓冲长度 w*h*4 字节，
+///                      由调用方保证）——内部按 (h, w, CV_32F) 零拷贝视图
+///                      解读，不能经 Wrap 当 8U 读；channels 仅作契约校验
+/// [in]  interpolation  0 = INTER_NEAREST / 1 = INTER_LINEAR / 2 = INTER_CUBIC
+///                      （其他 -> -3；与 cv 枚举同值直传）
+/// [out] out            尺寸同输入（malloc 新紧排缓冲）
+/// in/map1/map2 宽高必须一致（否则 -3）。
+/// 返回：0 成功；-1 空指针/空图（in/map1/map2/out 任一为 NULL 或空容器）；
+///       -3 宽高不一致 / interpolation 非法 / map 契约不符（channels != 1）；
+///       -99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_Remap(const Image2DAlg_Image* in, const Image2DAlg_Image* map1,
+                                       const Image2DAlg_Image* map2, int interpolation,
+                                       Image2DAlg_Image* out);
+
+/// 极坐标展开（cv::warpPolar 透传）：以圆心为中心、max_radius 为最大半径的
+/// 圆形区域展开为 dsize_w×dsize_h 矩形图——环形工件（点阵 COB/圆形基板）
+/// 检测展开：圆上等角度缺陷在展开图中等间距分布，便于条带式检测。
+/// [in]  dsize_w/dsize_h  输出宽/高（均须 > 0，否则 -3）
+/// [in]  center_x/center_y  展开圆心（像素坐标；不做越界校验，cv 允许圆心在图外）
+/// [in]  max_radius      最大展开半径（须 > 0，否则 -3）
+/// [in]  flags           0 = WARP_POLAR_LINEAR（直角极坐标条带）/
+///                       1 = WARP_POLAR_LOG（对数极坐标，径向尺度不变；
+///                       其他 -> -3）
+/// [out] out             dsize_w×dsize_h，通道数同输入（malloc 新紧排缓冲）
+/// 返回：0 成功；-1 空指针/空图；-3 flags/dsize/max_radius 非法；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_WarpPolar(const Image2DAlg_Image* in, int dsize_w, int dsize_h,
+                                           double center_x, double center_y, double max_radius,
+                                           int flags, Image2DAlg_Image* out);
+
+/// 双轮廓 Hausdorff 距离（2D 双向最大-最小距离，暴力 O(n·m)）：
+/// max(max_a min_b ||a-b||, max_b min_a ||b-a||)——实测轮廓 vs 理论轮廓的
+/// 形状偏差量化（轮廓度评估的直接口径，matchShapes 的 Hu 矩之外的数值解）。
+/// [in]  xy_a/xy_b     扁平点数组 [x0,y0,x1,y1,...]（同 FitCircleEx 风格；
+///                     长度 count*2 个 float 由调用方保证）
+/// [in]  count_a/count_b  各自点数（均 >= 1，否则 -3）
+/// [out] out_distance  双向 Hausdorff 距离（像素；必填，NULL -> -1）
+/// 返回：0 成功；-1 空指针；-3 点数 < 1；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_ContourHausdorff(const float* xy_a, int count_a,
+                                                  const float* xy_b, int count_b,
+                                                  double* out_distance);
+
+/// 批量圆拟合（焊盘阵列/孔阵列一次完成）：group_count 个独立点集逐组拟合，
+/// 组间互不影响；单组语义同 FitCircleRobust（threshold > 0，RANSAC 抗外点）/
+/// FitCircleEx（threshold <= 0，最小二乘）。
+/// [in]  xy             全部点扁平数组 [x0,y0,x1,y1,...]（按组顺序拼接；覆盖
+///                      group_offsets 末值个点，长度由调用方保证）
+/// [in]  group_offsets  长度 group_count+1 的前缀偏移数组：组 k 的点 =
+///                      xy[group_offsets[k]*2 .. group_offsets[k+1]*2)；
+///                      要求 group_offsets[0] == 0、单调不减、末值 = 总点数
+///                      （否则 -3）
+/// [in]  group_count    组数（<= 0 -> -3）
+/// [in]  threshold      RANSAC 内点阈值（像素）：> 0 逐组走抗外点拟合，
+///                      <= 0 逐组走纯最小二乘
+/// [in]  seed           RANSAC 随机种子（固定可复现）
+/// [in]  max_iters      RANSAC 迭代上限（< 1 按 1000）
+/// [out] out_fits       每组拟合结果 {cx, cy, r, rms}；失败组各字段置 0
+/// [out] out_valid      每组有效性 1/0（点数 < 3 或拟合失败 = 0）
+/// 返回：0 成功（模块统一口径；成功组数 = out_valid 中 1 的个数，
+///       不承载在返回值上）；-1 空指针；-3 group_count <= 0
+///       或 group_offsets 非法（非 0 起/不单调/末值超界）；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_FitCircleBatch(const float* xy, const int* group_offsets,
+                                                int group_count, double threshold,
+                                                Image2DAlg_CircleFit* out_fits,
+                                                unsigned char* out_valid,
+                                                unsigned int seed, int max_iters);
 
 #ifdef __cplusplus
 }

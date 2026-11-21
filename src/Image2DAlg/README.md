@@ -1,6 +1,6 @@
 ﻿# Image2DAlg —— 通用 2D 模块
 
-`src/Image2DAlg` 是面向 ComUI 宿主的通用 2D 算法库：图像读取、通用处理、测量/缺陷检测，以及标定接口类（`Image2DAlg_Calib`）。当前版本 **2.3.0**（76 个通用算子：处理 20 + 特征 14 + 测量 37 + 跟踪配准立体 5；另有 Init / ReadImage / GetVersion / Free* 等生命周期与释放接口）。
+`src/Image2DAlg` 是面向 ComUI 宿主的通用 2D 算法库：图像读取、通用处理、测量/缺陷检测，以及标定接口类（`Image2DAlg_Calib`）。当前版本 **2.4.0**（82 个通用算子：处理 24 + 特征 14 + 测量 39 + 跟踪配准立体 5；另有 Init / ReadImage / GetVersion / Free* 等生命周期与释放接口）。
 
 ## 定位与依赖
 
@@ -62,6 +62,10 @@ ComUI 适配层在 `integration/comui/Image2DAlg_comui.cpp`，节点声明在 `i
 | `Image2DAlg_Laplacian(in, ksize, scale, out)` | 同输入 | Laplacian 二阶导（2.3.0）：ksize 1/3/5/7；8U/16U 走 CV_16S 中间取绝对值×scale 饱和回原深度，浮点同深度保符号 |
 | `Image2DAlg_Filter2D(in, kernel, ksize, out)` | 同输入 | 自定义 k×k 浮点核卷积（2.3.0）：ksize 奇数 1~51、行主序锚点=核中心；8U/16U 走 CV_16S 中间取绝对值饱和回原深度，浮点同深度保符号。中值/双边/高斯由 Blur method 0/1/2 覆盖，不另设入口 |
 | `Image2DAlg_DenoiseNLMeans(in, h, h_color, tw, sw, out)` | 同输入 | 非局部均值降噪（2.3.0）：1ch → fastNlMeansDenoising / 3ch → fastNlMeansDenoisingColored / 4ch 拆 BGR 后回贴 alpha（同 Blur 双边先例）；h 亮度强度（>0，建议 3）、h_color 彩色强度（通常 = h）、tw 模板窗（默认 7，自动补奇）、sw 搜索窗（默认 21，须 > tw 否则 -3，自动补奇）；NLMeans 块匹配语义 Blur 未覆盖故单设入口 |
+| `Image2DAlg_DistanceTransform(in, distance_type, mask_size, dst_type, out)` | 1（深度 32F/8U） | 距离变换（2.4.0）：8U 单通道二值图 → 每前景点到最近背景点的距离图（背景 0）；distance_type 1=L1（精确整数）/2=L2/3=C，mask_size 3/5、0=精确算法（仅 L2，此时 dst 必须为 CV_32F），dst_type 5=CV_32F / 0=CV_8U——骨架提取、圆焊球中心预定位（距离局部极大值=圆心） |
+| `Image2DAlg_FloodFill(in, seed_x, seed_y, new_val, lo_diff, up_diff, out, out_rect, out_filled)` | 1 | 泛洪填充（2.4.0）：种子连通同色域（与当前像素差 ∈ [lo_diff, up_diff]）重绘为 new_val，8U 单通道限定、内部拷贝工作副本不改输入；out_rect=[x,y,w,h] 包围盒（可 NULL）、out_filled=重绘像素数（必填）；二值图孔洞封闭 |
+| `Image2DAlg_Remap(in, map1, map2, interpolation, out)` | 同输入 | 任意重映射（2.4.0）：dst(x,y)=src(map1(x,y),map2(x,y))；map1/map2 契约=1 通道 CV_32F 位流（w·h 个 float、w·h·4 字节由调用方保证）、宽高须与 in 一致；标定畸变校正查表（initUndistortRectifyMap 输出直接喂入） |
+| `Image2DAlg_WarpPolar(in, dsize_w, dsize_h, center_x, center_y, max_radius, flags, out)` | 同输入 | 极坐标展开（2.4.0）：圆形区域 → dsize 矩形条带，flags 0=LINEAR/1=LOG、max_radius>0、圆心可在图外；轴序实测口径：**列 X = rho 半径轴、行 Y = 角度轴**；环形工件（点阵 COB/圆形基板）等角度缺陷在展开图中变等间距 |
 
 ## 测量 / 缺陷检测
 
@@ -86,6 +90,7 @@ ComUI 适配层在 `integration/comui/Image2DAlg_comui.cpp`，节点声明在 `i
 | `Image2DAlg_FitLine(xy, count, &fit)` | 点集直线拟合（DIST_L2，按像素取整），返回 `Image2DAlg_LineFit{vx, vy, x0, y0, rms}` |
 | `Image2DAlg_FitCircleEx(xy, count, &fit)` | 圆拟合高精度版（Kåsa 初值 + GN 几何精化，封装 ImageProcessor::fitCircle） |
 | `Image2DAlg_FitCircleRobust(xy, count, threshold, max_iters, seed, &fit, &inliers, &n)` | 圆拟合 RANSAC 抗外点（毛刺/粘连场景），配 `FreeInliers` |
+| `Image2DAlg_FitCircleBatch(xy, group_offsets, group_count, threshold, &fits, &valid, seed, max_iters)` | 批量圆拟合（2.4.0）：N 个独立点集一次完成（焊盘阵列/孔阵列）；`group_offsets`=长度 N+1 前缀偏移（[0] 必须 0、单调不减、末值=总点数）；threshold>0 逐组 FitCircleRobust（抗外点）/≤0 逐组 FitCircle（纯最小二乘）；退化组（<3 点/失败）valid=0 且字段置 0；fits/valid 调用方预分配 N 个 |
 | `Image2DAlg_FitEllipse(xy, count, &fit)` | 椭圆拟合（≥5 点），返回 `EllipseFit{cx, cy, width, height, angle}`（全轴长；宽高顺序随 OpenCV 角度约定） |
 | `Image2DAlg_FitEllipsesFromBinary(in, min_area, max_area, min_axis, max_axis, &fits, &count)` | 多目标椭圆拟合（椭圆焊盘/异形孔）：二值逐外轮廓 fitEllipse + 全轴长过滤；配 `FreeEllipses` |
 | `Image2DAlg_FitLinesFromBinary(in, min_area, max_area, min_length, &lines, &count)` | 多目标直线拟合（板边/边缘线）：二值逐外轮廓 fitLine DIST_L2 + 覆盖跨度过滤；配 `FreeLineFits` |
@@ -102,6 +107,7 @@ ComUI 适配层在 `integration/comui/Image2DAlg_comui.cpp`，节点声明在 `i
 | `Image2DAlg_ContourPoints(in, external_only, min_area, &xy, &points, &offsets, &count)` | 轮廓原始点集导出（扁平 [x0,y0,...] + 每条轮廓起始点索引表）；配 `FreeContourPoints` |
 | `Image2DAlg_MatchShapes(xy1, count1, xy2, count2, method, &score)` | 形状相似度（Hu 矩，越小越相似，0=一致；method 1/2/3 = cv::CONTOURS_MATCH_I1~I3） |
 | `Image2DAlg_ConvexityDefects(xy, count, &defects, &count)` | 凸性缺陷（引脚变形/缺料检测），返回 `Image2DAlg_Defect{start/end/farthest 索引, depth, fx, fy}`；无凹陷 count=0 |
+| `Image2DAlg_ContourHausdorff(xy_a, count_a, xy_b, count_b, &distance)` | 双轮廓 Hausdorff 距离（2.4.0）：2D 双向最大-最小距离（暴力 O(n·m)）；实测轮廓 vs 理论轮廓形状偏差直接量化（MatchShapes Hu 矩之外的直接口径）；相同点集 → 0、平移方 → 平移量 |
 
 测量输入为非零即前景的二值语义；彩色输入内部先转灰度。无结果时返回 `0` 且 `count=0`。
 
@@ -157,7 +163,7 @@ ComUI 适配层在 `integration/comui/Image2DAlg_comui.cpp`，节点声明在 `i
 |----|------|
 | 0 | 成功 |
 | -1 | 空指针 / 空图 |
-| -2 | 特征/匹配/估计不足（特征族与 ORBAlign：无关键点、匹配对数过少、几何估计退化；跟踪配准族：ECC 不收敛或相关性不足、PnP 求解失败；ReadImage 例外——-2 为打开失败） |
+| -2 | 特征/匹配/估计不足（特征族与 ORBAlign：无关键点、匹配对数过少、几何估计退化；跟踪配准族：ECC 不收敛或相关性不足、PnP 求解失败；ReadImage 例外——-2 为打开失败；FloodFill 例外——-2 为填充失败，底层返回 -1） |
 | -3 | 通道数、模式或参数不支持 |
 | -4 | 内存不足 |
 | -99 | OpenCV 异常（在 C 边界统一捕获，异常不跨 DLL） |

@@ -2914,4 +2914,181 @@ int Image2DAlg_DenoiseNLMeans(const Image2DAlg_Image* in, double h, double h_col
     }
 }
 
+// ---------------- 几何测量扩展（2.4.0 新增） ----------------
+
+int Image2DAlg_DistanceTransform(const Image2DAlg_Image* in, int distance_type,
+                                 int mask_size, int dst_type, Image2DAlg_Image* out) {
+    cv::Mat src;
+    if (int rc = Wrap(in, src)) return rc;
+    if (!out) return -1;
+    // 工业口径：仅 8U 单通道二值图（Wrap 已保证深度 8U，通道在此收敛为 1）
+    if (src.channels() != 1) return -3;
+    // distance_type：1 = DIST_L1 / 2 = DIST_L2 / 3 = DIST_C（与 cv 枚举同值直传）
+    if (distance_type != 1 && distance_type != 2 && distance_type != 3) return -3;
+    // mask_size：3/5 = 近似掩膜；0 = DIST_MASK_PRECISE（精确欧氏，仅 L2 支持）
+    if (mask_size != 0 && mask_size != 3 && mask_size != 5) return -3;
+    if (distance_type != 2 && mask_size != 3) return -3;
+    // dst_type：5 = CV_32F（浮点精确）/ 0 = CV_8U（整型近似）；PRECISE 仅浮点
+    if (dst_type != 0 && dst_type != 5) return -3;
+    if (mask_size == 0 && dst_type != 5) return -3;
+    try {
+        cv::Mat dst;
+        ImageProcessor::distanceTransform(src, dst, distance_type, mask_size, dst_type);
+        return CopyOut(dst, out);
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+int Image2DAlg_FloodFill(const Image2DAlg_Image* in, int seed_x, int seed_y,
+                         double new_val, double lo_diff, double up_diff,
+                         Image2DAlg_Image* out, int out_rect[4], int* out_filled) {
+    cv::Mat src;
+    if (int rc = Wrap(in, src)) return rc;
+    if (!out || !out_filled) return -1;
+    // 仅开放 8U 单通道：工业孔洞封闭场景为二值图，cv::floodFill 的多通道差值
+    // 语义无稳定口径（Wrap 已保证深度 8U）
+    if (src.channels() != 1) return -3;
+    if (seed_x < 0 || seed_y < 0 || seed_x >= src.cols || seed_y >= src.rows) return -3;
+    try {
+        // floodFill 就地修改，拷贝工作副本，不动调用方数据
+        cv::Mat work = src.clone();
+        cv::Rect rect;
+        const int filled = ImageProcessor::floodFill(work, nullptr, cv::Point(seed_x, seed_y),
+                                                     cv::Scalar(new_val),
+                                                     cv::Scalar::all(lo_diff),
+                                                     cv::Scalar::all(up_diff), &rect);
+        if (filled < 0) return -2;   // 底层约定 -1 = 填充失败
+        if (out_rect) {
+            out_rect[0] = rect.x;
+            out_rect[1] = rect.y;
+            out_rect[2] = rect.width;
+            out_rect[3] = rect.height;
+        }
+        *out_filled = filled;
+        return CopyOut(work, out);
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+int Image2DAlg_Remap(const Image2DAlg_Image* in, const Image2DAlg_Image* map1,
+                     const Image2DAlg_Image* map2, int interpolation, Image2DAlg_Image* out) {
+    cv::Mat src;
+    if (int rc = Wrap(in, src)) return rc;
+    if (!map1 || !map2 || !out) return -1;
+    if (!map1->data || !map2->data || map1->width <= 0 || map1->height <= 0 ||
+        map2->width <= 0 || map2->height <= 0) return -1;
+    // 坐标图契约：channels == 1 且 data 为 CV_32F 位流（w*h 个连续 float，长度
+    // 由调用方保证）。不能走 Wrap（会把 data 当 8U 视图），按契约手工构造
+    if (map1->channels != 1 || map2->channels != 1) return -3;
+    if (map1->width != src.cols || map1->height != src.rows ||
+        map2->width != src.cols || map2->height != src.rows) return -3;
+    // 0 = INTER_NEAREST / 1 = INTER_LINEAR / 2 = INTER_CUBIC（与 cv 枚举同值直传）
+    if (interpolation != 0 && interpolation != 1 && interpolation != 2) return -3;
+    try {
+        cv::Mat m1(map1->height, map1->width, CV_32F, (void*)map1->data);
+        cv::Mat m2(map2->height, map2->width, CV_32F, (void*)map2->data);
+        cv::Mat dst;
+        ImageProcessor::remap(src, dst, m1, m2, interpolation);
+        return CopyOut(dst, out);
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+int Image2DAlg_WarpPolar(const Image2DAlg_Image* in, int dsize_w, int dsize_h,
+                         double center_x, double center_y, double max_radius,
+                         int flags, Image2DAlg_Image* out) {
+    cv::Mat src;
+    if (int rc = Wrap(in, src)) return rc;
+    if (!out) return -1;
+    if (dsize_w <= 0 || dsize_h <= 0) return -3;
+    if (!(max_radius > 0.0)) return -3;
+    // 0 = 线性极坐标 / 1 = 对数极坐标，映射为 cv 枚举（原始 cv 值非 0/1，不直传）
+    int cv_flags;
+    if (flags == 0) {
+        cv_flags = cv::WARP_POLAR_LINEAR;
+    } else if (flags == 1) {
+        cv_flags = cv::WARP_POLAR_LOG;
+    } else {
+        return -3;
+    }
+    try {
+        cv::Mat dst;
+        // 圆心不做越界校验（cv 允许圆心在图外）
+        ImageProcessor::warpPolar(src, dst, cv::Size(dsize_w, dsize_h),
+                                  cv::Point2f((float)center_x, (float)center_y),
+                                  max_radius, cv_flags);
+        return CopyOut(dst, out);
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+int Image2DAlg_ContourHausdorff(const float* xy_a, int count_a, const float* xy_b,
+                                int count_b, double* out_distance) {
+    if (!xy_a || !xy_b || !out_distance) return -1;
+    if (count_a < 1 || count_b < 1) return -3;
+    try {
+        std::vector<cv::Point2f> a, b;
+        a.reserve(count_a);
+        b.reserve(count_b);
+        for (int i = 0; i < count_a; ++i)
+            a.push_back(cv::Point2f(xy_a[i * 2], xy_a[i * 2 + 1]));
+        for (int i = 0; i < count_b; ++i)
+            b.push_back(cv::Point2f(xy_b[i * 2], xy_b[i * 2 + 1]));
+        *out_distance = ImageProcessor::contourHausdorff(a, b);
+        return 0;
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+int Image2DAlg_FitCircleBatch(const float* xy, const int* group_offsets, int group_count,
+                              double threshold, Image2DAlg_CircleFit* out_fits,
+                              unsigned char* out_valid, unsigned int seed, int max_iters) {
+    if (!xy || !group_offsets || !out_fits || !out_valid) return -1;
+    if (group_count <= 0) return -3;
+    // 前缀偏移合法性：0 起、单调不减（隐含各偏移非负）。末值 = 总点数，
+    // xy 覆盖到末值个点由调用方保证（本接口无总点数入参，末值超界无从校验）
+    if (group_offsets[0] != 0) return -3;
+    for (int k = 0; k < group_count; ++k)
+        if (group_offsets[k + 1] < group_offsets[k]) return -3;
+    try {
+        // 按 offsets 切片构建各独立点集（组 k 的点 = xy[off[k]*2 .. off[k+1]*2)）
+        std::vector<std::vector<cv::Point2f>> contours(group_count);
+        for (int k = 0; k < group_count; ++k) {
+            contours[k].reserve(group_offsets[k + 1] - group_offsets[k]);
+            for (int i = group_offsets[k]; i < group_offsets[k + 1]; ++i)
+                contours[k].push_back(cv::Point2f(xy[i * 2], xy[i * 2 + 1]));
+        }
+        std::vector<cv::Point2f> centers;
+        std::vector<double> radii, rmss;
+        std::vector<unsigned char> valid;
+        const int ok = ImageProcessor::fitCircleBatch(contours, threshold, centers, radii,
+                                                      rmss, valid, seed,
+                                                      max_iters < 1 ? 1000 : max_iters);
+        for (int k = 0; k < group_count; ++k) {
+            const bool good = (k < (int)valid.size()) && valid[k] != 0;
+            out_valid[k] = good ? 1 : 0;
+            if (good) {
+                out_fits[k].cx = centers[k].x;
+                out_fits[k].cy = centers[k].y;
+                out_fits[k].r = radii[k];
+                out_fits[k].rms = rmss[k];
+            } else {
+                // 失败组（< 3 点/退化）：valid = 0，结果字段置 0
+                out_fits[k].cx = 0.0;
+                out_fits[k].cy = 0.0;
+                out_fits[k].r = 0.0;
+                out_fits[k].rms = 0.0;
+            }
+        }
+        return 0;   // 0 成功（模块统一口径）；成功组数经 out_valid 统计
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
 } // extern "C"

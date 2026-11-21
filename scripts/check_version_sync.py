@@ -33,7 +33,7 @@ SOURCES = {
         ("README 当前版本", "src/Image2DAlg/README.md",
          r'当前版本 \*\*(\d+\.\d+\.\d+)\*\*'),
         ("docs §6 定位行", "docs/接口文档.md",
-         r'当前版本 (\d+\.\d+\.\d+)，76 个通用算子'),
+         r'当前版本 (\d+\.\d+\.\d+)，\d+ 个通用算子'),
     ],
     "Point3DAlg": [
         ("impl(GetVersion return)", "src/Point3DAlg/Point3DAlg_SickIO.cpp",

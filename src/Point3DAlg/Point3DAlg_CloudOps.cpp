@@ -1294,6 +1294,252 @@ int Point3DAlg_MeasureCloud(const Point3DAlg_PointCloud* in,
 }
 
 // =====================================================================
+// GD&T 几何公差组（1.5.0；底层 CloudProcessor::measure* 既有算子，
+// 本层只做 C 边界封装，见 api.h §9.10a。Mesh 面积/体积/无符号逐点
+// 距离由 MeshOp op 3/4/5 覆盖，不重复）
+// =====================================================================
+
+// fit 取值映射（同 Point3DAlg_FitModel 口径）：0=RANSAC 1=MSAC 2=LMS。
+// 非法 fit 由调用方先行拒绝，本辅助仅供 GD&T 组复用。
+static shapely::FitMethod GdtFitMethod(int fit)
+{
+    return (fit == 0) ? shapely::FitMethod::RANSAC
+                      : (fit == 1) ? shapely::FitMethod::MSAC
+                                   : shapely::FitMethod::LMEDS;
+}
+
+int Point3DAlg_MeasureCircleRoundness(const Point3DAlg_PointCloud* in,
+                                      int fit, double distance_threshold,
+                                      double* out_values, int values_capacity,
+                                      int* out_value_count)
+{
+    if (!out_value_count)
+        return -1;
+    *out_value_count = 0;
+    constexpr int kNeeded = 9;   // [roundness, cx,cy,cz, nx,ny,nz, r]
+    const int rcIn = CheckInOnly(in);
+    if (rcIn != 0)
+        return rcIn;
+    if (fit < 0 || fit > 2)
+        return -3;
+    if (!(distance_threshold > 0.0))
+        return -3;
+    if (!out_values || values_capacity < kNeeded) {
+        *out_value_count = kNeeded;   // 两段式
+        return -3;
+    }
+    try {
+        CloudPtr src = ToPcl(in);
+        shapely::Point3d center;
+        float normal[3] = { 0, 0, 0 };
+        double roundness = 0.0, radius = 0.0;
+        if (!CP::measureCircleRoundness(src, GdtFitMethod(fit), distance_threshold,
+                                        roundness, center, normal, radius))
+            return -2;
+        out_values[0] = roundness;
+        out_values[1] = center.x;
+        out_values[2] = center.y;
+        out_values[3] = center.z;
+        out_values[4] = (double)normal[0];
+        out_values[5] = (double)normal[1];
+        out_values[6] = (double)normal[2];
+        out_values[7] = radius;
+        *out_value_count = kNeeded;
+        return 0;
+    } catch (const std::exception&) {
+        return -99;
+    } catch (...) {
+        return -99;
+    }
+}
+
+int Point3DAlg_MeasureCylinderForm(const Point3DAlg_PointCloud* in,
+                                   int fit, double distance_threshold,
+                                   double* out_values, int values_capacity,
+                                   int* out_value_count)
+{
+    if (!out_value_count)
+        return -1;
+    *out_value_count = 0;
+    constexpr int kNeeded = 8;   // [form, px,py,pz, dx,dy,dz, r]
+    const int rcIn = CheckInOnly(in);
+    if (rcIn != 0)
+        return rcIn;
+    if (fit < 0 || fit > 2)
+        return -3;
+    if (!(distance_threshold > 0.0))
+        return -3;
+    if (!out_values || values_capacity < kNeeded) {
+        *out_value_count = kNeeded;   // 两段式
+        return -3;
+    }
+    try {
+        CloudPtr src = ToPcl(in);
+        std::vector<float> axis, point;
+        double form = 0.0, radius = 0.0;
+        if (!CP::measureCylinderForm(src, GdtFitMethod(fit), distance_threshold,
+                                     form, axis, point, radius) ||
+            axis.size() < 3 || point.size() < 3)
+            return -2;
+        out_values[0] = form;
+        out_values[1] = (double)point[0];
+        out_values[2] = (double)point[1];
+        out_values[3] = (double)point[2];
+        out_values[4] = (double)axis[0];
+        out_values[5] = (double)axis[1];
+        out_values[6] = (double)axis[2];
+        out_values[7] = radius;
+        *out_value_count = kNeeded;
+        return 0;
+    } catch (const std::exception&) {
+        return -99;
+    } catch (...) {
+        return -99;
+    }
+}
+
+int Point3DAlg_MeasurePositionDeviation(const Point3DAlg_PointCloud* measured,
+                                        const double* params, int param_count,
+                                        double* out_values, int values_capacity,
+                                        int* out_value_count)
+{
+    if (!out_value_count)
+        return -1;
+    *out_value_count = 0;
+    const int rcIn = CheckInOnly(measured);
+    if (rcIn != 0)
+        return rcIn;
+    // params = [match_radius, x0,y0, ...]：1 + 2T（T = 理论孔位数，>=1）
+    if (!params || param_count < 3 || (param_count - 1) % 2 != 0)
+        return -3;
+    const int tCnt = (param_count - 1) / 2;
+    if (!(params[0] >= 0.0))
+        return -3;
+    std::vector<shapely::Point2d> theoretical;
+    theoretical.reserve((size_t)tCnt);
+    for (int i = 0; i < tCnt; ++i) {
+        const double x = params[1 + (size_t)i * 2];
+        const double y = params[2 + (size_t)i * 2];
+        if (!std::isfinite(x) || !std::isfinite(y))
+            return -3;
+        theoretical.push_back({ x, y });
+    }
+    constexpr int kPerItem = 4;   // [dx, dy, dist, measured_idx]
+    const int needed = tCnt * kPerItem;
+    if (!out_values || values_capacity < needed) {
+        *out_value_count = needed;   // 两段式
+        return -3;
+    }
+    try {
+        // 实测圆心点云 → 2D 列表：逐点取 XY；非有限坐标剔除（不参与配对），
+        // 全部被剔除 → -2（无有效实测）
+        CloudPtr src = ToPcl(measured);
+        std::vector<shapely::Point2d> measuredPts;
+        measuredPts.reserve(src->size());
+        for (const auto& q : src->points) {
+            if (std::isfinite(q.x) && std::isfinite(q.y))
+                measuredPts.push_back({ (double)q.x, (double)q.y });
+        }
+        if (measuredPts.empty())
+            return -2;
+        std::vector<shapely::PositionDeviation> pairs;
+        const int matched =
+            CP::measurePositionDeviation(theoretical, measuredPts, params[0], pairs);
+        if (matched < 0)
+            return -3;   // 底层唯一失败口径 = match_radius<0（入口已拒，防御）
+        // 输出按理论位顺序；unpaired（measured=-1）→ dx/dy/dist = 0 + idx = -1
+        for (size_t i = 0; i < pairs.size(); ++i) {
+            const shapely::PositionDeviation& it = pairs[i];
+            const size_t base = i * (size_t)kPerItem;
+            out_values[base + 0] = (it.measured >= 0) ? it.dx : 0.0;
+            out_values[base + 1] = (it.measured >= 0) ? it.dy : 0.0;
+            out_values[base + 2] = (it.measured >= 0) ? it.dist : 0.0;
+            out_values[base + 3] = (double)it.measured;
+        }
+        *out_value_count = needed;
+        return 0;
+    } catch (const std::exception&) {
+        return -99;
+    } catch (...) {
+        return -99;
+    }
+}
+
+int Point3DAlg_PlaneResiduals(const Point3DAlg_PointCloud* in,
+                              const double* params, int param_count,
+                              float** out_residuals, int* out_residual_count)
+{
+    if (!out_residuals || !out_residual_count)
+        return -1;
+    *out_residuals = nullptr;
+    *out_residual_count = 0;
+    const int rcIn = CheckInOnly(in);
+    if (rcIn != 0)
+        return rcIn;
+    if (!params || param_count != 4)
+        return -3;
+    const double len = std::sqrt(params[0] * params[0] + params[1] * params[1] +
+                                 params[2] * params[2]);
+    if (!(len >= 1e-12))
+        return -3;   // 法向零向量
+    for (int i = 0; i < 4; ++i) {
+        if (!std::isfinite(params[i]))
+            return -3;
+    }
+    try {
+        const float plane[4] = { (float)params[0], (float)params[1],
+                                 (float)params[2], (float)params[3] };
+        std::vector<float> residuals;
+        if (!CP::planeResiduals(ToPcl(in), plane, residuals))
+            return -2;
+        float* buf = (float*)malloc(residuals.size() * sizeof(float));
+        if (!buf)
+            return -4;
+        std::copy(residuals.begin(), residuals.end(), buf);
+        *out_residuals = buf;
+        *out_residual_count = (int)residuals.size();
+        return 0;
+    } catch (const std::exception&) {
+        return -99;
+    } catch (...) {
+        return -99;
+    }
+}
+
+int Point3DAlg_MeasurePointToMeshSignedDistance(const Point3DAlg_PointCloud* in,
+                                                const Point3DAlg_Mesh* mesh,
+                                                float** out_distances, int* out_distance_count)
+{
+    if (!out_distances || !out_distance_count)
+        return -1;
+    *out_distances = nullptr;
+    *out_distance_count = 0;
+    const int rcIn = CheckInOnly(in);
+    if (rcIn != 0)
+        return rcIn;
+    const shapely::Mesh3d m = MeshFromC(mesh);
+    if (!m.valid)
+        return -1;   // mesh 缺失/字段缺失/空 → 参数错误（与 MeshOp 同判定）
+    try {
+        const std::vector<float> dists =
+            CP::measurePointToMeshSignedDistance(ToPcl(in), m);
+        if (dists.empty())
+            return -2;
+        float* buf = (float*)malloc(dists.size() * sizeof(float));
+        if (!buf)
+            return -4;
+        std::copy(dists.begin(), dists.end(), buf);
+        *out_distances = buf;
+        *out_distance_count = (int)dists.size();
+        return 0;
+    } catch (const std::exception&) {
+        return -99;
+    } catch (...) {
+        return -99;
+    }
+}
+
+// =====================================================================
 // 法线估计（1.2.0 P2；输出 N×4 [nx,ny,nz,curvature]，见 api.h §9.11a）
 // =====================================================================
 

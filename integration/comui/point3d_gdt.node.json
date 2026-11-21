@@ -1,0 +1,86 @@
+{
+  "node": {
+    "id": "alg.point3d.gdt",
+    "name": "GD&T 几何公差",
+    "group": "3D 点云",
+    "category": "处理",
+    "description": "GD&T 几何公差度量（method 0~3）：0=圆度（3D 圆拟合后圆周局内点径向残差峰峰值，fit/threshold 口径同通用拟合 circle3D） 1=圆柱度（圆柱局内点到轴距离与半径之差峰峰值，PCL 仅 RANSAC，fit 被忽略） 2=位置度偏差表（理论孔位 vs 实测圆心就近贪心配对，theoretical 逗号分隔 x0,y0,x1,y1,...，消息给 T/配对数/最大偏差汇总） 3=平面有符号残差（plane_params 平面方程 a,b,c,d，消息给 n/min/max/mean 汇总）；结果并入节点消息（逐孔明细/逐点残差需 C 宿主直调 C API 获取）"
+  },
+  "runtime": "native",
+  "assembly": "Point3DAlg.dll",
+  "method": "Point3DAlg_ComuiGdt",
+  "inputs": [
+    {
+      "name": "输入",
+      "type": "cloud"
+    }
+  ],
+  "params": [
+    {
+      "name": "method",
+      "label": "公差项",
+      "type": "int",
+      "default": 0,
+      "min": 0,
+      "max": 3,
+      "description": "0=圆度 1=圆柱度 2=位置度 3=平面残差"
+    },
+    {
+      "name": "fit",
+      "label": "拟合算法(方法0/1)",
+      "type": "int",
+      "default": 0,
+      "min": 0,
+      "max": 2,
+      "description": "0=RANSAC 1=MSAC 2=LMS；method 1 圆柱度 PCL 仅 RANSAC（被忽略），method 2/3 不使用"
+    },
+    {
+      "name": "distance_threshold",
+      "label": "内点阈值(方法0/1)",
+      "type": "number",
+      "default": 0.05,
+      "min": 0.0001,
+      "max": 1000000,
+      "description": "method 0/1：拟合局内点距离阈值（>0，与坐标同单位）"
+    },
+    {
+      "name": "match_radius",
+      "label": "配对半径(方法2)",
+      "type": "number",
+      "default": 1.0,
+      "min": 0,
+      "max": 1000000,
+      "description": "method 2：理论孔位与实测圆心的配对半径（>=0，0=仅精确重合；与坐标同单位）"
+    },
+    {
+      "name": "theoretical",
+      "label": "理论孔位(方法2)",
+      "type": "text",
+      "default": "",
+      "description": "method 2：理论孔位坐标逗号分隔 x0,y0,x1,y1,...（上限 128 孔；实测 = 输入点云逐点 XY）"
+    },
+    {
+      "name": "plane_params",
+      "label": "平面方程(方法3)",
+      "type": "text",
+      "default": "",
+      "description": "method 3：平面方程 4 值逗号分隔 a,b,c,d（法向零向量报错；残差 = n·p+d 真实距离口径，非归一法向内部除 |n|）"
+    }
+  ],
+  "outputs": [],
+  "source": {
+    "files": [
+      "integration/comui/Point3DAlg_comui.cpp",
+      "integration/comui/comui_native_abi.h",
+      "src/AlgExport.h",
+      "src/Point3DAlg/include/Point3DAlg_api.h",
+      "src/Point3DAlg/Point3DAlg_CloudOps.cpp",
+      "src/ShapelyAlg/CloudProcessor.h",
+      "src/ShapelyAlg/CloudProcessor.cpp"
+    ],
+    "includes": [
+      "src",
+      "src/ShapelyAlg"
+    ]
+  }
+}

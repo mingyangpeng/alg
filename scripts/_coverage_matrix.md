@@ -178,3 +178,4 @@
 | 节点计数 | 83 → 93（image2d 62 + point3d 29 + business 2）；id 全局唯一复核通过；声明 method 全部可在 DLL 导出表解析（Laplacian/Filter2D 核心 + 62 Comui 入口实测） | ✅ |
 | Point3DAlg FitModel method 6 = torus | 1.4.0 无新导出（既有接口扩取值域，C ABI 42 不变）；底层新增 CloudProcessor::fitTorus 全自研（PCL 1.9 无 SACMODEL_TORUS——分布初值多候选 + LM 数值雅可比，残差为点到环面面精确距离、不需要法线；fit 0/1=采样稳健层、2=确定性多候选 LM）；节点 point3d_fit_model method 上限 5→6 并登记，out_coeffs 预分配 8=布局最长；测试 +9 用例（含 25% 外点恢复、退化路径） | ✅ 已闭环 |
 | 节点计数 | 93 → 94（image2d 63 + point3d 29 + business 2，2026-11-21 复核）；sick_fov 为批次 0 唯一剩余缺项 | ✅ |
+| Point3DAlg GD&T 几何公差组（批次 B 3.1） | 1.5.0 新增 5 C API（C ABI 42→47）：MeasureCircleRoundness / MeasureCylinderForm / MeasurePositionDeviation / PlaneResiduals（§9.10a）+ MeasurePointToMeshSignedDistance（§9.12a，Mesh typedef 顺序约束）；底层 measure* 系列基础库既有算子，纯 C 边界封装；Mesh 面积/体积/无符号点距由 MeshOp op 3/4/5 覆盖不重复；节点化 alg.point3d.gdt（method 0~3，汇总消息）→ 节点 94→95；测试 +22 用例 | ✅ 已闭环 |

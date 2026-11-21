@@ -37,6 +37,13 @@ extern "C" {
  *          数值雅可比精化，残差为点到环面面的精确距离；fit 0=RANSAC/
  *          1=MSAC 走随机采样+内点评分稳健层，fit 2=LMS 走确定性多候选
  *          LM 中值择优，三种 fit 均支持；剔除非有限点后 <8 点 → -2）
+ *   1.5.0  GD&T 几何公差组（§9.10a，5 新导出——底层算子均为基础库
+ *          既有实现，本版本只补 C 边界）：MeasureCircleRoundness 圆度 /
+ *          MeasureCylinderForm 圆柱度 / MeasurePositionDeviation 位置度
+ *          偏差表 / PlaneResiduals 平面有符号残差数组 /
+ *          MeasurePointToMeshSignedDistance 点到闭合网格带符号距离
+ *          （Mesh 面积/体积/无符号逐点距离已由 MeshOp op 3/4/5 覆盖，
+ *          不重复）
  *
  * 错误码全局约定（§8.3）：
  *   点云计算族（LoadCloud/SaveCloudEx/Filter/Extract/Transform 等）：
@@ -78,7 +85,7 @@ POINT3DALG_EXPORT void Point3DAlg_FreeBuffer(void* p);
  * 版本与生命周期（1.1.0 新增，对齐 Image2DAlg）
  * ===================================================================== */
 
-/* 返回 DLL 版本字符串（静态存储，调用方不得释放）。当前 "1.4.0"。 */
+/* 返回 DLL 版本字符串（静态存储，调用方不得释放）。当前 "1.5.0"。 */
 POINT3DALG_EXPORT const char* Point3DAlg_GetVersion(void);
 
 /* 初始化（占位实现：当前模块无全局状态，恒返回 0；为宿主统一生命周期而设）。
@@ -459,6 +466,77 @@ POINT3DALG_EXPORT int Point3DAlg_MeasureCloud(const Point3DAlg_PointCloud* in,
                                               double* out_values, int values_capacity,
                                               int* out_value_count);
 
+/* ---------------------------------------------------------------------
+ * 9.10a GD&T 几何公差组（1.5.0 新增；底层 CloudProcessor::measure*
+ * 系列，算子自基础库既有实现——本组只做 C 边界封装，无新算法）。
+ * Mesh 面积/体积/无符号逐点距离已由 MeshOp op 3/4/5 覆盖，不重复；
+ * 点到网格带符号距离（第 5 项）依赖 Mesh 容器入参，声明见 §9.12a
+ * （MeshOp 之后——Point3DAlg_Mesh typedef 在 P2 段才定义）。
+ *
+ * 错误码遵循本文件全局约定（0/-1/-2/-3/-4/-99）。fit 参数映射同
+ * FitModel（0=RANSAC/1=MSAC/2=LMS）。数组出参均为库 malloc，
+ * 用 Point3DAlg_FreeBuffer 释放。 */
+
+/* 圆度（GD&T 简化口径）：3D 空间圆拟合 → 圆周局内点径向残差峰峰值。
+ * 底层 CloudProcessor::measureCircleRoundness（fitCircle3D 内嵌口径）。
+ * fit：同 FitModel 映射（circle3D 的 fit/threshold 复用其内部平面拟合
+ * 口径，与 FitModel method 3 一致）。
+ * out_values 布局（9 值）：[0]=roundness 峰峰值（与坐标同单位）
+ *   [1..3]=cx,cy,cz 圆心  [4..6]=nx,ny,nz 单位法向  [7]=r 半径
+ *   （拟合参数同 FitModel method 3 circle3D 布局）。
+ * 错误码：0 成功；-1 in/out_value_count 为 NULL、in 缺失（xyz NULL/
+ *   count<=0）；-2 拟合失败/圆周局内点<2/退化；-3 fit 越界、
+ *   distance_threshold<=0、out_values NULL 或容量不足（回填所需长度
+ *   9，两段式）；-4/-99 同全局约定。 */
+POINT3DALG_EXPORT int Point3DAlg_MeasureCircleRoundness(const Point3DAlg_PointCloud* in,
+                                                        int fit, double distance_threshold,
+                                                        double* out_values, int values_capacity,
+                                                        int* out_value_count);
+
+/* 圆柱度（GD&T 简化口径）：fitCylinder 局内点到轴距离与半径之差峰峰值。
+ * 底层 CloudProcessor::measureCylinderForm。注意：PCL 1.9 圆柱模型仅
+ * 支持 RANSAC，fit 参数被忽略（与 FitModel method 2 同限制）。
+ * out_values 布局（8 值）：[0]=form 峰峰值（与坐标同单位）
+ *   [1..3]=px,py,pz 轴上一点  [4..6]=dx,dy,dz 单位轴向  [7]=r 半径
+ *   （拟合参数同 FitModel method 2 cylinder 布局，PCL 顺序）。
+ * 错误码：0 成功；-1/-2/-3/-4/-99 同上（-2 = 拟合失败/局内点<2；
+ * -3 容量不足回填 8，两段式）。 */
+POINT3DALG_EXPORT int Point3DAlg_MeasureCylinderForm(const Point3DAlg_PointCloud* in,
+                                                     int fit, double distance_threshold,
+                                                     double* out_values, int values_capacity,
+                                                     int* out_value_count);
+
+/* 位置度（孔位偏差表）：理论孔位列表 vs 实测圆心点云，逐理论位就近贪心
+ * 配对（每实测点至多配一位，配对距离 <= match_radius）。
+ * 底层 CloudProcessor::measurePositionDeviation。
+ * measured：实测圆心点云（逐点取 XY；典型来源 = 各孔 FitModel method 3
+ *   circle3D 的圆心；非有限坐标点剔除，不参与配对）。
+ * params 布局（1+2T 个）：[0]=match_radius 配对半径（>=0；0 = 仅精确
+ *   重合）+ T 组理论孔位 [x0,y0, x1,y1, ...]（T>=1，全须有限）。
+ * out_values 布局（4T 个，两段式 capacity 不足回填 4T）：按理论位顺序
+ *   每位 4 值 [dx, dy, dist, measured_idx]——dx/dy = 实测−理论（X/Y），
+ *   dist = sqrt(dx²+dy²)，measured_idx = 实测点行号（-1 = 该理论位在
+ *   match_radius 内无实测：此时 dx/dy/dist 均为 0）。
+ * 错误码：0 成功；-1 measured/out_value_count 为 NULL、measured 缺失
+ *   （xyz NULL/count<=0）；-2 无有效实测点（全部被剔除）；-3 params
+ *   NULL、param_count != 1+2T、match_radius<0 或理论位坐标含非有限值、
+ *   out_values NULL 或容量不足（两段式回填 4T）；-4/-99 同全局约定。 */
+POINT3DALG_EXPORT int Point3DAlg_MeasurePositionDeviation(
+    const Point3DAlg_PointCloud* measured, const double* params, int param_count,
+    double* out_values, int values_capacity, int* out_value_count);
+
+/* 点云对给定平面方程的有符号残差数组（residual = n·p + d，逐点；
+ * n 不归一时内部除 |n|，残差恒为真实距离口径）。非有限点输出 NaN。
+ * 底层 CloudProcessor::planeResiduals。
+ * params 布局（4 个）：[a,b,c,d] 平面方程（法向零向量或含非有限分量 → -3）。
+ * out_residuals：库 malloc float 数组（长度 = in->count，与输入逐行对齐），
+ *   用 Point3DAlg_FreeBuffer 释放。
+ * 错误码：0 成功；-1 in/out_residuals/out_residual_count 为 NULL、in
+ *   缺失；-3 params 不是 4 个或法向非法；-4/-99 同全局约定。 */
+POINT3DALG_EXPORT int Point3DAlg_PlaneResiduals(const Point3DAlg_PointCloud* in,
+                                                const double* params, int param_count,
+                                                float** out_residuals, int* out_residual_count);
+
 /* =====================================================================
  * P2 批次（1.2.0 新增）：特征 / 关键点 / 表面重建 / 3D→2D 桥接
  * ===================================================================== */
@@ -656,6 +734,26 @@ POINT3DALG_EXPORT int Point3DAlg_MeshOp(const Point3DAlg_Mesh* in, int op,
                                         const double* params, int param_count,
                                         Point3DAlg_Mesh* out_mesh, double* out_scalar,
                                         float** out_array, int* out_array_count);
+
+/* ---------------------------------------------------------------------
+ * 9.12a 点到闭合网格带符号距离（GD&T 组第 5 项，1.5.0 新增——声明置于
+ * MeshOp 之后因 Point3DAlg_Mesh typedef 在本段定义；组内其余 4 接口见
+ * §9.10a）
+ * 带符号距离数组（内负外正；距离 = 点到三角面精确最近距离，符号 = 固定
+ * 斜向射线穿越三角面次数奇偶——奇为内，与面绕向无关）。仅闭合（水密）
+ * 网格符号有物理意义，非水密网格距离仍准、符号无意义。
+ * 底层 CloudProcessor::measurePointToMeshSignedDistance（暴力 O(n·f)，
+ * 网格大时调用方先用 MeshOp op 1 减面）。非有限点输出 NaN。
+ * MeshOp op 5（无符号逐点距离，params 承载查询点）已覆盖"少量查询点"
+ * 场景；本接口面向"整片点云 vs 检测网格"的批量口径（SoA 点云入参）。
+ * in：查询点云（逐点求解）；mesh：目标网格（只读）。
+ * out_distances：库 malloc float 数组（长度 = in->count，与输入逐行对齐），
+ *   用 Point3DAlg_FreeBuffer 释放。
+ * 错误码：0 成功；-1 in/mesh/out_distances/out_distance_count 为 NULL、
+ *   in 缺失或 mesh 无效（vertices/faces NULL、数量<=0）；-4/-99 同全局约定。 */
+POINT3DALG_EXPORT int Point3DAlg_MeasurePointToMeshSignedDistance(
+    const Point3DAlg_PointCloud* in, const Point3DAlg_Mesh* mesh,
+    float** out_distances, int* out_distance_count);
 
 /* ---------------------------------------------------------------------
  * 9.13 3D→2D 桥接（heightmap 组）

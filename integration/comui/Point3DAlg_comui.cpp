@@ -1524,6 +1524,164 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiMeasureCloud(const AlgoCInput* 
 }
 #endif   // POINT3DALG_HAS_PCL（MeasureCloud）
 
+// ---------------- 算子入口：GD&T 几何公差（node.json: alg.point3d.gdt，1.5.0） ----------------
+// 参数（按声明顺序）：method(int 0~3) fit(int 0~2，method 0/1) distance_threshold(number，
+//                     method 0/1) match_radius(number，method 2) theoretical(text，method 2：
+//                     理论孔位 "x0,y0,x1,y1,..."，上限 128 位) plane_params(text，method 3：
+//                     平面方程 "a,b,c,d")
+// method 与 out_values 布局（Point3DAlg_api.h §9.10a 权威口径）：
+//   0 roundness          9 [roundness, cx,cy,cz, nx,ny,nz, r]（圆度 = 圆周局内点
+//                          径向残差峰峰值；fit/threshold 口径同 fit_model circle3D）
+//   1 cylinderForm       8 [form, px,py,pz, dx,dy,dz, r]（圆柱度；PCL 仅 RANSAC，
+//                          fit 被忽略）
+//   2 positionDeviation  4T [dx,dy,dist,measured_idx]×T（位置度偏差表；measured
+//                          = 输入点云逐点 XY；消息给 T/paired/max 汇总——逐孔值
+//                          无消息通道承载，C 宿主可直调 C API 拿全表）
+//   3 planeResiduals     N（逐点有符号残差；消息给 n/min/max/mean 汇总）
+// 输入：clouds[0]（method 0~2 = 被测要素；method 2 = 实测圆心点云；method 3 = 被测点云）。
+// 错误码：1 输入未连线；2 点云为空/内存不足；3 参数非法（-3/文本解析失败）；
+//         4 业务失败（-2：拟合失败/内点不足/无有效实测点）。
+
+#ifdef POINT3DALG_HAS_PCL
+extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiGdt(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->cloudCount < 1 || !in->clouds) { out->error = "输入未连线"; return 1; }
+    const AlgoCCloud* src = &in->clouds[0];
+    if (src->count <= 0 || !src->xyz) { out->error = "输入点云为空"; return 2; }
+
+    int method = 0, fit = 0;
+    double dist_thr = 0.05, match_radius = 1.0;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) method = p->i;
+    if (const AlgoCParam* p = FindParam(in, 1, 1)) fit = p->i;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) dist_thr = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 1)) match_radius = p->d;
+    if (method < 0 || method > 3) {
+        out->error = "method 仅支持 0=圆度/1=圆柱度/2=位置度/3=平面残差";
+        return 3;
+    }
+    if ((method == 0 || method == 1) && dist_thr <= 0.0) {
+        out->error = "distance_threshold 须 > 0（method 0/1 局内点阈值）"; return 3;
+    }
+    if (method == 2 && match_radius < 0.0) {
+        out->error = "match_radius 须 >= 0"; return 3;
+    }
+
+    // params 组装：method 2 = [match_radius, 理论孔位...]（ParseDoubleList 上限
+    // 257 = 1 + 2×128）；method 3 = [a,b,c,d]；method 0/1 无 params
+    double params[257] = { 0 };
+    int pc = 0;
+    if (method == 2) {
+        const AlgoCParam* pp = FindParam(in, 2, 0);
+        const int n = pp ? ParseDoubleList(pp->s, params, 257) : 0;
+        if (n < 0) { out->error = "theoretical 含非数值内容（需逗号分隔 x,y 列表）"; return 3; }
+        if (n < 3 || (n - 1) % 2 != 0) {
+            out->error = "theoretical 需 match_radius + 偶数个坐标（x0,y0,x1,y1,...，至少 1 孔）";
+            return 3;
+        }
+        params[0] = match_radius;
+        pc = n;
+    } else if (method == 3) {
+        const AlgoCParam* pp = FindParam(in, 2, 0);
+        const int n = pp ? ParseDoubleList(pp->s, params, 4) : 0;
+        if (n < 0) { out->error = "plane_params 含非数值内容（需逗号分隔数字）"; return 3; }
+        if (n != 4) {
+            out->error = "plane_params 需 4 个数值（平面方程 a,b,c,d，逗号分隔）";
+            return 3;
+        }
+        pc = 4;
+    }
+
+    // out_values 预分配：method 2 = 4T（T = (n-1)/2）；method 3 = 逐点 N；
+    // method 0/1 固定 9/8——统一给足容量免两段式
+    const int cap = (method == 2) ? (pc - 1) * 2
+                  : (method == 3) ? src->count
+                  : 16;
+    double* vals = (double*)malloc(sizeof(double) * (size_t)(cap > 0 ? cap : 1));
+    if (!vals) { out->error = "内存不足"; return 2; }
+    int vn = 0;
+    Point3DAlg_PointCloud pin;
+    pin.xyz = (float*)src->xyz; pin.count = src->count;
+    int rc = 0;
+    if (method == 0)
+        rc = Point3DAlg_MeasureCircleRoundness(&pin, fit, dist_thr, vals, cap, &vn);
+    else if (method == 1)
+        rc = Point3DAlg_MeasureCylinderForm(&pin, fit, dist_thr, vals, cap, &vn);
+    else if (method == 2)
+        rc = Point3DAlg_MeasurePositionDeviation(&pin, params, pc, vals, cap, &vn);
+    // method 3 走 float 出参分支（逐点残差），见下方单独处理；此处 rc 保持 0
+    if (rc == -3) {
+        free(vals);
+        out->error = "参数非法（fit/threshold/match_radius/theoretical/plane_params 布局或取值不符）";
+        return 3;
+    }
+    if (rc == -2) {
+        free(vals);
+        out->error = "度量失败：拟合失败/内点不足/无有效实测点";
+        return 4;
+    }
+    if (rc == -1) {
+        free(vals);
+        out->error = "输入点云为空或点数不足"; return 2;
+    }
+    if (rc != 0) { free(vals); out->error = "度量失败（内存不足或内部异常）"; return 2; }
+
+    static char msg[512];
+    if (method == 0) {
+        snprintf(msg, sizeof(msg),
+                 "roundness=%.6f c=(%.4f, %.4f, %.4f) n=(%.4f, %.4f, %.4f) r=%.4f",
+                 vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7]);
+    } else if (method == 1) {
+        snprintf(msg, sizeof(msg),
+                 "form=%.6f p=(%.4f, %.4f, %.4f) dir=(%.4f, %.4f, %.4f) r=%.4f",
+                 vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7]);
+    } else if (method == 2) {
+        // 偏差表汇总：T 总位 / 配对成功 / 最大偏差（逐孔明细无消息通道）
+        const int tCnt = vn / 4;
+        int paired = 0;
+        double dmax = 0.0;
+        for (int i = 0; i < tCnt; ++i) {
+            if ((int)vals[(size_t)i * 4 + 3] >= 0) {
+                ++paired;
+                if (vals[(size_t)i * 4 + 2] > dmax) dmax = vals[(size_t)i * 4 + 2];
+            }
+        }
+        snprintf(msg, sizeof(msg),
+                 "position T=%d paired=%d max_dist=%.6f match_radius=%.4f",
+                 tCnt, paired, dmax, match_radius);
+    }
+    free(vals);
+
+    if (method == 3) {
+        // 逐点残差（float 出参）：消息给 n/min/max/mean 汇总
+        float* res = NULL;
+        int nR = 0;
+        const int rc3 = Point3DAlg_PlaneResiduals(&pin, params, 4, &res, &nR);
+        if (rc3 == -3) { out->error = "plane_params 需 4 个数值（a,b,c,d），法向不得为零向量"; return 3; }
+        if (rc3 == -1) { out->error = "输入点云为空"; return 2; }
+        if (rc3 != 0) { out->error = "度量失败（内存不足或内部异常）"; return 2; }
+        double rmin = 0.0, rmax = 0.0, rsum = 0.0;
+        int nf = 0;
+        if (nR > 0) {
+            int first = 1;
+            for (int i = 0; i < nR; ++i) {
+                const float r = res[i];
+                if (!isfinite((double)r)) continue;   // 非有限点 → NaN，不入统计
+                if (first) { rmin = rmax = r; first = 0; }
+                else { if (r < rmin) rmin = r; if (r > rmax) rmax = r; }
+                rsum += r;
+                ++nf;
+            }
+        }
+        Point3DAlg_FreeBuffer(res);
+        snprintf(msg, sizeof(msg),
+                 "residuals n=%d finite=%d min=%.6f max=%.6f mean=%.6f",
+                 nR, nf, rmin, rmax, nf > 0 ? rsum / nf : 0.0);
+    }
+    out->error = msg;
+    return 0;
+}
+#endif   // POINT3DALG_HAS_PCL（GD&T）
+
 // ---------------- 算子入口：分割与聚类（node.json: alg.point3d.segment_cloud） ----------------
 // method 与 params 布局以 Point3DAlg_api.h 注释表为权威口径（method 0~4 全量开放）。
 // 固定参数集（filter_cloud 先例）：node.json 声明 1 个 method(int) + 13 个 number，

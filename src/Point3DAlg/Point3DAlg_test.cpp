@@ -60,7 +60,7 @@ static void check(bool ok, const char* name)
 static void TestLifecycle()
 {
     std::printf("---- A1. 版本与生命周期 ----\n");
-    check(std::strcmp(Point3DAlg_GetVersion(), "1.4.0") == 0, "GetVersion 返回 1.4.0");
+    check(std::strcmp(Point3DAlg_GetVersion(), "1.5.0") == 0, "GetVersion 返回 1.5.0");
     check(Point3DAlg_Init() == 0, "Init 返回 0");
     Point3DAlg_Cleanup();   // 占位实现，可安全调用
     Point3DAlg_FreeCloud(nullptr);   // NULL 安全（不崩溃即通过）
@@ -1350,6 +1350,187 @@ static void TestMeasureCloud()
     Point3DAlg_FreeCloud(&box);
 }
 
+// ---------------- A10a. GD&T 几何公差组（1.5.0） ----------------
+static void TestGdt()
+{
+    std::printf("---- A10a. GD&T（圆度/圆柱度/位置度/平面残差/网格带符号距离）----\n");
+    const Point3DAlg_PointCloud* nullIn = nullptr;
+    int nV = 0;
+    double val[16] = { 0 };
+
+    // 1 圆度：z=30 平面圆，心 (10,20,30) r=8，径向 3 波瓣正弦扰动
+    // rr = 8 + 0.05·sin(3t)。底层口径 = 局内点到拟合圆的径向偏差**绝对值**
+    // 峰峰值：最小二乘把 R 定在扰动带中央 → |ρ−R| ∈ [0, 0.05] → roundness≈0.05
+    //（对称带宽 W 的形状该指标给 W/2；交替常幅扰动会让幅值恒定、峰峰值≈0，不可用）
+    {
+        std::vector<float> v;
+        for (int k = 0; k < 72; ++k) {
+            const double t = k * 5.0 * kPi / 180.0;
+            const double rr = 8.0 + 0.05 * std::sin(3.0 * t);
+            PushPt(v, (float)(10.0 + rr * std::cos(t)),
+                   (float)(20.0 + rr * std::sin(t)), 30.0f);
+        }
+        Point3DAlg_PointCloud in = MakeCloudFrom(v);
+        check(Point3DAlg_MeasureCircleRoundness(nullIn, 0, 0.05, val, 16, &nV) == -1,
+              "Roundness in=NULL → -1");
+        check(Point3DAlg_MeasureCircleRoundness(&in, 3, 0.05, val, 16, &nV) == -3,
+              "Roundness fit 越界 → -3");
+        check(Point3DAlg_MeasureCircleRoundness(&in, 0, 0.0, val, 16, &nV) == -3,
+              "Roundness threshold<=0 → -3");
+        check(Point3DAlg_MeasureCircleRoundness(&in, 0, 0.05, nullptr, 0, &nV) == -3 && nV == 9,
+              "Roundness out_values=NULL → -3 两段式回填 9");
+        check(Point3DAlg_MeasureCircleRoundness(&in, 0, 0.1, val, 8, &nV) == -3 && nV == 9,
+              "Roundness capacity 两段式回填 9");
+        // 阈值 0.1 > 扰动幅值 0.05：全部点均为圆周局内点
+        const int rc = Point3DAlg_MeasureCircleRoundness(&in, 0, 0.1, val, 16, &nV);
+        check(rc == 0 && nV == 9 && std::fabs(val[0] - 0.05) < 0.01 &&
+                  std::fabs(val[1] - 10.0) < 0.2 && std::fabs(val[2] - 20.0) < 0.2 &&
+                  std::fabs(val[3] - 30.0) < 0.2 &&
+                  std::fabs(std::fabs(val[6]) - 1.0) < 1e-3 &&
+                  std::fabs(val[7] - 8.0) < 0.15,
+              "Roundness [圆度,圆心,法向,半径] ≈ (0.05,(10,20,30),±z,8)");
+        check(rc == 0 && std::fabs(std::fabs(val[6]) - 1.0) < 1e-3,
+              "Roundness nz=val[6]=±1（布局 [rnd,c×3,n×3,r]——法向从下标 4 起）");
+        Point3DAlg_FreeCloud(&in);
+    }
+
+    // 2 圆柱度：轴过 (0,0) 平行 z、r=4（FillCylinder 同 FitModel 用例参数），
+    // 理想圆柱面 form≈0（浮点口径 <0.1）；fit 参数被忽略（PCL 仅 RANSAC）
+    {
+        std::vector<float> v;
+        FillCylinder(v, 0.0, 0.0, 4.0, 10, 32, 1.0);
+        Point3DAlg_PointCloud in = MakeCloudFrom(v);
+        check(Point3DAlg_MeasureCylinderForm(&in, 0, -1.0, val, 16, &nV) == -3,
+              "CylinderForm threshold<=0 → -3");
+        check(Point3DAlg_MeasureCylinderForm(&in, 0, 0.05, val, 7, &nV) == -3 && nV == 8,
+              "CylinderForm capacity 两段式回填 8");
+        const int rc = Point3DAlg_MeasureCylinderForm(&in, 2, 0.05, val, 16, &nV);
+        check(rc == 0 && nV == 8 && val[0] < 0.1 &&
+                  std::fabs(std::fabs(val[6]) - 1.0) < 1e-3 &&
+                  std::fabs(val[7] - 4.0) < 0.2,
+              "CylinderForm [圆柱度,轴点,单位轴,半径] form<0.1 r≈4（fit 忽略）");
+        Point3DAlg_FreeCloud(&in);
+    }
+
+    // 3 位置度：理论 3 孔 (0,0)/(10,0)/(20,0)；实测点云 (0.3,-0.4)/(9.8,0.1)/
+    // (40,40)（远离第三孔）+ NaN 点（剔除）。match_radius=1：
+    //   位0 → 实测0：dx=0.3 dy=-0.4 dist=0.5 idx=0
+    //   位1 → 实测1：dx=-0.2 dy=0.1 dist≈0.224 idx=1
+    //   位2 → 无实测（(40,40) 距离 20√2 > 1）：idx=-1
+    {
+        std::vector<float> v;
+        PushPt(v, 0.3f, -0.4f, 7.0f);
+        PushPt(v, 9.8f, 0.1f, 7.0f);
+        PushPt(v, 40.0f, 40.0f, 7.0f);
+        PushPt(v, std::numeric_limits<float>::quiet_NaN(),
+               std::numeric_limits<float>::quiet_NaN(), 7.0f);
+        Point3DAlg_PointCloud in = MakeCloudFrom(v);
+        const double pTh[7] = { 1.0, 0.0, 0.0, 10.0, 0.0, 20.0, 0.0 };
+        check(Point3DAlg_MeasurePositionDeviation(nullIn, pTh, 7, val, 16, &nV) == -1,
+              "PositionDeviation measured=NULL → -1");
+        check(Point3DAlg_MeasurePositionDeviation(&in, pTh, 6, val, 16, &nV) == -3,
+              "PositionDeviation param_count 非 1+2T → -3");
+        const double pNeg[7] = { -1.0, 0.0, 0.0, 10.0, 0.0, 20.0, 0.0 };
+        check(Point3DAlg_MeasurePositionDeviation(&in, pNeg, 7, val, 16, &nV) == -3,
+              "PositionDeviation match_radius<0 → -3");
+        check(Point3DAlg_MeasurePositionDeviation(&in, pTh, 7, nullptr, 0, &nV) == -3 && nV == 12,
+              "PositionDeviation capacity 两段式回填 12");
+        const int rc = Point3DAlg_MeasurePositionDeviation(&in, pTh, 7, val, 16, &nV);
+        check(rc == 0 && nV == 12 &&
+                  std::fabs(val[0] - 0.3) < 1e-6 && std::fabs(val[1] + 0.4) < 1e-6 &&
+                  std::fabs(val[2] - 0.5) < 1e-6 && (int)val[3] == 0 &&
+                  std::fabs(val[4] + 0.2) < 1e-6 && std::fabs(val[5] - 0.1) < 1e-6 &&
+                  std::fabs(val[6] - 0.22360679) < 1e-4 && (int)val[7] == 1 &&
+                  val[8] == 0.0 && val[9] == 0.0 && val[10] == 0.0 && (int)val[11] == -1,
+              "PositionDeviation 偏差表 [dx,dy,dist,idx]×3（含未配对 -1）");
+        Point3DAlg_FreeCloud(&in);
+    }
+
+    // 4 平面有符号残差：z=1 平面 [0,0,1,-1]，三点 z=0/1/2 → 残差 -1/0/+1；
+    // 非法平面（零法向 / 3 值）→ -3
+    {
+        std::vector<float> v;
+        PushPt(v, 0.0f, 0.0f, 0.0f);
+        PushPt(v, 1.0f, 1.0f, 1.0f);
+        PushPt(v, 2.0f, 0.0f, 2.0f);
+        Point3DAlg_PointCloud in = MakeCloudFrom(v);
+        const double pPl[4] = { 0.0, 0.0, 2.0, -2.0 };   // 非归一法向，残差仍= z-1
+        const double pZero[4] = { 0.0, 0.0, 0.0, 1.0 };
+        float* sink = nullptr;
+        int sinkN = 0;
+        check(Point3DAlg_PlaneResiduals(nullIn, pPl, 4, &sink, &sinkN) == -1 &&
+                  sink == nullptr && sinkN == 0,
+              "PlaneResiduals in=NULL → -1（出参保持空）");
+        check(Point3DAlg_PlaneResiduals(&in, pZero, 4, &sink, &sinkN) == -3,
+              "PlaneResiduals 零法向 → -3");
+        check(Point3DAlg_PlaneResiduals(&in, pPl, 3, &sink, &sinkN) == -3,
+              "PlaneResiduals param_count=3 → -3");
+        float* res = nullptr;
+        int nR = 0;
+        const int rc = Point3DAlg_PlaneResiduals(&in, pPl, 4, &res, &nR);
+        check(rc == 0 && nR == 3 && res &&
+                  std::fabs(res[0] + 1.0) < 1e-6 && std::fabs(res[1]) < 1e-6 &&
+                  std::fabs(res[2] - 1.0) < 1e-6,
+              "PlaneResiduals [z-1] = (-1,0,+1)（非归一法向真实距离口径）");
+        Point3DAlg_FreeBuffer(res);
+        Point3DAlg_FreeCloud(&in);
+    }
+
+    // 5 网格带符号距离：单位立方体闭合网格（8 顶点 12 面，符号判定用固定斜
+    // 射线奇偶、与面绕向无关）+ 3 个已知探针点：
+    //   (0.5,0.5,0.5) 内 → -0.5；(2,0.5,0.5) 外（最近面 x=1）→ +1；
+    //   (0.5,0.5,-3) 外（最近面 z=0）→ +3
+    {
+        static const float cube[8][3] = { { 0, 0, 0 }, { 1, 0, 0 }, { 1, 1, 0 },
+                                          { 0, 1, 0 }, { 0, 0, 1 }, { 1, 0, 1 },
+                                          { 1, 1, 1 }, { 0, 1, 1 } };
+        static const int cubeFaces[12][3] = {
+            { 0, 2, 1 }, { 0, 3, 2 },          // z=0 底面
+            { 4, 5, 6 }, { 4, 6, 7 },          // z=1 顶面
+            { 0, 1, 5 }, { 0, 5, 4 },          // y=0
+            { 2, 3, 7 }, { 2, 7, 6 },          // y=1
+            { 1, 2, 6 }, { 1, 6, 5 },          // x=1
+            { 3, 0, 4 }, { 3, 4, 7 }           // x=0
+        };
+        Point3DAlg_Mesh mesh;
+        std::vector<float> mv;
+        std::vector<int> mf;
+        for (const auto& q : cube)
+            mv.insert(mv.end(), { q[0], q[1], q[2] });
+        for (const auto& f : cubeFaces)
+            mf.insert(mf.end(), { f[0], f[1], f[2] });
+        mesh.vertices = mv.data();
+        mesh.vertex_count = 8;
+        mesh.faces = mf.data();
+        mesh.face_count = 12;
+
+        std::vector<float> probes;
+        PushPt(probes, 0.5f, 0.5f, 0.5f);
+        PushPt(probes, 2.0f, 0.5f, 0.5f);
+        PushPt(probes, 0.5f, 0.5f, -3.0f);
+        Point3DAlg_PointCloud in = MakeCloudFrom(probes);
+        check(Point3DAlg_MeasurePointToMeshSignedDistance(nullIn, &mesh, nullptr, &nV) == -1,
+              "SignedDistance in=NULL → -1");
+        Point3DAlg_Mesh badMesh = mesh;
+        badMesh.faces = nullptr;
+        float* probeOut = nullptr;
+        int probeN = 0;
+        check(Point3DAlg_MeasurePointToMeshSignedDistance(&in, &badMesh, &probeOut, &probeN) == -1 &&
+                  probeOut == nullptr && probeN == 0,
+              "SignedDistance mesh.faces=NULL → -1（出参保持空）");
+        float* dist = nullptr;
+        int nD = 0;
+        const int rc = Point3DAlg_MeasurePointToMeshSignedDistance(&in, &mesh, &dist, &nD);
+        check(rc == 0 && nD == 3 && dist &&
+                  std::fabs((double)dist[0] + 0.5) < 1e-6 &&
+                  std::fabs((double)dist[1] - 1.0) < 1e-6 &&
+                  std::fabs((double)dist[2] - 3.0) < 1e-6,
+              "SignedDistance 探针 (-0.5, +1, +3) 内负外正");
+        Point3DAlg_FreeBuffer(dist);
+        Point3DAlg_FreeCloud(&in);
+    }
+}
+
 // ---------------- A11. 法线 / 特征 / 关键点 ----------------
 static void TestFeatureKeypoints()
 {
@@ -1824,6 +2005,7 @@ static void TestCloudOps()
     TestSegmentCloud();
     TestSearch();
     TestMeasureCloud();
+    TestGdt();
     TestFeatureKeypoints();
     TestSurfaceMesh();
     TestHeightMap();

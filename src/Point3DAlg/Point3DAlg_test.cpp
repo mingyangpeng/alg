@@ -60,7 +60,7 @@ static void check(bool ok, const char* name)
 static void TestLifecycle()
 {
     std::printf("---- A1. 版本与生命周期 ----\n");
-    check(std::strcmp(Point3DAlg_GetVersion(), "1.3.0") == 0, "GetVersion 返回 1.3.0");
+    check(std::strcmp(Point3DAlg_GetVersion(), "1.4.0") == 0, "GetVersion 返回 1.4.0");
     check(Point3DAlg_Init() == 0, "Init 返回 0");
     Point3DAlg_Cleanup();   // 占位实现，可安全调用
     Point3DAlg_FreeCloud(nullptr);   // NULL 安全（不崩溃即通过）
@@ -588,6 +588,39 @@ static void FillCone(std::vector<float>& v, double halfDeg, int rings, int secto
     }
 }
 
+// 确定性 LCG 伪随机 [0,1)（unsigned int 溢出按模 2^32 回绕，跨平台一致）
+static unsigned int g_torusLcg = 20261126u;
+static double LcgUniform()
+{
+    g_torusLcg = g_torusLcg * 1103515245u + 12345u;
+    return (double)(g_torusLcg >> 8) / 16777216.0;
+}
+
+// 圆环面点云：中心 (cx,cy,cz)、轴 +Z、主半径 R（管心圆）、管半径 r；
+// rings×sectors 采样（φ=管截面角、θ=环向角）：
+//   p = c + (R + r·cosφ)·(cosθ, sinθ, 0) + r·sinφ·(0,0,1)
+// noiseAmp > 0 时逐点叠加三轴独立 [-noiseAmp, noiseAmp] 确定性噪声
+static void FillTorus(std::vector<float>& v, double cx, double cy, double cz,
+                      double R, double r, int rings, int sectors, double noiseAmp = 0.0)
+{
+    for (int i = 0; i < rings; ++i) {
+        const double phi = 2.0 * kPi * i / rings;         // 管截面角
+        for (int j = 0; j < sectors; ++j) {
+            const double th = 2.0 * kPi * j / sectors;    // 环向角
+            const double w = R + r * std::cos(phi);       // 环向半径
+            double x = w * std::cos(th);
+            double y = w * std::sin(th);
+            double z = r * std::sin(phi);
+            if (noiseAmp > 0.0) {
+                x += (LcgUniform() * 2.0 - 1.0) * noiseAmp;
+                y += (LcgUniform() * 2.0 - 1.0) * noiseAmp;
+                z += (LcgUniform() * 2.0 - 1.0) * noiseAmp;
+            }
+            PushPt(v, (float)(cx + x), (float)(cy + y), (float)(cz + z));
+        }
+    }
+}
+
 // 5×5 网格（步距 1，x/y∈[0,4]）：z = base + i + j；addHigh 追加 z = 100+i+j 层
 static void FillGrid5(std::vector<float>& v, bool addHigh)
 {
@@ -652,10 +685,10 @@ static void TestVoxelConsistency()
     Point3DAlg_FreeCloud(&in);
 }
 
-// ---------------- A7. FitModel（5 model × 3 fit + 内点 + 容量两段式） ----------------
+// ---------------- A7. FitModel（6 model + 内点 + 容量两段式；1.4.0 增 torus） ----------------
 static void TestFitModel()
 {
-    std::printf("---- A7. FitModel（plane/sphere/cylinder/circle3D/cone）----\n");
+    std::printf("---- A7. FitModel（plane/sphere/cylinder/circle3D/cone/torus）----\n");
     struct CloudGuard {
         Point3DAlg_PointCloud c;
         ~CloudGuard() { Point3DAlg_FreeCloud(&c); }
@@ -670,8 +703,8 @@ static void TestFitModel()
         const Point3DAlg_PointCloud* nullIn = nullptr;
         check(Point3DAlg_FitModel(nullIn, 0, 0, 0.01, c, 8, &inl, &nC) == -1,
               "FitModel in=NULL → -1");
-        check(Point3DAlg_FitModel(&in, 6, 0, 0.01, c, 8, &inl, &nC) == -3,
-              "method 越界(6) → -3");
+        check(Point3DAlg_FitModel(&in, 7, 0, 0.01, c, 8, &inl, &nC) == -3,
+              "method 越界(7) → -3");
         check(Point3DAlg_FitModel(&in, 0, 3, 0.01, c, 8, &inl, &nC) == -3,
               "fit 越界 → -3");
         check(Point3DAlg_FitModel(&in, 0, 0, 0.0, c, 8, &inl, &nC) == -3,
@@ -806,6 +839,102 @@ static void TestFitModel()
                         std::fabs(std::fabs(c[5]) - 1.0) < 1e-3 &&
                         std::fabs(angDeg - 30.0) < 0.5;
         check(ok, "cone [顶点,轴,半开角] apex≈原点 / 30°");
+        Point3DAlg_FreeCloud(&in);
+    }
+
+    // 6 torus（1.4.0）：轴 Z、心 (5,5,5)、R=20、r=5（24 环 × 32 角 = 768 点，
+    // 噪声 ±0.02；阈值 0.1 → 全内点）。out_coeffs = [cx,cy,cz, dx,dy,dz, R, r]。
+    {
+        std::vector<float> v;
+        FillTorus(v, 5.0, 5.0, 5.0, 20.0, 5.0, 24, 32, 0.02);
+        Point3DAlg_PointCloud in = MakeCloudFrom(v);
+        double c[8] = { 0 };
+        int nC = 0;
+        int* inl = nullptr;
+        const int rc = Point3DAlg_FitModel(&in, 6, 0, 0.1, c, 8, &inl, &nC);
+        bool ok = rc == 0 && nC >= 700 &&
+                  std::fabs(c[0] - 5.0) < 0.2 && std::fabs(c[1] - 5.0) < 0.2 &&
+                  std::fabs(c[2] - 5.0) < 0.2 &&
+                  std::fabs(std::fabs(c[5]) - 1.0) < 1e-3 &&
+                  std::fabs(c[6] - 20.0) < 0.2 && std::fabs(c[7] - 5.0) < 0.2;
+        check(ok, "torus RANSAC [中心,单位轴,主半径,管半径] ≈ (5,5,5,±Z,20,5)");
+        ok = rc == 0 && inl != nullptr && nC >= 700;
+        // 内点索引映射回原始行号：逐点核对前 8 个索引指向环面点（残差 ≤ 0.1）
+        for (int k = 0; ok && k < 8 && k < nC; ++k) {
+            const int row = inl[k];
+            const double dx = in.xyz[row * 3 + 0] - 5.0;
+            const double dy = in.xyz[row * 3 + 1] - 5.0;
+            const double dz = in.xyz[row * 3 + 2] - 5.0;
+            const double rho = std::sqrt(dx * dx + dy * dy);
+            const double d = std::sqrt((rho - 20.0) * (rho - 20.0) + dz * dz) - 5.0;
+            ok = std::fabs(d) <= 0.1;
+        }
+        check(ok, "torus 内点索引指向原始行号且残差复算 ≤ 阈值");
+        Point3DAlg_FreeBuffer(inl);
+        const int rc1 = Point3DAlg_FitModel(&in, 6, 1, 0.1, c, 8, nullptr, &nC);
+        ok = rc1 == 0 &&
+             std::fabs(c[0] - 5.0) < 0.2 && std::fabs(c[1] - 5.0) < 0.2 &&
+             std::fabs(c[2] - 5.0) < 0.2 &&
+             std::fabs(c[6] - 20.0) < 0.2 && std::fabs(c[7] - 5.0) < 0.2;
+        check(ok, "torus MSAC 收敛");
+        const int rc2 = Point3DAlg_FitModel(&in, 6, 2, 0.1, c, 8, nullptr, &nC);
+        ok = rc2 == 0 &&
+             std::fabs(c[0] - 5.0) < 0.2 && std::fabs(c[1] - 5.0) < 0.2 &&
+             std::fabs(c[2] - 5.0) < 0.2 &&
+             std::fabs(c[6] - 20.0) < 0.2 && std::fabs(c[7] - 5.0) < 0.2;
+        check(ok, "torus LMS(确定性多候选 LM) 收敛");
+        check(Point3DAlg_FitModel(&in, 6, 0, 0.1, c, 7, nullptr, &nC) == -3 && nC == 8,
+              "torus capacity=7 → -3 两段式回填 8");
+        // 25% 外点（192 个，均匀盒 [-25,35]³ 内）：RANSAC 稳健层恢复参数，
+        // 内点数被压回环面点量级（外点不混入）
+        {
+            std::vector<float> v2;
+            FillTorus(v2, 5.0, 5.0, 5.0, 20.0, 5.0, 24, 32, 0.02);
+            for (int k = 0; k < 192; ++k)
+                PushPt(v2, (float)(-25.0 + 60.0 * LcgUniform()),
+                       (float)(-25.0 + 60.0 * LcgUniform()),
+                       (float)(-25.0 + 60.0 * LcgUniform()));
+            Point3DAlg_PointCloud in2 = MakeCloudFrom(v2);
+            double c2[8] = { 0 };
+            int nC2 = 0;
+            const int rc3 = Point3DAlg_FitModel(&in2, 6, 0, 0.1, c2, 8, nullptr, &nC2);
+            const bool ok2 = rc3 == 0 && nC2 >= 600 && nC2 <= 830 &&
+                             std::fabs(c2[0] - 5.0) < 0.3 && std::fabs(c2[1] - 5.0) < 0.3 &&
+                             std::fabs(c2[2] - 5.0) < 0.3 &&
+                             std::fabs(c2[6] - 20.0) < 0.3 && std::fabs(c2[7] - 5.0) < 0.3;
+            check(ok2, "torus RANSAC 25% 均匀外点下参数恢复（内点 600~830）");
+            Point3DAlg_FreeCloud(&in2);
+        }
+        Point3DAlg_FreeCloud(&in);
+    }
+
+    // 6 torus 退化/错误路径：全重合点云（尺度退化 → -2）、点数不足 → -2、
+    // 平面点云（收敛到局部近似平面的巨环——合法局部最优，非全点内点）
+    {
+        double c[8] = { 0 };
+        int nC = 0;
+        // 10 个全重合点：bbox 尺度 0 → 拒绝（任意"零环"都会精确拟合）
+        std::vector<float> v0;
+        for (int k = 0; k < 10; ++k)
+            PushPt(v0, 1.f, 2.f, 3.f);
+        Point3DAlg_PointCloud in0 = MakeCloudFrom(v0);
+        check(Point3DAlg_FitModel(&in0, 6, 0, 0.1, c, 8, nullptr, &nC) == -2,
+              "torus 全重合点云（尺度退化）→ -2");
+        Point3DAlg_FreeCloud(&in0);
+        // 5 点 < 8 点下限 → -2
+        std::vector<float> v;
+        FillTorus(v, 5.0, 5.0, 5.0, 20.0, 5.0, 2, 2, 0.0);   // 4 点
+        PushPt(v, 0.f, 0.f, 0.f);                            // 第 5 点
+        Point3DAlg_PointCloud in2 = MakeCloudFrom(v);
+        check(Point3DAlg_FitModel(&in2, 6, 0, 0.1, c, 8, nullptr, &nC) == -2,
+              "torus 点数 <8 → -2");
+        Point3DAlg_FreeCloud(&in2);
+        // 403 点通用合成云（z≈1 平面 + 远端离群）：巨环局部贴面——返回成功
+        // 但内点只占少数（平面/低曲率点集的合法局部最优，见 README 已知局限）
+        Point3DAlg_PointCloud in = MakeCloud();
+        const int rc = Point3DAlg_FitModel(&in, 6, 0, 0.02, c, 8, nullptr, &nC);
+        check(rc == 0 && nC > 0 && nC < in.count,
+              "torus 平面点云 → 巨环局部最优（内点为部分而非全点）");
         Point3DAlg_FreeCloud(&in);
     }
 }

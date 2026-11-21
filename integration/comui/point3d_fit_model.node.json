@@ -4,7 +4,7 @@
     "name": "通用几何拟合",
     "group": "3D 点云",
     "category": "处理",
-    "description": "通用几何拟合（RANSAC/MSAC/LMS）：method 0=平面[a,b,c,d] 1=球[cx,cy,cz,r] 2=圆柱[轴点+单位轴向+半径] 3=3D圆[圆心+圆平面法向+半径] 4=圆锥[顶点+单位轴向+半开角弧度] 5=空间直线[线上一点+单位方向]；系数布局与内点数并入节点消息（圆柱/圆锥仅 RANSAC——PCL 1.9 限制，fit 参数被忽略；球 MSAC 自动回退 RANSAC；平面/空间直线三种 fit 均支持）"
+    "description": "通用几何拟合（RANSAC/MSAC/LMS）：method 0=平面[a,b,c,d] 1=球[cx,cy,cz,r] 2=圆柱[轴点+单位轴向+半径] 3=3D圆[圆心+圆平面法向+半径] 4=圆锥[顶点+单位轴向+半开角弧度] 5=空间直线[线上一点+单位方向] 6=圆环面[中心+单位轴+主半径R+管半径r]；系数布局与内点数并入节点消息（圆柱/圆锥仅 RANSAC——PCL 1.9 限制，fit 参数被忽略；球 MSAC 自动回退 RANSAC；平面/空间直线/圆环面三种 fit 均支持——圆环面为自研实现，LMS=确定性多候选 LM，高外点比例建议 RANSAC/MSAC）"
   },
   "runtime": "native",
   "assembly": "Point3DAlg.dll",
@@ -22,8 +22,8 @@
       "type": "int",
       "default": 0,
       "min": 0,
-      "max": 5,
-      "description": "0=plane 平面 1=sphere 球 2=cylinder 圆柱 3=circle3D 三维圆 4=cone 圆锥 5=line3D 空间直线"
+      "max": 6,
+      "description": "0=plane 平面 1=sphere 球 2=cylinder 圆柱 3=circle3D 三维圆 4=cone 圆锥 5=line3D 空间直线 6=torus 圆环面（1.4.0 新增）"
     },
     {
       "name": "fit",
@@ -32,7 +32,7 @@
       "default": 0,
       "min": 0,
       "max": 2,
-      "description": "0=RANSAC 1=MSAC 2=LMS(LMEDS)；sphere 不支持 MSAC（回退 RANSAC），cylinder/cone 仅 RANSAC"
+      "description": "0=RANSAC 1=MSAC 2=LMS(LMEDS)；sphere 不支持 MSAC（回退 RANSAC），cylinder/cone 仅 RANSAC，torus 三种均支持（LMS=确定性多候选 LM）"
     },
     {
       "name": "distance_threshold",

@@ -1,6 +1,6 @@
 ﻿# Point3DAlg —— 通用 3D 模块
 
-`src/Point3DAlg` 是面向 ComUI 宿主的通用 3D 算法库：**SICK Ranger3 扫描数据读取（拼接/交织）**、**点云配准（手动粗调 + 6 策略精配准）**、**量测四件套**（bump 高度 / 平面度 / 共面性 / 金标准 NG 对比）、**通用点云算子 C API**（1.1.0 起：文件读写/滤波/裁剪/变换；1.2.0 起：拟合/分割/搜索/度量/法线/特征/关键点/表面重建/HeightMap 桥接；1.3.0 起：FitModel 增空间直线拟合、FilterCloud 增近似体素降采样）。算法与 UI 物理隔离，ComUI 适配层与节点声明全在 `integration/comui/`。
+`src/Point3DAlg` 是面向 ComUI 宿主的通用 3D 算法库：**SICK Ranger3 扫描数据读取（拼接/交织）**、**点云配准（手动粗调 + 6 策略精配准）**、**量测四件套**（bump 高度 / 平面度 / 共面性 / 金标准 NG 对比）、**通用点云算子 C API**（1.1.0 起：文件读写/滤波/裁剪/变换；1.2.0 起：拟合/分割/搜索/度量/法线/特征/关键点/表面重建/HeightMap 桥接；1.3.0 起：FitModel 增空间直线拟合、FilterCloud 增近似体素降采样；1.4.0 起：FitModel 增圆环面拟合，拟合族工业模型齐备）。算法与 UI 物理隔离，ComUI 适配层与节点声明全在 `integration/comui/`。
 
 ## 定位与依赖
 
@@ -19,7 +19,7 @@ Point3DAlg.dll
 | 文件 | 说明 |
 |------|------|
 | `Point3DAlg_SickReader.h/.cpp` | **SICK 扫描读取核心**：.dat 平面布局 → FOV 结构（阶段1编码器）→ 多线程读图（阶段2）→ 单机拼接 → 多相机交织 → 深度图/点云；含 json 配置读取与 PNG/PLY 保存套件 |
-| `Point3DAlg_SickIO.cpp` | 一步式 C 接口（ReadSickCloud：folder → 点云，错误码 0/-1/-2/-3/-4）+ 版本/生命周期（当前 1.3.0）+ 通用点云容器 + SICK 深层句柄族实现（不依赖 PCL） |
+| `Point3DAlg_SickIO.cpp` | 一步式 C 接口（ReadSickCloud：folder → 点云，错误码 0/-1/-2/-3/-4）+ 版本/生命周期（当前 1.4.0）+ 通用点云容器 + SICK 深层句柄族实现（不依赖 PCL） |
 | `include/Point3DAlg_api.h` | C API 主头：错误码全局约定、`Point3DAlg_PointCloud`/`Point3DAlg_Mesh`/`Point3DAlg_HeightMap` 容器、全部点云算子声明（各接口 params/输出布局表以本头注释为权威） |
 | `include/Point3DAlg_SickApi.h` | SICK 深层 C 接口声明（句柄族；C++ 宿主头，含输出缓冲布局与错误码口径） |
 | `Point3DAlg_CloudOps.cpp` | 点云算子 C 封装（1.1.0 LoadCloud/SaveCloudEx/Filter/Extract/Transform + 1.2.0 FitModel/SegmentCloud/Search/Measure/Normals/Feature/Keypoints/Surface/MeshOp/HeightMap 族；封装 ShapelyAlg::CloudIO/CloudProcessor，点型 PointXYZ，**PCL_FOUND 守卫编译**） |
@@ -45,7 +45,7 @@ ComUI 适配层：`integration/comui/Point3DAlg_comui.cpp`；节点声明：`int
 
 ## 接口速查
 
-### C ABI（1.2.0 起共导出 42 个：25（1.1.0）+ 17（1.2.0 P1/P2）；1.3.0 无新导出，FitModel/FilterCloud 扩展取值域）
+### C ABI（1.2.0 起共导出 42 个：25（1.1.0）+ 17（1.2.0 P1/P2）；1.3.0/1.4.0 无新导出，FitModel/FilterCloud 扩展取值域）
 
 | 函数 | 用途 |
 |---|---|
@@ -53,14 +53,14 @@ ComUI 适配层：`integration/comui/Point3DAlg_comui.cpp`；节点声明：`int
 | `Point3DAlg_FreeBuffer` | 释放 ReadSickCloud / SICK 深层接口 / FitModel 内点 / Normals·Feature·MeshOp 数组输出 |
 | `Point3DAlg_LoadSickConfig(recipe, common, &cfg, err, len)` | 读配方/通用参数 json → SickConfig（错误码 1~6 + err_msg） |
 | `Point3DAlg_SaveCloud / SaveDepth / SaveDepthView / DrawFovBoxes` | PLY 点云 / 16 位深度 PNG / 8 位可视 PNG / FOV 框标注 |
-| `Point3DAlg_GetVersion / Init / Cleanup` | 版本（"1.3.0"）/ 初始化（占位）/ 清理（占位） |
+| `Point3DAlg_GetVersion / Init / Cleanup` | 版本（"1.4.0"）/ 初始化（占位）/ 清理（占位） |
 | `Point3DAlg_FreeCloud(&cloud)` / `FreeClouds(segments, count)` | 释放 `Point3DAlg_PointCloud` / `SegmentCloud` 段数组（均 NULL 安全） |
 | `Point3DAlg_LoadCloud(path, type, delimiter, &out)` | 读点云文件（0=PCD 1=PLY 2=TXT；TXT 分隔符 NULL=空白切分） |
 | `Point3DAlg_SaveCloudEx(path, type, &cloud, binary)` | 写点云文件（binary 仅 PLY 生效；PCD 恒二进制、TXT 恒文本） |
 | `Point3DAlg_FilterCloud(&in, method, params, n, &out)` | 滤波/降采样 11 method（0=voxel … 9=conditionalXYZ、10=approxVoxel 近似体素（1.3.0），params 布局见 api.h 表） |
 | `Point3DAlg_ExtractCloud(&in, method, indices, n, params, m, &out)` | 提取/裁剪 5 method（0=byIndices … 4=cropPolygonROI） |
 | `Point3DAlg_TransformCloud(&in, method, params, n, &out)` | 空间变换 7 method（0=applyMatrix(4x4 行主序) … 6=project） |
-| `Point3DAlg_FitModel(&in, method, fit, threshold, coeffs, cap, &inliers, &n)` | 通用拟合 6 model（0=plane[4] 1=sphere[4] 2=cylinder[7] 3=circle3D[7] 4=cone[7] 5=line3D[6] 空间直线（1.3.0））× 3 fit（0=RANSAC 1=MSAC 2=LMS）；capacity 不足 → -3 回填所需长度 |
+| `Point3DAlg_FitModel(&in, method, fit, threshold, coeffs, cap, &inliers, &n)` | 通用拟合 7 model（0=plane[4] 1=sphere[4] 2=cylinder[7] 3=circle3D[7] 4=cone[7] 5=line3D[6] 空间直线（1.3.0） 6=torus[8] 圆环面（1.4.0，全自研——PCL 1.9 无环面模型））× 3 fit（0=RANSAC 1=MSAC 2=LMS）；capacity 不足 → -3 回填所需长度 |
 | `Point3DAlg_SegmentCloud(&in, method, params, n, &segs, &count)` | 分割 5 method（0=planeRANSAC 1=euclideanCluster 2=dbscan 3=regionGrowing 4=planesMulti）→ 段数组（FreeClouds 释放） |
 | `Point3DAlg_KnnSearch(&in, query[3], k, &idx, &dist, &n)` | KdTree KNN（dist = 欧氏距离升序；k<=0 → -3） |
 | `Point3DAlg_RadiusSearch(&in, query[3], r, &idx, &dist, &n)` | KdTree 半径搜索（dist = 欧氏距离**升序**，封装层排序——FLANN 半径搜索原生无序；r<=0 → -3；0 命中属成功） |
@@ -89,7 +89,7 @@ ComUI 适配层：`integration/comui/Point3DAlg_comui.cpp`；节点声明：`int
 
 无 PCL 构建时点云计算族整组符号不导出（CMake `PCL_FOUND` 守卫，与 tools/ 配准层同策略，1.2.0 新接口同守卫）；SICK 族与版本/生命周期接口任何构建下都存在。FilterCloud(voxel) 与 ComUI 适配层内联的 `ComuiVoxel` 语义一致（体素质心），可择一使用——一致性已由 `Point3DAlg_test` A6 段（PCL 版 ↔ 测试内参考实现 floor(p/leaf) 分格质心）回归守卫。
 
-### 1.2.0/1.3.0 输出布局速查（权威口径 = api.h 注释）
+### 1.2.0~1.4.0 输出布局速查（权威口径 = api.h 注释）
 
 | 接口 / method | 输出 |
 |---|---|
@@ -99,6 +99,7 @@ ComUI 适配层：`integration/comui/Point3DAlg_comui.cpp`；节点声明：`int
 | `FitModel(circle3D)` | `[cx,cy,cz, nx,ny,nz 单位法向, r]`（底层圆周 RMS 未暴露） |
 | `FitModel(cone)` | `[ax,ay,az 顶点, dx,dy,dz 单位轴, 半开角弧度]` |
 | `FitModel(line3D)` | `[px,py,pz 线上一点, dx,dy,dz 单位方向]`（1.3.0 新增，6 值；三种 fit 均支持） |
+| `FitModel(torus)` | `[cx,cy,cz 中心, dx,dy,dz 单位轴(符号不定), R 主半径, r 管半径]`（1.4.0 新增，8 值；三种 fit 均支持——0/1 采样稳健层、2 确定性多候选 LM；剔除非有限点后 <8 点 → -2） |
 | `SegmentCloud(0 planeRANSAC)` | 恒 2 段：[局内点（恒非空）, 其余点（可为空段 count=0，如全部点在平面上）]（平面方程用 FitModel 另取） |
 | `MeasureCloud(AABB)` | `[minx,miny,minz,maxx,maxy,maxz]` |
 | `MeasureCloud(OBB)` | `[cx,cy,cz, ex,ey,ez 半长, R9 行主序(行=主轴)]` |
@@ -198,6 +199,7 @@ Point3DAlg_RegistRun(session, src, dst, params, &step);   // 策略 1~6
 - **1.2.0 表面重建的两处登记偏差**：① type 0/1（凸包/凹包）在 C 封装层直接调 PCL ConvexHull/ConcaveHull 取回面片——CloudProcessor 同名算子只回顶点云；② type 3~7（法线重建）在封装层自动组合"KNN k=10 估法线 + MST 朝向一致化 k=30"（§9.12 强制约束；SoA 容器无法传入法线），不暴露法线参数
 - `ReconstructSurface` type 8（organizedFastMesh）**恒返回 -2**：SoA 点云容器表达不了有序点云（height 恒 1），保留枚举供宿主显式感知
 - `FitModel(circle3D)` 未暴露底层圆周残差 RMS（布局保持草案的 7 值），需要时可用 out_inliers 复算
+- **FitModel(torus) 为全自研实现**（PCL 1.9 无 SACMODEL_TORUS，1.4.0）：分布初值多候选（质心/PCA 最小特征方向/ρ-z 分布）→ LM 数值雅可比；fit 0/1 采样稳健层（宽进严出级联精化 8t→4t→2t→t）对均匀盒内随机外点实测 ≈30% 内稳定恢复（成簇外点或更高比例可能落入伪吸引盆，建议先 filterStatisticalOutlier 预清理），fit 2=LMS 为确定性多候选 LM（候选按残差中值择优）**不抗外点**；轴方向符号不定（â 与 −â 同一模型）；**平面/低曲率点集会收敛到局部贴面的巨环（R≫点云跨度，R+r 管面局部近似平面）——返回成功但内点仅占少数，属合法局部最优，不视为错误**；局部小面片（弧段覆盖不足）上 PCA 轴向初值可能失效，属已知边界
 - **FilterCloud(voxel) 与 ComuiVoxel（voxel_downsample 节点）的数值口径**：语义一致（分格/每格质心），逐格质心差 ≤~1.7e-5——PCL 为 float32 顺序累加、ComuiVoxel 为 double 累加，mm 级 leaf 下 ≤20nm 工业无感；非 dyadic leaf 且坐标恰为 leaf 整数倍时分格可能不同（一致性脚本 scripts/_test_comui_voxel_consistency.py 可复查），建议优先 2 的幂 leaf
 - `DetectKeypoints(ISS3D)` 数据口径：ISS 显著性要求邻域散布矩阵最小特征值严格 > 0——**无噪声的精确解析曲面**（邻域严格共面，如理想圆柱单层邻域）e3 恒为 0 → 恒 0 关键点（-2）；真实扫描/带噪数据正常（测试用带 z 微噪声圆柱验证，合成无噪数据上定位到的口径坑已在 api.h 注明）
 - MeshOp 的法线/距离输出走独立 float 数组（`out_array`，FreeBuffer 释放）——Mesh 容器无顶点属性位，写回不可行

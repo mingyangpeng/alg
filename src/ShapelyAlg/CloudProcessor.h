@@ -377,6 +377,33 @@ public:
                         std::vector<float>& out_apex, std::vector<float>& out_axis,
                         double& out_angle, std::vector<int>& out_inliers);
 
+    /// 拟合圆环面（PCL 1.9 无 SACMODEL_TORUS——model_types.h 实证无此模型，
+    /// 全自研实现，不依赖法线：每点残差为点到环面面的精确距离）。
+    /// 数学口径：环面 = 中心 c + 单位轴 â + 主半径 R（管心圆）+ 管半径 r；
+    ///   点 p 的子午面坐标 q=p−c，z=q·â（轴向距），ρ=‖q−z·â‖（径向距），
+    ///   残差 r_i = sqrt((ρ−R)² + z²) − r（最近点必与 p 同子午面，故为精确距离）。
+    /// 求解：分布初值多候选（c=质心、â=PCA 最小特征方向、R/r 由 ρ/z 分布给出
+    ///   4 组候选）→ LM（数值雅可比，中心差分）精化择优。
+    /// [in]  method             RANSAC/MSAC = 采样稳健层（随机子集 → 短程 LM →
+    ///                          全云内点评分：RANSAC 内点计数最大 / MSAC 截断平方
+    ///                          残差最小，择优后在内点上全程精化；固定种子可复现）；
+    ///                          LMEDS = 确定性多候选 LM（候选按残差平方中值择优，
+    ///                          不采样——对高外点比例不稳健，含外点请用 RANSAC/MSAC）
+    /// [in]  distance_threshold 局内点判定距离阈值（同上残差口径，与坐标同单位，>0）
+    /// [out] out_center         环面中心 [x,y,z]
+    /// [out] out_axis           单位轴方向 [dx,dy,dz]（符号不定：â 与 −â 同一环面）
+    /// [out] out_R              主半径（管心圆半径）
+    /// [out] out_r              管半径
+    /// [out] out_inliers        局内点索引（映射回原始 src 行号）
+    /// 返回：false = 剔除非有限点后 < 8 点（7 自由度模型至少 8 点才超定）/
+    ///       点云尺度退化（全部重合）/ 精化后局内点 < 8。
+    /// 稳健性边界（实测口径见 Point3DAlg 交付说明）：采样稳健层在合成数据上对
+    ///   均匀盒内随机外点 ≈ 30% 内可稳定恢复；更高外点比例或成簇外点下
+    ///   RANSAC 可能落入伪吸引盆，此时建议先 filterStatisticalOutlier 预清理。
+    static bool fitTorus(const CloudConstPtr& src, FitMethod method, double distance_threshold,
+                         std::vector<float>& out_center, std::vector<float>& out_axis,
+                         double& out_R, double& out_r, std::vector<int>& out_inliers);
+
     /// 圆度（GD&T 简化口径）：3D 空间圆拟合后，圆周局内点到拟合圆的径向残差峰峰值。
     /// [out] out_roundness          峰峰值（与坐标同单位）
     /// [out] out_center/out_normal/out_radius  拟合圆参数（同 fitCircle3D）

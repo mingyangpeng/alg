@@ -61,10 +61,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <map>
 #include <numeric>
 #include <queue>
+#include <random>
 #include <set>
 #include <unordered_map>
 #include <utility>
@@ -1470,6 +1472,511 @@ bool CloudProcessor<PointT>::fitCone(const CloudConstPtr& src, FitMethod method,
     out_apex.assign(raw.data(), raw.data() + 3);
     out_axis.assign(raw.data() + 3, raw.data() + 6);
     out_angle = raw[6];
+    return true;
+}
+
+// =====================================================================
+// 圆环面拟合（1.4.0 追加；PCL 1.9 无 SACMODEL_TORUS——model_types.h 实证，
+// 全自研：分布初值多候选 → LM 数值雅可比精化；fit=RANSAC/MSAC 加随机
+// 采样稳健层。不依赖法线——残差纯几何，KNN 法线的曲面误差反而有害）。
+// =====================================================================
+
+namespace {
+
+// 参数向量（8 维）：th = [cx,cy,cz, ax,ay,az, R, r]。
+// 轴分量在残差内按 |a| 归一使用，LM 每步经 torusClamp 把参数拉回单位球附近，
+// 消除"轴长"这个无约束方向（残差对 a 的模长完全不敏感）带来的奇异流形。
+constexpr int kTorusNP = 8;
+constexpr int kTorusMinPts = 8;      // 7 自由度模型至少 8 点才有超定意义
+constexpr int kTorusMaxIterFull = 200;   // 全程 LM 迭代上限
+constexpr int kTorusMaxIterCand = 150;   // 确定性多候选每候选迭代上限
+constexpr int kTorusMaxIterSub = 40;     // RANSAC 子集短程 LM 迭代上限
+constexpr unsigned int kTorusSeed = 0x5EED2014u;   // 采样固定种子（可复现交付口径）
+
+// 单位化轴（防零长；LM 状态经 clamp 不会出现零轴，此处为残差调用的防御）
+inline Eigen::Vector3d torusUnitAxis(const Eigen::VectorXd& th)
+{
+    Eigen::Vector3d a = th.segment<3>(3);
+    const double len = a.norm();
+    if (len < 1e-12)
+        return Eigen::Vector3d(0.0, 0.0, 1.0);
+    return a / len;
+}
+
+// 每点残差（未平方）：子午面内精确的点到环面面有符号距离。
+//   q = p − c；z = q·â；ρ = sqrt(|q|² − z²)（数值下限 0 防 sqrt 负域）；
+//   r_i = sqrt((ρ−R)² + z²) − r
+// 精确性论证：环面对过轴平面镜像对称，p 的最近环面点必在含 p 与轴的子午面内；
+// 该面内环面截线为圆心 (R,0)、半径 r 的圆，故距离 = |sqrt((ρ−R)²+z²) − r|，
+// 有符号版本即 r_i（符号区分管内/管外，最小二乘等价）。
+Eigen::VectorXd torusResiduals(const std::vector<Eigen::Vector3d>& pts,
+                               const Eigen::VectorXd& th)
+{
+    const Eigen::Vector3d c = th.segment<3>(0);
+    const Eigen::Vector3d a = torusUnitAxis(th);
+    const double R = th[6], r = th[7];
+    Eigen::VectorXd res((Eigen::Index)pts.size());
+    for (size_t i = 0; i < pts.size(); ++i) {
+        const Eigen::Vector3d q = pts[i] - c;
+        const double z = q.dot(a);
+        const double rho = std::sqrt((std::max)(0.0, q.squaredNorm() - z * z));
+        const double d = std::sqrt((rho - R) * (rho - R) + z * z);
+        res[(Eigen::Index)i] = d - r;
+    }
+    return res;
+}
+
+// 参数盒约束（Image2DAlg CalibrateMono clampFn 先例）：轴归一 + R/r 保持正。
+// r→0+ 允许退化为"细环"（平面点集的合法最优），R<0 不是任何合法环面形态。
+inline void torusClamp(Eigen::VectorXd& th, double scale)
+{
+    const double len = th.segment<3>(3).norm();
+    if (len > 1e-12)
+        th.segment<3>(3) /= len;
+    const double eps = (std::max)(scale, 1.0) * 1e-9;
+    th[6] = (std::max)(th[6], eps);
+    th[7] = (std::max)(th[7], eps);
+}
+
+// LM 主循环（数值雅可比中心差分 + Nielsen 增益比自适应 λ；骨架与
+// Image2DAlg_Calib::SolveLM 同源——该实现属 2D 模块不可跨模块引用，
+// ShapelyAlg 内自持一份，无 stderr 副作用）。返回终止时 cost = ‖r‖²。
+double torusSolveLM(const std::function<Eigen::VectorXd(const Eigen::VectorXd&)>& fn,
+                    Eigen::VectorXd& th, int maxIter,
+                    const std::function<void(Eigen::VectorXd&)>& clamp)
+{
+    if (clamp)
+        clamp(th);
+    Eigen::VectorXd r0 = fn(th);
+    double cost = r0.squaredNorm();
+    double lambda = 1e-3, nu = 2.0;
+    const int nP = (int)th.size();
+    for (int it = 0; it < maxIter; ++it) {
+        // 数值雅可比：h 随参数幅值自适应（坐标 mm 级与 m 级都稳定）
+        Eigen::MatrixXd J((Eigen::Index)r0.size(), nP);
+        for (int j = 0; j < nP; ++j) {
+            const double h = (std::max)(1e-8, std::fabs(th[j]) * 1e-5);
+            Eigen::VectorXd pp = th, pm = th;
+            pp[j] += h;
+            pm[j] -= h;
+            J.col(j) = (fn(pp) - fn(pm)) / (2.0 * h);
+        }
+        // LM 步：δ = −(JᵀJ + λ·diag(JᵀJ))⁻¹·Jᵀr
+        const Eigen::MatrixXd JTJ = J.transpose() * J;
+        const Eigen::VectorXd g = J.transpose() * r0;
+        Eigen::VectorXd D = JTJ.diagonal();
+        for (int j = 0; j < nP; ++j)
+            D[j] = (std::max)(D[j], 1e-9);
+        Eigen::MatrixXd A = JTJ;
+        A.diagonal() += lambda * D;
+        const Eigen::VectorXd step = A.ldlt().solve(-g);
+        if (!step.allFinite())
+            break;
+        Eigen::VectorXd trial = th + step;
+        if (clamp)
+            clamp(trial);
+        const Eigen::VectorXd rt = fn(trial);
+        const double trialCost = rt.squaredNorm();
+        if (!std::isfinite(trialCost))
+            break;
+        // 增益比 ρ = 实际下降/预测下降（预测下降 = −½δᵀg）
+        const double predRed = -0.5 * step.dot(g);
+        const double gain = (predRed > 1e-300) ? (cost - trialCost) / predRed : -1.0;
+        if (gain > 0.0 && trialCost < cost) {
+            const double improve = cost - trialCost;
+            th = trial;
+            r0 = rt;
+            cost = trialCost;
+            lambda = (std::max)(lambda * (std::max)(1.0 / 3.0, 1.0 - std::pow(2.0 * gain - 1.0, 3.0)), 1e-10);
+            nu = 2.0;
+            if (improve < 1e-10 * (std::max)(1.0, cost) || step.norm() < 1e-12)
+                break;
+        } else {
+            lambda *= nu;
+            nu *= 2.0;
+            if (lambda > 1e14)
+                break;
+        }
+    }
+    return cost;
+}
+
+// 分布初值：c=质心；â=PCA 最小特征值方向（环面点集轴向方差 r²/2 ≪ 径向方差
+// R²/2+r²/4，全环/大弧覆盖时轴向恒最小——局部小面片上最小方差方向是面法线，
+// 属已知局限，RANSAC 采样层靠多试验对冲）；R/r 候选由 ρ/z 分布给出：
+//   r0a = std(z)·√2     —— 管截面角 φ 均匀覆盖时 std(z) = r/√2（精确口径）
+//   r0b = (q90(ρ)−q10(ρ))/2 —— ρ∈[R−r,R+r] 展宽（φ 均匀时欠估 ~19%，LM 吸收）
+//   R0 ∈ {median(ρ), mean(ρ)} —— φ 均匀时 E[cosφ]=0，两者均 ≈ R（精确口径）
+// 2×2 = 4 组候选，各自独立 LM 择优，吸收抽样偏差。
+// 返回：false = 点数不足 / 协方差奇异（含全部重合）。
+bool torusInitCandidates(const std::vector<Eigen::Vector3d>& pts, double scale,
+                         std::vector<Eigen::VectorXd>& out_inits)
+{
+    out_inits.clear();
+    const size_t n = pts.size();
+    if (n < (size_t)kTorusMinPts)
+        return false;
+    Eigen::Vector3d c = Eigen::Vector3d::Zero();
+    for (const auto& p : pts)
+        c += p;
+    c /= (double)n;
+    Eigen::Matrix3d cov = Eigen::Matrix3d::Zero();
+    for (const auto& p : pts) {
+        const Eigen::Vector3d d = p - c;
+        cov += d * d.transpose();
+    }
+    cov /= (double)n;
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(cov);
+    if (es.info() != Eigen::Success)
+        return false;
+    Eigen::Vector3d axis = es.eigenvectors().col(0);   // 最小特征值方向
+    if (!axis.allFinite() || axis.norm() < 1e-8)
+        return false;
+    axis.normalize();
+    // 子午面坐标 ρ/z
+    std::vector<double> rho(n), zv(n);
+    for (size_t i = 0; i < n; ++i) {
+        const Eigen::Vector3d q = pts[i] - c;
+        const double z = q.dot(axis);
+        zv[i] = z;
+        rho[i] = std::sqrt((std::max)(0.0, q.squaredNorm() - z * z));
+    }
+    std::vector<double> rhoSorted = rho;
+    std::sort(rhoSorted.begin(), rhoSorted.end());
+    const double rhoMed = rhoSorted[n / 2];
+    double rhoMean = 0.0;
+    for (double v : rho)
+        rhoMean += v;
+    rhoMean /= (double)n;
+    const double rhoQ10 = rhoSorted[(size_t)(0.10 * (double)(n - 1))];
+    const double rhoQ90 = rhoSorted[(size_t)(0.90 * (double)(n - 1))];
+    double zMean = 0.0;
+    for (double v : zv)
+        zMean += v;
+    zMean /= (double)n;
+    double zVar = 0.0;
+    for (double v : zv)
+        zVar += (v - zMean) * (v - zMean);
+    zVar /= (double)n;
+    const double r0a = std::sqrt(zVar) * std::sqrt(2.0);       // std(z)·√2
+    const double r0b = 0.5 * (rhoQ90 - rhoQ10);                // ρ 展宽半高
+    const double eps = (std::max)(scale, 1.0) * 1e-6;          // 退化下限（细环防御）
+    const double R0[2] = { rhoMed, rhoMean };
+    const double r0[2] = { (std::max)(r0a, eps), (std::max)(r0b, eps) };
+    for (int iR = 0; iR < 2; ++iR)
+        for (int ir = 0; ir < 2; ++ir) {
+            Eigen::VectorXd th(kTorusNP);
+            th << c, axis, (std::max)(R0[iR], eps), r0[ir];
+            out_inits.push_back(th);
+        }
+    return true;
+}
+
+// 候选评分：mean 口径 = ‖r‖²（最小二乘），median 口径 = 残差平方中值（LMedS 精神）
+double torusScore(const Eigen::VectorXd& res, bool median)
+{
+    const size_t n = (size_t)res.size();
+    if (!median)
+        return res.squaredNorm();
+    std::vector<double> s2(n);
+    for (size_t i = 0; i < n; ++i)
+        s2[i] = res[i] * res[i];
+    const size_t mid = n / 2;
+    std::nth_element(s2.begin(), s2.begin() + (std::ptrdiff_t)mid, s2.end());
+    return s2[mid];
+}
+
+// 确定性求解：全点集 4 候选各自 LM，按 scoreMedian 指定的口径择优。
+// LMEDS（median=true）= "最优 LM 解的中值口径"：候选按残差平方中值评分，
+// 胜者已是全程 LM 解；RANSAC 兜底候选（median=false）按均方评分。
+bool torusDeterministic(const std::vector<Eigen::Vector3d>& pts, double scale,
+                        bool scoreMedian, Eigen::VectorXd& out_th)
+{
+    std::vector<Eigen::VectorXd> inits;
+    if (!torusInitCandidates(pts, scale, inits))
+        return false;
+    auto fn = [&pts](const Eigen::VectorXd& th) { return torusResiduals(pts, th); };
+    auto clamp = [&scale](Eigen::VectorXd& th) { torusClamp(th, scale); };
+    bool any = false;
+    double bestScore = 0.0;
+    for (auto& th : inits) {
+        torusSolveLM(fn, th, kTorusMaxIterCand, clamp);
+        const double score = torusScore(fn(th), scoreMedian);
+        if (!std::isfinite(score))
+            continue;
+        if (!any || score < bestScore) {
+            bestScore = score;
+            out_th = th;
+            any = true;
+        }
+    }
+    return any;
+}
+
+// 内点索引（|r_i| ≤ t 口径）
+std::vector<int> torusInlierIndices(const std::vector<Eigen::Vector3d>& pts,
+                                    const Eigen::VectorXd& th, double t)
+{
+    const Eigen::VectorXd res = torusResiduals(pts, th);
+    std::vector<int> inl;
+    for (size_t i = 0; i < pts.size(); ++i)
+        if (std::fabs(res[(Eigen::Index)i]) <= t)
+            inl.push_back((int)i);
+    return inl;
+}
+
+// 级联精化（窄进宽出）：子集短程 LM 的解有偏置 ~O(1)，窄阈值单次精化只能
+// 捕获零星表面点（实测 25% 均匀外点下 52/768）。按捕获半径 t→2t→4t→8t 逐轮
+// gather 内点并全程 LM，每轮以上一轮解续跑；每轮后按 t 重算内点数并保留最优。
+// 方向必须是窄→宽（实测宽→宽反例：8t 先行会把错误模型邻域的外点连同真面点
+// 一起收进来，LM 被拉进伪吸引盆；t 先行只收当前模型近旁的干净真面点，逐轮
+// 扩张逐步逼近真盆）。th 入/出为参数向量，out_inl 输出按 t 的内点索引。
+void torusCascadeRefine(const std::vector<Eigen::Vector3d>& pts, double scale, double t,
+                        Eigen::VectorXd& th, std::vector<int>& out_inl)
+{
+    const double capture[4] = { t, 2.0 * t, 4.0 * t, 8.0 * t };
+    std::vector<int> bestInl = torusInlierIndices(pts, th, t);
+    int bestCnt = (int)bestInl.size();
+    Eigen::VectorXd bestTh = th;
+    Eigen::VectorXd cur = th;
+    auto clamp = [&scale](Eigen::VectorXd& p) { torusClamp(p, scale); };
+    for (int round = 0; round < 4; ++round) {
+        const std::vector<int> inl = torusInlierIndices(pts, cur, capture[round]);
+        if ((int)inl.size() < kTorusMinPts)
+            continue;
+        std::vector<Eigen::Vector3d> inlierPts;
+        inlierPts.reserve(inl.size());
+        for (int i : inl)
+            inlierPts.push_back(pts[(size_t)i]);
+        auto inFn = [&inlierPts](const Eigen::VectorXd& p) { return torusResiduals(inlierPts, p); };
+        Eigen::VectorXd cand = cur;
+        torusSolveLM(inFn, cand, kTorusMaxIterFull, clamp);
+        if (!cand.allFinite())
+            continue;
+        cur = cand;
+        std::vector<int> finl = torusInlierIndices(pts, cur, t);
+        if ((int)finl.size() > bestCnt) {
+            bestCnt = (int)finl.size();
+            bestTh = cur;
+            bestInl = std::move(finl);
+        }
+    }
+    th = bestTh;
+    out_inl = std::move(bestInl);
+}
+
+// 采样稳健层（fit=RANSAC/MSAC 共享引擎，评分口径不同）：
+//   确定性候选/随机试验 → 胜者立即级联精化（宽捕获 8t→4t→2t→t 逐轮 gather
+//   内点全程 LM，见 torusCascadeRefine）→ 按 t 口径内点数择优。
+// 采样规模 s = clamp(n/4, 8, 32)：不取严格 7 点最小采样——7 点定 8 参数需要解
+// 7 点环面方程组（无解析解，数值求解在 7 点上严重过拟合：7 自由度模型对任意
+// 7 点构型都可近完美拟合，产出大量"零内点伪解"）；超定小样本 + LM 的初值质量
+// 远高于 7 点 PCA，实测内点收敛率显著更高。
+// 评分：RANSAC = 内点计数最大；MSAC = Σ min(r_i², t²) 最小（M-估计截断口径）。
+// 提前终止：经典 RANSAC 外推 N = log(1−p_good)/log(1−w^s)，p_good = 0.999，
+// 上限 400 试验；固定种子（kTorusSeed）保证同输入结果可复现。
+bool torusRobust(const std::vector<Eigen::Vector3d>& pts, double scale, double t,
+                 bool msacScore, Eigen::VectorXd& out_th, std::vector<int>& out_inliers)
+{
+    const int n = (int)pts.size();
+    auto scoreOf = [&](const Eigen::VectorXd& th, int& cnt) -> double {
+        const Eigen::VectorXd res = torusResiduals(pts, th);
+        double s = 0.0;
+        cnt = 0;
+        for (int i = 0; i < n; ++i) {
+            const double a2 = res[i] * res[i];
+            if (a2 <= t * t) {
+                ++cnt;
+                if (msacScore)
+                    s += a2;
+            } else if (msacScore) {
+                s += t * t;
+            }
+        }
+        return s;
+    };
+    // 候选 0：确定性解过一次级联（低外点时通常直接胜出；同时兜底采样全败。
+    // 高外点下确定性解被外点拉偏，级联宽捕获也有机会把它拉回真盆）。
+    // 记账分两套口径：bestRawCnt = 试验解原始（级联前）t 口径计数，用于"是否
+    // 值得级联"的判定；bestCnt = 现任（级联后）最终口径计数，用于真正择优。
+    // 两者必须分离——若拿原始计数直接比级联后计数，被级联抬高的现任会挡住
+    // 更优试验的级联（实测 20% 外点下把 3/3 成功劣化成 0/3）。
+    Eigen::VectorXd bestTh;
+    if (!torusDeterministic(pts, scale, /*scoreMedian=*/false, bestTh))
+        return false;
+    std::vector<int> bestInl;
+    int bestRawCnt;
+    scoreOf(bestTh, bestRawCnt);
+    torusCascadeRefine(pts, scale, t, bestTh, bestInl);
+    int bestCnt = (int)bestInl.size();
+    double bestScore = scoreOf(bestTh, bestCnt);
+    std::fprintf(stderr, "[torusDBG] det raw=%d cascade=%d\n", bestRawCnt, bestCnt);   // TEMP
+    // 随机采样试验：原始计数刷新 bestRawCnt 的试验立即级联，级联解按最终口径
+    // （RANSAC 计数 / MSAC 截断代价）与现任比较择优
+    const int s = (std::min)(32, (std::max)(kTorusMinPts, n / 4));
+    std::mt19937 rng(kTorusSeed);
+    std::vector<int> idx((size_t)n);
+    std::iota(idx.begin(), idx.end(), 0);
+    const int kMaxTrials = 400;
+    const double kConf = 0.999;
+    for (int trials = 0; trials < kMaxTrials; ++trials) {
+        // 提前终止：当前最优内点率 w 已足以保证 0.999 置信时停止
+        //（need = log(1−conf)/log(1−w^s)；w^s→1 表示已近完美覆盖 → 直接停；
+        //  w^s→0 表示现任很差 → need→∞，绝不能停，必须跑满试验上限）
+        if (trials > 0 && bestCnt >= s) {
+            const double wp = std::pow((double)bestCnt / (double)n, (double)s);
+            const double oneMinusWp = 1.0 - wp;
+            if (oneMinusWp <= 1e-15)
+                break;   // w ≈ 1 → 全内点，无需更多试验
+            const double need = std::log(1.0 - kConf) / std::log(oneMinusWp);
+            if ((double)trials >= need)
+                break;
+        }
+        std::shuffle(idx.begin(), idx.end(), rng);
+        std::vector<Eigen::Vector3d> sub;
+        sub.reserve((size_t)s);
+        for (int k = 0; k < s; ++k)
+            sub.push_back(pts[(size_t)idx[(size_t)k]]);
+        std::vector<Eigen::VectorXd> inits;
+        if (!torusInitCandidates(sub, scale, inits))
+            continue;
+        auto subFn = [&sub](const Eigen::VectorXd& th) { return torusResiduals(sub, th); };
+        auto clamp = [&scale](Eigen::VectorXd& th) { torusClamp(th, scale); };
+        Eigen::VectorXd subTh;
+        double subBest = 0.0;
+        bool subAny = false;
+        for (auto& th : inits) {
+            const double cost = torusSolveLM(subFn, th, kTorusMaxIterSub, clamp);
+            if (!subAny || cost < subBest) {
+                subBest = cost;
+                subTh = th;
+                subAny = true;
+            }
+        }
+        if (!subAny)
+            continue;
+        // 子集去偏二级精化：外点对子集 LM 的系统性拉偏是试验失败的主因
+        //（实测 20% 外点下多数试验落点偏 1~3 单位，全云 t 口径只捕 20~60 内点，
+        // 仅靠运气才有近命中）。按残差中值剔除子集内的外点后二次精化——
+        // 相当于在试验内部做轻量截断最小二乘，把落点拉回真盆附近；迭代两轮。
+        for (int debias = 0; debias < 2; ++debias) {
+            const Eigen::VectorXd subRes = torusResiduals(sub, subTh);
+            std::vector<double> a((size_t)s);
+            for (int k = 0; k < s; ++k)
+                a[(size_t)k] = std::fabs(subRes[k]);
+            const size_t mid = (size_t)s / 2;
+            std::nth_element(a.begin(), a.begin() + (std::ptrdiff_t)mid, a.end());
+            const double cut = (std::max)(1.5 * a[mid], t);
+            std::vector<Eigen::Vector3d> kept;
+            kept.reserve((size_t)s);
+            for (int k = 0; k < s; ++k)
+                if (std::fabs(subRes[k]) <= cut)
+                    kept.push_back(sub[(size_t)k]);
+            if ((int)kept.size() < kTorusMinPts || (int)kept.size() >= s)
+                break;
+            auto keptFn = [&kept](const Eigen::VectorXd& th) { return torusResiduals(kept, th); };
+            torusSolveLM(keptFn, subTh, 60, clamp);
+        }
+        int cnt = 0;
+        scoreOf(subTh, cnt);
+        if (cnt > bestRawCnt) {
+            bestRawCnt = cnt;
+            std::fprintf(stderr, "[torusDBG] trial=%d raw=%d\n", trials, cnt);   // TEMP
+            Eigen::VectorXd candTh = subTh;
+            std::vector<int> candInl;
+            torusCascadeRefine(pts, scale, t, candTh, candInl);
+            const int candCnt = (int)candInl.size();
+            double candScore = 0.0;
+            if (msacScore)
+                candScore = scoreOf(candTh, cnt);
+            bool better;
+            if (msacScore)
+                better = candCnt > bestCnt || (candCnt == bestCnt && candScore < bestScore);
+            else
+                better = candCnt > bestCnt;
+            if (better) {
+                bestCnt = candCnt;
+                bestScore = msacScore ? candScore : 0.0;
+                bestTh = candTh;
+                bestInl = candInl;
+            }
+            std::fprintf(stderr, "[torusDBG] trial=%d cascaded=%d best=%d\n", trials, candCnt, bestCnt);   // TEMP
+        }
+    }
+    std::fprintf(stderr, "[torusDBG] final best=%d\n", bestCnt);   // TEMP
+    if (bestCnt < kTorusMinPts)
+        return false;
+    out_th = bestTh;
+    out_inliers = bestInl;
+    return true;
+}
+
+} // namespace
+
+template <typename PointT>
+bool CloudProcessor<PointT>::fitTorus(const CloudConstPtr& src, FitMethod method,
+                                      double distance_threshold,
+                                      std::vector<float>& out_center, std::vector<float>& out_axis,
+                                      double& out_R, double& out_r,
+                                      std::vector<int>& out_inliers)
+{
+    out_center.clear();
+    out_axis.clear();
+    out_R = 0.0;
+    out_r = 0.0;
+    out_inliers.clear();
+    CloudPtr clean;
+    std::vector<int> global;
+    if (!fitInputClean<PointT>(src, clean, global))
+        return false;
+    const size_t n = clean->size();
+    if (n < (size_t)kTorusMinPts)
+        return false;
+    // 点集与尺度（bbox 对角线，作数值步长/参数下限的自适应基准）
+    std::vector<Eigen::Vector3d> pts;
+    pts.reserve(n);
+    Eigen::Vector3d pMin = Eigen::Vector3d::Constant(std::numeric_limits<double>::infinity());
+    Eigen::Vector3d pMax = -pMin;
+    for (size_t i = 0; i < n; ++i) {
+        const PointT& p = (*clean)[i];
+        pts.emplace_back((double)p.x, (double)p.y, (double)p.z);
+        for (int k = 0; k < 3; ++k) {
+            pMin[k] = (std::min)(pMin[k], pts.back()[k]);
+            pMax[k] = (std::max)(pMax[k], pts.back()[k]);
+        }
+    }
+    const double scale = (pMax - pMin).norm();
+    if (!(scale > 1e-9))
+        return false;   // 全部点重合：协方差奇异且任意"零环"都精确拟合，拒绝
+
+    Eigen::VectorXd th;
+    std::vector<int> inl;
+    if (method == FitMethod::LMEDS) {
+        // LMS(LMEDS) 映射：确定性多候选 LM，候选按残差平方中值择优（LMedS 精神）。
+        // 不采样——对高外点比例不稳健（诚实边界见头文件注释），含外点请用
+        // RANSAC/MSAC；优点是完全确定、零随机性。
+        if (!torusDeterministic(pts, scale, /*scoreMedian=*/true, th))
+            return false;
+        inl = torusInlierIndices(pts, th, distance_threshold);
+    } else {
+        // RANSAC（内点计数最大）/ MSAC（截断平方残差最小）共享采样稳健层
+        if (!torusRobust(pts, scale, distance_threshold, method == FitMethod::MSAC,
+                         th, inl))
+            return false;
+    }
+    if ((int)inl.size() < kTorusMinPts)
+        return false;
+    const Eigen::Vector3d c = th.segment<3>(0);
+    const Eigen::Vector3d a = torusUnitAxis(th);
+    for (int k = 0; k < 3; ++k) {
+        out_center.push_back((float)c[k]);
+        out_axis.push_back((float)a[k]);
+    }
+    out_R = th[6];
+    out_r = th[7];
+    out_inliers.reserve(inl.size());
+    for (int i : inl)
+        out_inliers.push_back(global[(size_t)i]);   // 映射回原始 src 行号
     return true;
 }
 

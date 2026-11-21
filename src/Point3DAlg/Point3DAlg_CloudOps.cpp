@@ -691,12 +691,13 @@ int Point3DAlg_FitModel(const Point3DAlg_PointCloud* in, int method, int fit,
     const int rcIn = CheckInOnly(in);
     if (rcIn != 0)
         return rcIn;
-    if (method < 0 || method > 5 || fit < 0 || fit > 2)
+    if (method < 0 || method > 6 || fit < 0 || fit > 2)
         return -3;
     if (!(distance_threshold > 0.0))
         return -3;
-    // 系数布局长度：plane/sphere = 4，line3D = 6，cylinder/circle3D/cone = 7（见 api.h 表）
-    const int needed = (method <= 1) ? 4 : (method == 5 ? 6 : 7);
+    // 系数布局长度：plane/sphere = 4，line3D = 6，torus = 8，
+    // cylinder/circle3D/cone = 7（见 api.h 表）
+    const int needed = (method <= 1) ? 4 : (method == 5 ? 6 : (method == 6 ? 8 : 7));
     if (!out_coeffs || coeffs_capacity < needed) {
         *out_inlier_count = needed;   // 两段式：先查所需长度再分配重调
         return -3;
@@ -769,6 +770,23 @@ int Point3DAlg_FitModel(const Point3DAlg_PointCloud* in, int method, int fit,
                 out_coeffs[i] = (double)point[(size_t)i];        // 线上一点
                 out_coeffs[3 + i] = (double)dir[(size_t)i];      // 单位方向
             }
+            break;
+        }
+        case 6: {   // torus：[cx,cy,cz, dx,dy,dz, R, r]（1.4.0 新增；全自研实现，
+                    // PCL 1.9 无环面模型——三种 fit 均支持：0/1 走采样稳健层、
+                    // 2 走确定性多候选 LM，见 CloudProcessor::fitTorus 注释）
+            std::vector<float> center, axis;
+            double majorR = 0.0, tubeR = 0.0;
+            if (!CP::fitTorus(src, fm, distance_threshold, center, axis, majorR, tubeR,
+                              inlierIdx) ||
+                center.size() < 3 || axis.size() < 3)
+                return -2;
+            for (int i = 0; i < 3; ++i) {
+                out_coeffs[i] = (double)center[(size_t)i];       // 环面中心
+                out_coeffs[3 + i] = (double)axis[(size_t)i];     // 单位轴方向（符号不定）
+            }
+            out_coeffs[6] = majorR;                              // 主半径（管心圆）
+            out_coeffs[7] = tubeR;                               // 管半径
             break;
         }
         default: {  // cone：[ax,ay,az, dx,dy,dz, 半开角弧度]（仅 RANSAC）

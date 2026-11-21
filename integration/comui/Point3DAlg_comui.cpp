@@ -1284,13 +1284,15 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiFitCircle2D(const AlgoCInput* i
 //   method 3 circle3D [cx,cy,cz, nx,ny,nz(圆平面单位法向), r]
 //   method 4 cone     [ax,ay,az, dx,dy,dz(单位轴), angle(半开角弧度)]
 //   method 5 line3D   [px,py,pz, dx,dy,dz(单位方向)]（1.3.0 新增，6 值）
+//   method 6 torus    [cx,cy,cz, dx,dy,dz(单位轴,符号不定), R(主半径), r(管半径)]
+//                     （1.4.0 新增，8 值；PCL 1.9 无环面模型，底层全自研）
 // 模型支持度（PCL 1.9 限制，底层自动回退不报错）：sphere 的 MSAC 回退 RANSAC；
 // cylinder/cone 仅 RANSAC（fit 参数被忽略）；circle3D 的 fit/threshold 复用内部
-// 平面拟合口径；plane/line3D 三种 fit 均支持。out_coeffs 预分配 8（>= 布局最长
-// 7）免两段式调用。
+// 平面拟合口径；plane/line3D/torus 三种 fit 均支持（torus 的 0/1 = 采样稳健层、
+// 2 = 确定性多候选 LM）。out_coeffs 预分配 8（= 布局最长 torus 8）免两段式调用。
 // 输入：一片点云；无云输出，系数与内点数并入节点消息（manual_regist 先例）。
 // 错误码：1 输入未连线；2 点云为空/内存不足；3 参数非法（-3）；4 拟合失败（-2：
-//         无局内点/退化——点数不足、投影共线、圆锥不收敛）。
+//         无局内点/退化——点数不足、投影共线、圆锥不收敛、环面内点<8）。
 
 #ifdef POINT3DALG_HAS_PCL
 extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiFitModel(const AlgoCInput* in, AlgoCOutput* out) {
@@ -1304,8 +1306,8 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiFitModel(const AlgoCInput* in, 
     if (const AlgoCParam* p = FindParam(in, 1, 0)) method = p->i;
     if (const AlgoCParam* p = FindParam(in, 1, 1)) fit = p->i;
     if (const AlgoCParam* p = FindParam(in, 0, 0)) dist_thr = p->d;
-    if (method < 0 || method > 5) {
-        out->error = "method 仅支持 0=plane/1=sphere/2=cylinder/3=circle3D/4=cone/5=line3D"; return 3;
+    if (method < 0 || method > 6) {
+        out->error = "method 仅支持 0=plane/1=sphere/2=cylinder/3=circle3D/4=cone/5=line3D/6=torus"; return 3;
     }
     if (fit < 0 || fit > 2) { out->error = "fit 仅支持 0=RANSAC/1=MSAC/2=LMS"; return 3; }
     if (dist_thr <= 0.0) { out->error = "distance_threshold 须 > 0"; return 3; }
@@ -1318,7 +1320,7 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiFitModel(const AlgoCInput* in, 
     const int rc = Point3DAlg_FitModel(&pin, method, fit, dist_thr, coeffs, 8,
                                        &inliers, &inlier_count);
     if (rc == -3) { out->error = "拟合失败（method/fit 越界或 distance_threshold<=0）"; return 3; }
-    if (rc == -2) { out->error = "拟合失败：无局内点/退化（点数不足、投影共线、圆锥不收敛）"; return 4; }
+    if (rc == -2) { out->error = "拟合失败：无局内点/退化（点数不足、投影共线、圆锥不收敛、环面内点<8）"; return 4; }
     if (rc != 0)  { out->error = "拟合失败（内存不足或内部异常）"; return 2; }
 
     static char msg[512];
@@ -1357,6 +1359,13 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiFitModel(const AlgoCInput* in, 
             snprintf(msg, sizeof(msg),
                      "line3D p=(%.6f, %.6f, %.6f) dir=(%.6f, %.6f, %.6f) | 内点 %d/%d",
                      coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5],
+                     inlier_count, src->count);
+            break;
+        case 6:
+            snprintf(msg, sizeof(msg),
+                     "torus c=(%.6f, %.6f, %.6f) axis=(%.6f, %.6f, %.6f) R=%.6f r=%.6f | 内点 %d/%d",
+                     coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5],
+                     coeffs[6], coeffs[7],
                      inlier_count, src->count);
             break;
     }

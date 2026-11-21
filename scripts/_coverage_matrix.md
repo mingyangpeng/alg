@@ -176,3 +176,5 @@
 | Point3DAlg FitModel method 5 = line3D / FilterCloud method 10 = approxVoxel | 1.3.0 无新导出（既有接口扩取值域，C ABI 42 不变）；节点 point3d_fit_model / point3d_filter_cloud 扩 method 上限并登记 | ✅ 已闭环 |
 | Point3DAlg SaveCloudEx / KnnSearch / RadiusSearch / ThicknessMap | §二 A- 类 4 项节点化：alg.point3d.save_cloud_ex / knn_search / radius_search / thickness_map（T2 交付） | ✅ 已闭环 |
 | 节点计数 | 83 → 93（image2d 62 + point3d 29 + business 2）；id 全局唯一复核通过；声明 method 全部可在 DLL 导出表解析（Laplacian/Filter2D 核心 + 62 Comui 入口实测） | ✅ |
+| Point3DAlg FitModel method 6 = torus | 1.4.0 无新导出（既有接口扩取值域，C ABI 42 不变）；底层新增 CloudProcessor::fitTorus 全自研（PCL 1.9 无 SACMODEL_TORUS——分布初值多候选 + LM 数值雅可比，残差为点到环面面精确距离、不需要法线；fit 0/1=采样稳健层、2=确定性多候选 LM）；节点 point3d_fit_model method 上限 5→6 并登记，out_coeffs 预分配 8=布局最长；测试 +9 用例（含 25% 外点恢复、退化路径） | ✅ 已闭环 |
+| 节点计数 | 93 → 94（image2d 63 + point3d 29 + business 2，2026-11-21 复核）；sick_fov 为批次 0 唯一剩余缺项 | ✅ |

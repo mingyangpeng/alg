@@ -30,6 +30,13 @@ extern "C" {
  *          FilterCloud method 10 = approxVoxel 近似体素降采样
  *          （params [0]=leaf>0，底层 CloudProcessor::filterApproxVoxelGrid，
  *          PCL ApproximateVoxelGrid 大点云快速版）
+ *   1.4.0  拟合族补全（无新导出，既有签名扩展取值域）：
+ *          FitModel method 6 = torus 圆环面拟合（out_coeffs 8 值
+ *          [cx,cy,cz, dx,dy,dz, R, r]，底层 CloudProcessor::fitTorus——
+ *          PCL 1.9 无 SACMODEL_TORUS，全自研：分布初值多候选 → LM
+ *          数值雅可比精化，残差为点到环面面的精确距离；fit 0=RANSAC/
+ *          1=MSAC 走随机采样+内点评分稳健层，fit 2=LMS 走确定性多候选
+ *          LM 中值择优，三种 fit 均支持；剔除非有限点后 <8 点 → -2）
  *
  * 错误码全局约定（§8.3）：
  *   点云计算族（LoadCloud/SaveCloudEx/Filter/Extract/Transform 等）：
@@ -71,7 +78,7 @@ POINT3DALG_EXPORT void Point3DAlg_FreeBuffer(void* p);
  * 版本与生命周期（1.1.0 新增，对齐 Image2DAlg）
  * ===================================================================== */
 
-/* 返回 DLL 版本字符串（静态存储，调用方不得释放）。当前 "1.2.0"。 */
+/* 返回 DLL 版本字符串（静态存储，调用方不得释放）。当前 "1.4.0"。 */
 POINT3DALG_EXPORT const char* Point3DAlg_GetVersion(void);
 
 /* 初始化（占位实现：当前模块无全局状态，恒返回 0；为宿主统一生命周期而设）。
@@ -273,13 +280,13 @@ POINT3DALG_EXPORT int Point3DAlg_TransformCloud(const Point3DAlg_PointCloud* in,
 
 /* ---------------------------------------------------------------------
  * 9.7 通用几何拟合（fit 组）
- * method：0=plane 1=sphere 2=cylinder 3=circle3D 4=cone
+ * method：0=plane 1=sphere 2=cylinder 3=circle3D 4=cone 5=line3D 6=torus
  * fit   ：0=RANSAC 1=MSAC 2=LMS(LMEDS)
  *         （映射 shapely::FitMethod RANSAC/LMEDS/MSAC——注意与底层枚举
  *          顺序不同，本接口以 0=RANSAC/1=MSAC/2=LMS 为准）
  *
  * out_coeffs 布局（权威口径，对齐 CloudProcessor fitPlane/fitSphere/
- * fitCylinder/fitCircle3D/fitCone 的输出注释；§13 输出字典欠账在此结清）：
+ * fitCylinder/fitCircle3D/fitCone/fitTorus 的输出注释；§13 输出字典欠账在此结清）：
  *   method  模型       out_coeffs 布局（double，长度 = *out_coeff_count）
  *   0  plane    4  [a,b,c,d]  平面 ax+by+cz+d=0，|n|=1
  *   1  sphere   4  [cx,cy,cz,r]  球心 + 半径
@@ -292,10 +299,17 @@ POINT3DALG_EXPORT int Point3DAlg_TransformCloud(const Point3DAlg_PointCloud* in,
  *              + 半开角（弧度，0~π/2）
  *   5  line3D  6  [px,py,pz, dx,dy,dz]  线上一点 + 单位方向（1.3.0 新增，
  *              PCL SACMODEL_LINE；三种 fit 均支持）
+ *   6  torus    8  [cx,cy,cz, dx,dy,dz, R, r]  环面中心 + 单位轴方向
+ *              （符号不定：â 与 −â 同一环面）+ 主半径 R（管心圆）+
+ *              管半径 r（1.4.0 新增，底层 CloudProcessor::fitTorus 全自研——
+ *              PCL 1.9 无 SACMODEL_TORUS；残差为点到环面面的精确距离，
+ *              不需要法线；三种 fit 均支持）
  * 模型支持度（PCL 1.9 限制，底层自动回退，不报错）：
- *   plane/line3D 三种 fit 均支持；sphere 支持 RANSAC/LMEDS（MSAC 回退 RANSAC）；
- *   cylinder/cone 仅 RANSAC（fit 参数被忽略）；circle3D 的 fit/threshold
- *   复用其内部平面拟合口径。
+ *   plane/line3D/torus 三种 fit 均支持（torus 的 fit 0/1 = 采样稳健层：
+ *   RANSAC 内点计数最大 / MSAC 截断平方残差最小，fit 2 = 确定性多候选 LM
+ *   残差中值择优——高外点比例建议 0/1）；sphere 支持 RANSAC/LMEDS
+ *   （MSAC 回退 RANSAC）；cylinder/cone 仅 RANSAC（fit 参数被忽略）；
+ *   circle3D 的 fit/threshold 复用其内部平面拟合口径。
  *
  * distance_threshold：局内点判定距离阈值（与坐标同单位，>0）。
  * out_coeffs / coeffs_capacity：调用方预分配 double 缓冲与容量。
@@ -304,13 +318,14 @@ POINT3DALG_EXPORT int Point3DAlg_TransformCloud(const Point3DAlg_PointCloud* in,
  *   不需要内点（out_inlier_count 仍回填）。
  * out_inlier_count：必填（NULL → -1）；成功 = 内点数（out_inliers 数组长
  *   度——系数个数无需另查，由 method 唯一确定：plane/sphere=4、line3D=6、
- *   其余=7）；
+ *   torus=8、其余=7）；
  *   -3 时回填所需系数长度（两段式：先 capacity=0 查长度，再分配重调）。
  * 错误码（本接口口径）：
  *   0 成功；
  *   -1 in/out_inlier_count 为 NULL、in->xyz 为 NULL、in->count<=0；
- *   -2 拟合失败/无局内点/退化（点数不足、投影点共线、圆锥不收敛等）；
- *   -3 method/fit 不是 0~5、distance_threshold<=0、coeffs_capacity 不足
+ *   -2 拟合失败/无局内点/退化（点数不足、投影点共线、圆锥不收敛、
+ *      环面剔除非有限点后 <8 点或精化后内点 <8 等）；
+ *   -3 method/fit 不是 0~6、distance_threshold<=0、coeffs_capacity 不足
  *      （*out_inlier_count = 所需系数长度，两段式回填）；
  *   -4 内存分配失败（出参全部保持 NULL/0，不承载任何有效数据）；
  *   -99 PCL 异常。 */

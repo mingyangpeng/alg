@@ -27,7 +27,7 @@
 
 const char* Point3DAlg_GetVersion(void)
 {
-    return "1.3.0";
+    return "1.4.0";
 }
 
 int Point3DAlg_Init(void)

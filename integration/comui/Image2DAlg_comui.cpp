@@ -3825,3 +3825,134 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiTemplateAffineAlign(const AlgoCInput* in, 
 }
 
 } // extern "C"（2.5.0 对位拼接扩展追加段）
+
+// =====================================================================
+// 2.6.0 批次：频域缺陷检测接入（2026-11-21，2 个入口，追加在文件尾部，
+// 封装 Image2DAlg 2.6.0 批次频域缺陷检测 C API——与 2.5.0/2.4.0/2.3.0 段
+// 同规则：只做参数组装、错误码映射与消息拼装，不新增算法）：
+//   alg.image2d.fourier_spectrum       —— FourierSpectrum（幅度谱显示图：
+//                                          周期纹理在谱上呈 DC 对称亮点对）
+//   alg.image2d.periodic_notch_filter  —— PeriodicNotchFilter（陷波滤波去
+//                                          周期纹理：clean 去纹理图输出 +
+//                                          defect 缺陷增强统计并入消息）
+// 图像输出通道桥接照 2.5.0 先例（ComuiOffsetRemap）：核心 1 通道结果经
+// MakeBgraOut 统一转宿主 BGRA 后输出。多图像输出取舍：本适配层现有入口
+// 均为单图输出（out->imageCount = 1，AlgoCOutput 多图无用例），故
+// periodic_notch_filter 的 defect 缺陷增强图暂以 min/max/mean 统计并入
+// 消息通道（defect_max/defect_mean），双图输出待 AlgoCOutput ABI 扩展。
+// =====================================================================
+
+// ---------------- 算子入口：频域缺陷检测（2.6.0 批次） ----------------
+
+extern "C" {
+
+// ---------------- 算子入口：幅度谱显示图（node.json: alg.image2d.fourier_spectrum） ----------------
+// 频域缺陷检测底座：灰度 → CV_32F → 0 补边到最优 DFT 尺寸 → 双通道复数 DFT →
+// log(1+幅度) min-max 归一化 → 象限重排（DC 居中）→ 裁剪回输入尺寸 → 8U 单通道。
+// 工业谱显示口径：未加窗，补边区引入的边缘能量会进入谱图；周期纹理（布纹/
+// 网纹/摩尔纹）在谱上呈关于 DC 对称的亮点对——亮点对坐标（相对 DC 中心的
+// 偏移）可直接抄入 periodic_notch_filter 的 notch_points 选陷波点。
+// 输入：images[0]=输入图（1/3/4 通道，宿主 BGRA 直通，彩色核心层先转灰度）。
+// 参数：无。
+// 输出：谱显示图（核心 8U 单通道结果经 MakeBgraOut 转 BGRA，offset_remap 先例）。
+// 消息通道："spectrum WxH（DC 居中，log 归一化）"。
+// 错误码：1 输入未连线；2 输入为空/计算失败（核心层 -1/-99）/内存不足。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiFourierSpectrum(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 1 || !in->images) { out->error = "输入未连线"; return 1; }
+
+    Image2DAlg_Image input = CoreInputFrom(in->images[0]);
+    Image2DAlg_Image spectrum = {};
+    const int rc = Image2DAlg_FourierSpectrum(&input, &spectrum);
+    if (rc == -1) { out->error = "输入为空"; return 2; }
+    if (rc != 0)  { out->error = "幅度谱计算失败"; return 2; }   // -99 等异常
+
+    static char msg[128];
+    snprintf(msg, sizeof(msg), "spectrum %dx%d（DC 居中，log 归一化）",
+             spectrum.width, spectrum.height);
+
+    out->images = MakeBgraOut(spectrum);
+    Image2DAlg_FreeImage(&spectrum);
+    if (!out->images) { out->error = "内存不足"; return 2; }
+    out->imageCount = 1;
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：陷波滤波去周期纹理（node.json: alg.image2d.periodic_notch_filter） ----------------
+// 频域缺陷增强：对每个陷波点（相对 DC 中心的偏移量，像素，可负）及其共轭镜像
+// 点清除半径 notch_radius 圆内的复数频谱（与 DC 中心重叠的陷波点核心自动跳过
+// ——保亮度与低频轮廓），抑制布纹/网纹/摩尔纹等周期性成分；被抑制掉的残差即
+// 缺陷增强——clean 图周期纹理消失，defect 图只剩缺陷响应（|原灰度−clean| 按
+// 全图最大差归一化 ×255，最大差为 0 时全黑 = 无周期成分被滤除）。选点依据 =
+// fourier_spectrum 谱上关于 DC 对称的亮点对；notch_radius 过大会伤及低频致
+// 图像发虚。
+// 输入：images[0]=输入图（1/3/4 通道，宿主 BGRA 直通，彩色核心层先转灰度）。
+// 参数（按声明顺序）：
+//   notch_points  text    默认 ""  陷波点偏移坐标对 "cx0,cy0,cx1,cy1,..."
+//                                  （逗号分隔偶数个数值，相对 DC 中心；至少
+//                                  1 对、最多 32 对；为空/奇数个/含坏值 → 参数非法）
+//   notch_radius  number  默认 3.0  抑制圆半径（像素，> 0，核心层 -3）
+// 输出：去周期纹理 clean 图（核心 8U 单通道结果经 MakeBgraOut 转 BGRA）。
+//   多图像输出取舍：本适配层现有入口均单图输出（out->imageCount = 1，无多图
+//   先例），defect 缺陷增强图暂以统计并入消息通道（对 defect 图做 min/max/
+//   mean 统计，消息取 defect_max/defect_mean），双图输出待 AlgoCOutput ABI 扩展。
+// 消息通道："notches=N radius=… defect_max=… defect_mean=…"（defect_max=0
+//   即全黑 = 无周期成分被滤除）。
+// 错误码：1 输入未连线；2 输入为空/滤波失败（核心层 -1/-99）/内存不足；
+//         3 参数非法（notch_points 需逗号分隔偶数个坐标，至少 1 对且不超过
+//           32 对；notch_radius 需 > 0，核心层 -3）。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiPeriodicNotchFilter(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 1 || !in->images) { out->error = "输入未连线"; return 1; }
+    const char* points_text = "";
+    double radius = 3.0;
+    if (const AlgoCParam* p = FindParam(in, 2, 0)) points_text = p->s;   // text：notch_points
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) radius = p->d;        // number：notch_radius
+
+    // notch_points 解析：逗号分隔偶数个数值（ParseDoubleList 先例），容量
+    // 64 值 = 32 个陷波点；0 个/奇数个/坏值/超容量统一参数非法（rc=3）
+    double notch_xy[64];
+    const int n_vals = ParseDoubleList(points_text, notch_xy, 64);
+    if (n_vals <= 0 || (n_vals % 2) != 0) {
+        out->error = "notch_points 需逗号分隔偶数个坐标（cx0,cy0,cx1,cy1,...，至少 1 对，最多 32 对）";
+        return 3;
+    }
+    const int notch_count = n_vals / 2;
+
+    Image2DAlg_Image input = CoreInputFrom(in->images[0]);
+    Image2DAlg_Image clean = {}, defect = {};
+    const int rc = Image2DAlg_PeriodicNotchFilter(&input, notch_xy, notch_count,
+                                                  radius, &clean, &defect);
+    if (rc == -1) { out->error = "输入为空"; return 2; }
+    if (rc == -3) {
+        out->error = "陷波滤波失败（notch_points 需逗号分隔偶数个坐标，至少 1 对；notch_radius 需 > 0）";
+        return 3;
+    }
+    if (rc != 0)  { out->error = "陷波滤波失败"; return 2; }
+
+    // defect 缺陷增强图统计（min/max/mean）并入消息——无多图输出先例，
+    // defect 图不单独输出（双图输出待 ABI 扩展）：max/mean 为有效指标，
+    // max=0 即 defect 全黑 = 无周期成分被滤除
+    const cv::Mat defect_vis(defect.height, defect.width, CV_8UC1, defect.data);
+    double dmin = 0.0, dmax = 0.0;
+    cv::minMaxLoc(defect_vis, &dmin, &dmax);
+    const double dmean = cv::mean(defect_vis)[0];
+    Image2DAlg_FreeImage(&defect);
+
+    static char msg[160];
+    snprintf(msg, sizeof(msg),
+             "notches=%d radius=%.4f defect_max=%.1f defect_mean=%.4f",
+             notch_count, radius, dmax, dmean);
+
+    out->images = MakeBgraOut(clean);
+    Image2DAlg_FreeImage(&clean);
+    if (!out->images) { out->error = "内存不足"; return 2; }
+    out->imageCount = 1;
+    out->error = msg;
+    return 0;
+}
+
+} // extern "C"（2.6.0 频域缺陷检测追加段）

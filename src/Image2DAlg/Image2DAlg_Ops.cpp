@@ -3407,4 +3407,312 @@ int Image2DAlg_TemplateAffineAlign(const Image2DAlg_Image* golden,
     }
 }
 
+
+// ---------------- 频域与匹配强化扩展（2.6.0 新增） ----------------
+
+// 频谱 DC 中心化 / 还原（循环移位实现）：把 (0,0) 处的 DC 分量移到
+// (rows/2, cols/2)——偶数尺寸即标准四象限互换（q0<->q3、q1<->q2），奇数尺寸
+// 按循环移位推广（象限互换仅在偶数尺寸下良定义）；to_center=false 为精确逆
+// 操作（奇数尺寸的正逆移位量不同，不能拿同一操作连做两次）。src/dst 须为
+// 两个不同 Mat（不原地调用），dst 按需 create。
+void ShiftDftSpectrum(const cv::Mat& src, cv::Mat& dst, bool to_center) {
+    const int w = src.cols, h = src.rows;
+    const int cx = w / 2, cy = h / 2;   // DC 落点（int 除法意义上的中心）
+    dst.create(src.size(), src.type());
+    if (to_center) {
+        // dst[r,c] = src[(r + h-cy) % h, (c + w-cx) % w]，DC：(0,0) -> (cy,cx)
+        src(cv::Rect(w - cx, h - cy, cx, cy)).copyTo(dst(cv::Rect(0, 0, cx, cy)));
+        src(cv::Rect(0, h - cy, w - cx, cy)).copyTo(dst(cv::Rect(cx, 0, w - cx, cy)));
+        src(cv::Rect(w - cx, 0, cx, h - cy)).copyTo(dst(cv::Rect(0, cy, cx, h - cy)));
+        src(cv::Rect(0, 0, w - cx, h - cy)).copyTo(dst(cv::Rect(cx, cy, w - cx, h - cy)));
+    } else {
+        // 精确逆操作：dst[r,c] = src[(r + cy) % h, (c + cx) % w]
+        src(cv::Rect(cx, cy, w - cx, h - cy)).copyTo(dst(cv::Rect(0, 0, w - cx, h - cy)));
+        src(cv::Rect(0, cy, cx, h - cy)).copyTo(dst(cv::Rect(w - cx, 0, cx, h - cy)));
+        src(cv::Rect(cx, 0, w - cx, cy)).copyTo(dst(cv::Rect(0, h - cy, w - cx, cy)));
+        src(cv::Rect(0, 0, cx, cy)).copyTo(dst(cv::Rect(w - cx, h - cy, cx, cy)));
+    }
+}
+
+// 傅里叶公共前置（FourierSpectrum / PeriodicNotchFilter 同口径）：灰度 ->
+// CV_32F -> 0 补边到最优 DFT 尺寸（宽高各自 getOptimalDFTSize）-> 双通道复数
+// DFT（DFT_COMPLEX_OUTPUT，未重排，DC 在 (0,0)）。orig_w/orig_h 回填补边前
+// 尺寸，W/H 回填补边后尺寸；spec 为补边尺寸 W×H 的复数频谱。未加窗——工业
+// 谱显示口径（api.h 注明补边边缘能量会进谱）。
+void DftForwardOf(const cv::Mat& gray, cv::Mat& spec,
+                  int& orig_w, int& orig_h, int& W, int& H) {
+    cv::Mat gray32;
+    gray.convertTo(gray32, CV_32F);
+    orig_w = gray32.cols;
+    orig_h = gray32.rows;
+    W = cv::getOptimalDFTSize(orig_w);
+    H = cv::getOptimalDFTSize(orig_h);
+    cv::Mat padded;
+    cv::copyMakeBorder(gray32, padded, 0, H - orig_h, 0, W - orig_w,
+                       cv::BORDER_CONSTANT, cv::Scalar::all(0));
+    cv::dft(padded, spec, cv::DFT_COMPLEX_OUTPUT);
+}
+
+// 幅度谱显示图（周期纹理在谱上呈关于 DC 对称的亮点对——陷波选点的直接依据）
+int Image2DAlg_FourierSpectrum(const Image2DAlg_Image* in, Image2DAlg_Image* out) {
+    cv::Mat src;
+    if (int rc = Wrap(in, src)) return rc;
+    if (!out) return -1;
+    try {
+        cv::Mat spec;
+        int w = 0, h = 0, W = 0, H = 0;
+        DftForwardOf(GrayOf(src), spec, w, h, W, H);
+        cv::Mat planes[2];
+        cv::split(spec, planes);
+        cv::Mat mag, logmag, disp;
+        cv::magnitude(planes[0], planes[1], mag);
+        cv::log(mag + 1.0, logmag);
+        // min-max 归一化 [0,255]（min==max：全图同值无对比度可言，输出全 0）
+        double mn = 0.0, mx = 0.0;
+        cv::minMaxLoc(logmag, &mn, &mx);
+        if (mx > mn)
+            logmag.convertTo(disp, CV_8U, 255.0 / (mx - mn), -mn * 255.0 / (mx - mn));
+        else
+            disp = cv::Mat::zeros(logmag.size(), CV_8U);
+        // DC 居中（象限互换）后以 DC 为中心裁剪回输入尺寸——裁剪只影响显示，
+        // DC 恒在新图 (w/2, h/2)
+        cv::Mat centered;
+        ShiftDftSpectrum(disp, centered, true);
+        cv::Mat crop = centered(cv::Rect(W / 2 - w / 2, H / 2 - h / 2, w, h));
+        return CopyOut(crop, out);   // ROI 非连续时 CopyOut 自行 clone
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+// 陷波滤波去周期纹理：频域陷波抑制周期性成分（布纹/网纹/摩尔纹），残差即
+// 缺陷增强——clean 图周期纹理消失，defect 图只剩缺陷响应
+int Image2DAlg_PeriodicNotchFilter(const Image2DAlg_Image* in,
+                                   const double* notch_xy, int notch_count,
+                                   double notch_radius,
+                                   Image2DAlg_Image* out_clean,
+                                   Image2DAlg_Image* out_defect) {
+    cv::Mat src;
+    if (int rc = Wrap(in, src)) return rc;
+    if (!out_clean || !out_defect) return -1;
+    if (!notch_xy || notch_count < 1) return -3;
+    if (!(notch_radius > 0.0)) return -3;
+    try {
+        // 与 FourierSpectrum 同口径：0 补边 + DFT + DC 居中
+        cv::Mat gray = GrayOf(src);
+        cv::Mat spec;
+        int w = 0, h = 0, W = 0, H = 0;
+        DftForwardOf(gray, spec, w, h, W, H);
+        cv::Mat centered;
+        ShiftDftSpectrum(spec, centered, true);
+        // 逐陷波点抑制：点 (cx,cy)（相对 DC 中心的偏移，可为负）与共轭镜像点
+        // (−cx,−cy)（实信号频谱共轭对称）各清一个半径 notch_radius 的圆（圆内
+        // 复数值置 0）；与 DC 中心重叠的陷波点自动跳过——保亮度与低频轮廓
+        const int dcx = W / 2, dcy = H / 2;
+        const double r2 = notch_radius * notch_radius;
+        for (int i = 0; i < notch_count; ++i) {
+            const double nx = notch_xy[2 * i], ny = notch_xy[2 * i + 1];
+            for (int s = 0; s < 2; ++s) {
+                if (s == 1 && nx == 0.0 && ny == 0.0) continue;   // 镜像重合只清一次
+                const double sx = (s == 0) ? nx : -nx;
+                const double sy = (s == 0) ? ny : -ny;
+                if (sx == 0.0 && sy == 0.0) continue;             // DC 自动跳过
+                const double px = (double)dcx + sx, py = (double)dcy + sy;
+                // 圆的包围盒钳制在频谱内；圆内（<= r）复数值置 0
+                const int rad = (int)std::ceil(notch_radius);
+                const int x0 = (std::max)(0, (int)std::floor(px - rad));
+                const int x1 = (std::min)(W - 1, (int)std::ceil(px + rad));
+                const int y0 = (std::max)(0, (int)std::floor(py - rad));
+                const int y1 = (std::min)(H - 1, (int)std::ceil(py + rad));
+                for (int yy = y0; yy <= y1; ++yy) {
+                    cv::Vec2f* row = centered.ptr<cv::Vec2f>(yy);
+                    for (int xx = x0; xx <= x1; ++xx) {
+                        const double dx = (double)xx - px, dy = (double)yy - py;
+                        if (dx * dx + dy * dy <= r2)
+                            row[xx] = cv::Vec2f(0.0f, 0.0f);
+                    }
+                }
+            }
+        }
+        // 反重排 + IDFT（DFT_REAL_OUTPUT 的输出即实部；DFT_SCALE 补回正向未做
+        // 的 1/N 归一），裁剪回补边前区域；值域可能轻微越界，saturate_cast
+        // 钳制到 8U
+        cv::Mat restored;
+        ShiftDftSpectrum(centered, restored, false);
+        cv::Mat spatial;
+        cv::idft(restored, spatial, cv::DFT_REAL_OUTPUT | cv::DFT_SCALE);
+        cv::Mat clean;
+        spatial(cv::Rect(W / 2 - w / 2, H / 2 - h / 2, w, h)).convertTo(clean, CV_8U);
+        if (int rc = CopyOut(clean, out_clean)) return rc;
+        // 缺陷增强显示图：|原灰度 − clean| 逐像素绝对差按全图最大差归一化
+        // ×255（最大差 0 = 无周期成分被滤除，全黑）
+        cv::Mat diff;
+        cv::absdiff(gray, clean, diff);
+        double dmax = 0.0;
+        cv::minMaxLoc(diff, NULL, &dmax);
+        cv::Mat defect;
+        if (dmax > 0.0)
+            diff.convertTo(defect, CV_8U, 255.0 / dmax);
+        else
+            defect = cv::Mat::zeros(diff.size(), CV_8U);
+        return CopyOut(defect, out_defect);
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+// FLANN 近似最近邻匹配（大描述子集合数千级加速；契约同 MatchFeatures：kNN(2)
+// + Lowe 比率过滤，out 数组归 FreeOrbMatches 释放）
+int Image2DAlg_MatchFeaturesFlann(const Image2DAlg_Descriptors* d1,
+                                  const Image2DAlg_Descriptors* d2,
+                                  const Image2DAlg_Point2f* pts1,
+                                  const Image2DAlg_Point2f* pts2,
+                                  double ratio,
+                                  Image2DAlg_OrbMatch** out_matches, int* out_count) {
+    if (!d1 || !d2 || !pts1 || !pts2 || !out_matches || !out_count) return -1;
+    if (d1->count < 1 || d2->count < 1) return -1;   // 空描述子集 = 参数错
+    //（本批次口径 -1；MatchFeatures 旧口径为 -2——那里 0 命中不允许成功，
+    // 这里允许，"集空"无从与"不足"区分，统一按参数错）
+    if (d1->type != d2->type || d1->dim != d2->dim || d1->is_float != d2->is_float) return -3;
+    if (d1->type < 0 || d1->type > 3) return -3;
+    if (!(ratio > 0.0 && ratio <= 1.0)) return -3;   // (0,1]，同 TemplateAffineAlign 口径
+    if (d1->is_float ? (!d1->fdata || !d2->fdata) : (!d1->data || !d2->data)) return -1;
+    *out_matches = nullptr;
+    *out_count = 0;
+    try {
+        // Descriptors -> 行视图（照抄 MatchFeatures 桥接：浮点 CV_32F、二进制
+        // CV_8U，rows = count、cols = dim；调用方保证 pts 与行序一一对应）
+        cv::Mat m1, m2;
+        if (d1->is_float) {
+            m1 = cv::Mat(d1->count, d1->dim, CV_32F, (void*)d1->fdata);
+            m2 = cv::Mat(d2->count, d2->dim, CV_32F, (void*)d2->fdata);
+        } else {
+            m1 = cv::Mat(d1->count, d1->dim, CV_8U, (void*)d1->data);
+            m2 = cv::Mat(d2->count, d2->dim, CV_8U, (void*)d2->data);
+        }
+        // 匹配器按描述子类型选：SIFT 浮点 -> KD-Tree；ORB/BRISK/AKAZE 二进制
+        // -> LSH（LSH 属近似检索，不保证满 k 邻居，不足 2 邻居的对直接丢弃）
+        cv::Ptr<cv::flann::IndexParams> index_params;
+        if (d1->is_float)
+            index_params = cv::makePtr<cv::flann::KDTreeIndexParams>(4);
+        else
+            index_params = cv::makePtr<cv::flann::LshIndexParams>(12, 20, 2);
+        cv::FlannBasedMatcher matcher(index_params);
+        std::vector<std::vector<cv::DMatch>> knn;
+        matcher.knnMatch(m1, m2, knn, 2);
+        std::vector<cv::DMatch> good;
+        for (const auto& km : knn)
+            if (km.size() == 2 && km[0].distance < ratio * km[1].distance)
+                good.push_back(km[0]);
+        // 0 命中不是错误（LSH 近似 + 严比率下属正常）：NULL/0/返回 0
+        if (good.empty()) return 0;
+        Image2DAlg_OrbMatch* arr =
+            (Image2DAlg_OrbMatch*)malloc(sizeof(Image2DAlg_OrbMatch) * good.size());
+        if (!arr) return -4;
+        for (size_t i = 0; i < good.size(); ++i) {
+            arr[i].x1 = pts1[good[i].queryIdx].x;
+            arr[i].y1 = pts1[good[i].queryIdx].y;
+            arr[i].x2 = pts2[good[i].trainIdx].x;
+            arr[i].y2 = pts2[good[i].trainIdx].y;
+            arr[i].distance = good[i].distance;
+        }
+        *out_matches = arr;
+        *out_count = (int)good.size();
+        return 0;
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+// 双向互为最近匹配：正向 d1->d2 与反向 d2->d1 各做 kNN(2) + Lowe 比率过滤，
+// 只保留"互为最近"的配对（m=(q→t) 保留 ⇔ 反向中 t 的 Lowe 过滤后最优匹配是
+// q）——交叉校验比单向比率更严（误匹配率更低，召回下降）；BF 匹配器（二进制
+// Hamming / 浮点 L2）与其余校验/输出契约同 MatchFeatures
+int Image2DAlg_MatchFeaturesSymmetric(const Image2DAlg_Descriptors* d1,
+                                      const Image2DAlg_Descriptors* d2,
+                                      const Image2DAlg_Point2f* pts1,
+                                      const Image2DAlg_Point2f* pts2,
+                                      double ratio,
+                                      Image2DAlg_OrbMatch** out_matches, int* out_count) {
+    if (!d1 || !d2 || !pts1 || !pts2 || !out_matches || !out_count) return -1;
+    if (d1->count < 1 || d2->count < 1) return -1;   // 空描述子集 = 参数错（口径同 Flann 版）
+    if (d1->type != d2->type || d1->dim != d2->dim || d1->is_float != d2->is_float) return -3;
+    if (d1->type < 0 || d1->type > 3) return -3;
+    if (!(ratio > 0.0 && ratio <= 1.0)) return -3;   // (0,1]，同 TemplateAffineAlign 口径
+    if (d1->is_float ? (!d1->fdata || !d2->fdata) : (!d1->data || !d2->data)) return -1;
+    *out_matches = nullptr;
+    *out_count = 0;
+    try {
+        // Descriptors -> 行视图（桥接同 MatchFeatures / Flann 版）
+        cv::Mat m1, m2;
+        if (d1->is_float) {
+            m1 = cv::Mat(d1->count, d1->dim, CV_32F, (void*)d1->fdata);
+            m2 = cv::Mat(d2->count, d2->dim, CV_32F, (void*)d2->fdata);
+        } else {
+            m1 = cv::Mat(d1->count, d1->dim, CV_8U, (void*)d1->data);
+            m2 = cv::Mat(d2->count, d2->dim, CV_8U, (void*)d2->data);
+        }
+        cv::BFMatcher matcher(d1->is_float ? cv::NORM_L2 : cv::NORM_HAMMING);
+        std::vector<std::vector<cv::DMatch>> knn_f, knn_r;
+        matcher.knnMatch(m1, m2, knn_f, 2);   // 正向 d1 -> d2
+        matcher.knnMatch(m2, m1, knn_r, 2);   // 反向 d2 -> d1
+        // 反向 Lowe 过滤后的最优匹配表：best_r[t] = q'（无命中为 -1）
+        std::vector<int> best_r((size_t)d2->count, -1);
+        for (const auto& km : knn_r)
+            if (km.size() == 2 && km[0].distance < ratio * km[1].distance)
+                best_r[(size_t)km[0].queryIdx] = km[0].trainIdx;
+        std::vector<cv::DMatch> good;
+        for (const auto& km : knn_f) {
+            if (km.size() != 2 || km[0].distance >= ratio * km[1].distance) continue;
+            if (best_r[(size_t)km[0].trainIdx] == km[0].queryIdx)
+                good.push_back(km[0]);   // 互为最近：保留（distance 取正向值）
+        }
+        // 0 命中不是错误（交叉校验天然更严，全滤空属正常）：NULL/0/返回 0
+        if (good.empty()) return 0;
+        Image2DAlg_OrbMatch* arr =
+            (Image2DAlg_OrbMatch*)malloc(sizeof(Image2DAlg_OrbMatch) * good.size());
+        if (!arr) return -4;
+        for (size_t i = 0; i < good.size(); ++i) {
+            arr[i].x1 = pts1[good[i].queryIdx].x;
+            arr[i].y1 = pts1[good[i].queryIdx].y;
+            arr[i].x2 = pts2[good[i].trainIdx].x;
+            arr[i].y2 = pts2[good[i].trainIdx].y;
+            arr[i].distance = good[i].distance;
+        }
+        *out_matches = arr;
+        *out_count = (int)good.size();
+        return 0;
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+// 全仿射估计（6 DOF：平移 + 旋转 + 各向异性缩放 + 剪切）——结构同
+// EstimateAffinePartial（4 DOF），几何估计换 6 DOF 的 estimateAffine2D
+int Image2DAlg_EstimateAffineFull(const Image2DAlg_OrbMatch* matches,
+                                  int count, double ransac_reproj_threshold,
+                                  double m[6], int* out_inliers) {
+    if (!matches || !m || !out_inliers) return -1;
+    if (count < 3) return -2;   // 全仿射 6 DOF 恰定需 3 点，< 3 直接判不足（同 Partial 口径）
+    if (ransac_reproj_threshold <= 0.0) return -3;
+    *out_inliers = 0;
+    try {
+        std::vector<cv::Point2f> p1, p2;
+        MatchPointsOf(matches, count, p1, p2);
+        cv::Mat inlierMask;
+        // in1 → in2 方向（与 EstimateAffinePartial / ORBAlign 一致）；共线/退化
+        // 返回空 Mat
+        cv::Mat A = cv::estimateAffine2D(p1, p2, inlierMask, cv::RANSAC,
+                                         ransac_reproj_threshold);
+        if (A.empty() || A.rows < 2 || A.cols < 3) return -2;
+        for (int r = 0; r < 2; ++r)
+            for (int c = 0; c < 3; ++c)
+                m[r * 3 + c] = A.at<double>(r, c);
+        *out_inliers = cv::countNonZero(inlierMask);
+        return 0;
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
 } // extern "C"

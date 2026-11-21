@@ -1,0 +1,39 @@
+{
+  "node": {
+    "id": "alg.image2d.fourier_spectrum",
+    "name": "幅度谱",
+    "group": "2D 图像",
+    "category": "处理",
+    "description": "幅度谱显示图（频域缺陷检测底座）：灰度→0 补边到最优 DFT 尺寸→DFT→log(1+幅度) min-max 归一化→象限重排（DC 居中）→裁剪回输入尺寸的 8U 单通道谱图；未加窗，补边区边缘能量会进入谱图；周期纹理（布纹/网纹/摩尔纹）在谱上呈关于 DC 对称的亮点对，是陷波滤波节点选陷波点的直接依据——亮点对坐标（相对 DC 中心偏移）抄入其 notch_points；无参数"
+  },
+  "runtime": "native",
+  "assembly": "Image2DAlg.dll",
+  "method": "Image2DAlg_ComuiFourierSpectrum",
+  "inputs": [
+    {
+      "name": "输入",
+      "type": "image"
+    }
+  ],
+  "params": [],
+  "outputs": [
+    {
+      "name": "谱图",
+      "type": "image"
+    }
+  ],
+  "source": {
+    "files": [
+      "integration/comui/Image2DAlg_comui.cpp",
+      "integration/comui/comui_native_abi.h",
+      "src/AlgExport.h",
+      "src/Image2DAlg/Image2DAlg_api.cpp",
+      "src/Image2DAlg/Image2DAlg_Ops.cpp",
+      "src/Image2DAlg/include/Image2DAlg_api.h"
+    ],
+    "includes": [
+      "src",
+      "src/Image2DAlg/include"
+    ]
+  }
+}

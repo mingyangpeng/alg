@@ -59,6 +59,13 @@
 //            TemplateAffineAlign 模板复合仿射对位（模板匹配粗对位 + ORB 精修）
 //            ——客户场景：对位/拼接流水线（golden align/缺陷复核/拼接 merge）
 //
+//   2.6.0  + 频域缺陷检测 / 匹配链路强化 5 算子：FourierSpectrum 幅度谱显示图
+//            （周期纹理的频域选点依据）/ PeriodicNotchFilter 陷波滤波去周期
+//            纹理（残差即缺陷增强图）/ MatchFeaturesFlann FLANN 大集合匹配
+//            （数千级描述子加速）/ MatchFeaturesSymmetric 双向互为最近匹配
+//            （交叉校验压误匹配）/ EstimateAffineFull 全仿射估计（6 DOF，
+//            含剪切/各向异性缩放）——批次 C：频域缺陷检测 + 匹配链路强化
+//
 // 【通道语义】Image2DAlg_Image.channels 支持 1（灰度）/ 3（BGR）/ 4（BGRA），
 //   data 为紧排像素（行步长 = width * channels，无对齐填充）：
 //   * 通用算子保持输入真实通道数（1→1、3→3、4→4，alpha 随通道参与运算）；
@@ -1534,6 +1541,115 @@ IMAGE2DALG_EXPORT int Image2DAlg_TemplateAffineAlign(const Image2DAlg_Image* gol
                                                      double ransac_reproj_threshold,
                                                      double m[6], int* out_inliers,
                                                      double* out_rough_score);
+
+// ---------------- 2.6.0 批次：频域缺陷检测 / 匹配链路强化 ----------------
+
+/// 幅度谱显示图（频域缺陷检测底座）：灰度 → CV_32F → 0 补边到最优 DFT 尺寸
+/// （cv::getOptimalDFTSize，宽高各自）→ 双通道复数 DFT（DFT_COMPLEX_OUTPUT）→
+/// 幅度 → log(1+mag) → min-max 归一化 [0,255]（全图同值时输出全 0）→ 象限重排
+/// （DC 居中）→ 裁剪回输入尺寸 → 8U 单通道。工业谱显示口径：未加窗，补边区
+/// 引入的边缘能量会进入谱图；裁剪只影响显示范围，DC 恒在中心——周期纹理
+/// （布纹/网纹/摩尔纹）在谱上呈关于 DC 对称的亮点对，是 PeriodicNotchFilter
+/// 选陷波点的直接依据。
+/// [in]  in    输入图（1/3/4 通道；彩色先转灰度）
+/// [out] out   与输入同尺寸的 8U 单通道谱显示图（malloc 新紧排缓冲，用
+///             Image2DAlg_FreeImage 释放）
+/// 返回：0 成功；-1 空指针/空图；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_FourierSpectrum(const Image2DAlg_Image* in, Image2DAlg_Image* out);
+
+/// 陷波滤波去周期纹理（频域缺陷增强）：频域陷波抑制周期性成分（布纹/网纹/
+/// 摩尔纹等规则纹理），被抑制掉的残差即缺陷增强——clean 图周期纹理消失、
+/// defect 图只剩缺陷响应。频域流程同 FourierSpectrum（0 补边 + DFT + DC 居中），
+/// 对每个陷波点 (cx,cy)（相对 DC 中心的偏移量，像素，可为负）及其共轭镜像点
+/// (−cx,−cy)（实信号频谱共轭对称；两点重合只清一次）清除半径 notch_radius
+/// 圆内的复数频谱（与 DC 中心重叠的陷波点自动跳过——保亮度与低频轮廓），
+/// 反重排 + IDFT（DFT_REAL_OUTPUT | DFT_SCALE，输出即实部）后裁剪回原尺寸。
+/// [in]  in            输入图（1/3/4 通道；彩色先转灰度）
+/// [in]  notch_xy      陷波点扁平数组 [cx0,cy0,cx1,cy1,...]（相对 DC 中心的
+///                     偏移量；选点依据 = FourierSpectrum 谱上关于 DC 对称的
+///                     亮点对），长度 notch_count*2 由调用方保证
+/// [in]  notch_count   陷波点个数（>= 1，否则 -3）
+/// [in]  notch_radius  抑制圆半径（像素，> 0，否则 -3；过大会伤及低频致图像发虚）
+/// [out] out_clean     去周期纹理图（与输入同尺寸 8U 单通道；IDFT 值域可能
+///                     轻微越界，saturate_cast 钳制；malloc 新紧排缓冲，用
+///                     Image2DAlg_FreeImage 释放）
+/// [out] out_defect    缺陷增强显示图（同尺寸 8U 单通道）：|原灰度 − clean|
+///                     逐像素绝对差按全图最大差归一化 ×255（最大差为 0 时
+///                     全黑——无周期成分被滤除）
+/// 返回：0 成功；-1 空指针/空图（in/out_clean/out_defect）；-3 notch 参数非法
+///       （notch_xy 空 / notch_count < 1 / notch_radius <= 0）；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_PeriodicNotchFilter(const Image2DAlg_Image* in,
+                                                     const double* notch_xy, int notch_count,
+                                                     double notch_radius,
+                                                     Image2DAlg_Image* out_clean,
+                                                     Image2DAlg_Image* out_defect);
+
+/// 描述子匹配（FLANN 加速版，契约同 MatchFeatures：kNN(2) + Lowe 比率过滤、
+/// 结果数组归 Image2DAlg_FreeOrbMatches 释放），匹配器换 FLANN 近似最近邻
+/// ——大描述子集合（数千级）显著快于暴力 BF。浮点描述子（SIFT）用 KD-Tree
+/// 索引，二进制（ORB/BRISK/AKAZE）用 LSH 索引；LSH 属近似检索、不保证返回
+/// 满 k 个邻居，邻居不足 2 的对与被比率过滤的对一样直接丢弃。
+/// [in]  d1/d2        两套描述子（type/dim/is_float 必须一致，否则 -3）
+/// [in]  pts1/pts2    与 d1/d2 行序一一对应的关键点（pts1[i] 即 d1 第 i 行的
+///                   关键点，pts2[i] 即 d2 第 i 行；数组长度须 >= d1/d2 的
+///                   count，本库无法校验，不足属调用方错误——同 MatchFeatures）
+/// [in]  ratio        Lowe 比率系数（(0,1]，越界 → -3）
+/// [out] out_matches  malloc 匹配点对数组（复用 Image2DAlg_OrbMatch 结构，用
+///                   Image2DAlg_FreeOrbMatches 释放）：x1/y1 = 图1 关键点，
+///                   x2/y2 = 图2 对应点，distance = 描述子距离（Hamming 或
+///                   L2，随 is_float）；比率过滤后 0 命中不是错误
+///                   （*out_matches = NULL、*out_count = 0、仍返回 0——LSH
+///                   近似 + 严比率下属正常，与 MatchFeatures 的 -2 出口不同）
+/// [out] out_count    匹配对数
+/// 返回：0 成功；-1 空指针/空描述子缓冲/描述子数为 0；-3 参数越界或两描述子
+///       type/dim/is_float 不一致；-4 内存不足；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_MatchFeaturesFlann(const Image2DAlg_Descriptors* d1,
+                                                    const Image2DAlg_Descriptors* d2,
+                                                    const Image2DAlg_Point2f* pts1,
+                                                    const Image2DAlg_Point2f* pts2,
+                                                    double ratio,
+                                                    Image2DAlg_OrbMatch** out_matches,
+                                                    int* out_count);
+
+/// 描述子匹配（双向互为最近版）：正向 d1→d2 与反向 d2→d1 各做 BF kNN(k=2) +
+/// Lowe 比率过滤，只保留"互为最近"的配对——match m=(q→t) 保留当且仅当反向中
+/// t 的 Lowe 过滤后最优匹配是 q。交叉校验比单向比率测试更严（误匹配率更低，
+/// 代价是召回下降），其余契约（校验/输出/0 命中/内存归属）同 MatchFeaturesFlann
+/// （BF 匹配器：二进制 Hamming / 浮点 L2，同 MatchFeatures）。
+/// [in]  d1/d2        两套描述子（type/dim/is_float 必须一致，否则 -3）
+/// [in]  pts1/pts2    与 d1/d2 行序一一对应的关键点（同 MatchFeatures 口径）
+/// [in]  ratio        Lowe 比率系数（(0,1]，越界 → -3）
+/// [out] out_matches  malloc 匹配点对数组（复用 Image2DAlg_OrbMatch 结构，用
+///                   Image2DAlg_FreeOrbMatches 释放；0 命中 = NULL/0/返回 0）
+/// [out] out_count    匹配对数
+/// 返回：0 成功；-1 空指针/空描述子缓冲/描述子数为 0；-3 参数越界或两描述子
+///       type/dim/is_float 不一致；-4 内存不足；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_MatchFeaturesSymmetric(const Image2DAlg_Descriptors* d1,
+                                                        const Image2DAlg_Descriptors* d2,
+                                                        const Image2DAlg_Point2f* pts1,
+                                                        const Image2DAlg_Point2f* pts2,
+                                                        double ratio,
+                                                        Image2DAlg_OrbMatch** out_matches,
+                                                        int* out_count);
+
+/// 全仿射估计（6 自由度：平移 + 旋转 + 各向异性缩放 + 剪切）——比
+/// EstimateAffinePartial（4 DOF）能表达剪切/各向异性形变（如视角倾斜的平面
+/// 工件），约束更弱、对误匹配更敏感；求解口径同 EstimateAffinePartial，
+/// 几何估计换 6 DOF 的 cv::estimateAffine2D（RANSAC）。
+/// [in]  matches/count            匹配点对（如 MatchFeatures / ORBAlign 输出；
+///                                 count >= 3，否则 -2）
+/// [in]  ransac_reproj_threshold  RANSAC 重投影阈值（像素，典型 3.0；<= 0 → -3）
+/// [out] m                        2x3 行主序，方向 in1 → in2（与 ORBAlign /
+///                                 EstimateAffinePartial 一致：图1 点 → 图2 点，
+///                                 可直接接 WarpAffine）；返回非 0 时不写入
+///                                 （保持调用方原值）
+/// [out] out_inliers              RANSAC 内点数（仿射质量指标：>= 10 视为可靠）；
+///                                 校验通过后清零，求解失败/异常时为 0
+/// 返回：0 成功；-1 空指针；-2 点数不足或无法求解；-3 参数越界；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_EstimateAffineFull(const Image2DAlg_OrbMatch* matches,
+                                                    int count,
+                                                    double ransac_reproj_threshold,
+                                                    double m[6], int* out_inliers);
 
 #ifdef __cplusplus
 }

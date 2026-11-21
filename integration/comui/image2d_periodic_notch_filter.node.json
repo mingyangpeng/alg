@@ -1,0 +1,56 @@
+{
+  "node": {
+    "id": "alg.image2d.periodic_notch_filter",
+    "name": "陷波滤波去周期纹理",
+    "group": "2D 图像",
+    "category": "处理",
+    "description": "陷波滤波去周期纹理（频域缺陷增强）：对每个陷波点及其共轭镜像点清除半径 notch_radius 圆内频谱（DC 重叠点自动跳过——保亮度与低频轮廓），抑制布纹/网纹/摩尔纹等周期性成分，输出去纹理 clean 图；被抑制残差即缺陷增强（defect），其统计（defect_max/defect_mean）并入节点消息——缺陷增强图暂以统计消息提供，双图输出待 ABI 扩展；notch_points 为相对 DC 中心的偏移坐标对（取 fourier_spectrum 谱上关于 DC 对称的亮点对），notch_radius 过大会伤及低频致图像发虚"
+  },
+  "runtime": "native",
+  "assembly": "Image2DAlg.dll",
+  "method": "Image2DAlg_ComuiPeriodicNotchFilter",
+  "inputs": [
+    {
+      "name": "输入",
+      "type": "image"
+    }
+  ],
+  "params": [
+    {
+      "name": "notch_points",
+      "label": "陷波点(相对DC)",
+      "type": "text",
+      "default": "",
+      "description": "陷波点偏移坐标对，逗号分隔偶数个数值：cx0,cy0,cx1,cy1,...（相对 DC 中心的偏移量，像素，可负；取 fourier_spectrum 谱上关于 DC 对称的亮点对；至少 1 对、最多 32 对；为空/奇数个/含非数字 → 参数非法）"
+    },
+    {
+      "name": "notch_radius",
+      "label": "抑制半径(px)",
+      "type": "number",
+      "default": 3.0,
+      "min": 0.1,
+      "max": 1000,
+      "description": "陷波抑制圆半径（像素，> 0；过大会伤及低频致图像发虚）"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "去纹理图",
+      "type": "image"
+    }
+  ],
+  "source": {
+    "files": [
+      "integration/comui/Image2DAlg_comui.cpp",
+      "integration/comui/comui_native_abi.h",
+      "src/AlgExport.h",
+      "src/Image2DAlg/Image2DAlg_api.cpp",
+      "src/Image2DAlg/Image2DAlg_Ops.cpp",
+      "src/Image2DAlg/include/Image2DAlg_api.h"
+    ],
+    "includes": [
+      "src",
+      "src/Image2DAlg/include"
+    ]
+  }
+}

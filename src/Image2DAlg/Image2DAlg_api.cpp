@@ -11,7 +11,7 @@ using namespace cv;
 static int g_initialized = 0;
 
 const char* Image2DAlg_GetVersion(void) {
-    return "2.5.0";
+    return "2.6.0";
 }
 
 int Image2DAlg_Init(void) {

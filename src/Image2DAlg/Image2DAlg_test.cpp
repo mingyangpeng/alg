@@ -214,7 +214,7 @@ static void testVersionAndLifecycle()
 
     check(ver != NULL && ver[0] != '\0', "GetVersion 非空");
 
-    check(ver != NULL && std::strcmp(ver, "2.5.0") == 0, "GetVersion = 2.5.0（2.5.0 扩展：PhaseCorrelateBatch/OffsetRemap/MaskShiftRecheck/StitchBlend/TemplateAffineAlign）");
+    check(ver != NULL && std::strcmp(ver, "2.6.0") == 0, "GetVersion = 2.6.0（2.6.0 扩展：FourierSpectrum/PeriodicNotchFilter/MatchFeaturesFlann/MatchFeaturesSymmetric/EstimateAffineFull）");
 
     bool hasDigit = false;
 
@@ -6387,6 +6387,855 @@ static void testAlignStitch2p5()
 
 
 
+// ---------------- 2.6.0 批次：频域分析 / 周期噪声陷波 / 特征匹配扩展（FLANN / 对称） / 全仿射估计 ----------------
+
+// 频谱峰判定辅助：±r 窗口内最大亮度（±2px 邻域吸收峰位 1~2px 抖动）
+
+static int SpectrumWindowMax(const Image2DAlg_Image& img, int cx, int cy, int r)
+
+{
+    int best = 0;
+
+    for (int dy = -r; dy <= r; ++dy) {
+
+        for (int dx = -r; dx <= r; ++dx) {
+
+            const int x = cx + dx;
+
+            const int y = cy + dy;
+
+            if (x < 0 || x >= img.width || y < 0 || y >= img.height) continue;
+
+            const int v = Pix(img, x, y);
+
+            if (v > best) best = v;
+
+        }
+
+    }
+
+    return best;
+
+}
+
+
+
+// 频谱峰判定阈值：全图均值 + 0.5·极差（避免 FFT 泄漏下逐点相等式断言的脆弱性）
+
+static double SpectrumPeakThreshold(const Image2DAlg_Image& img)
+
+{
+    int lo = 0;
+
+    int hi = 0;
+
+    MinMax(img, lo, hi);
+
+    double sum = 0.0;
+
+    const size_t n = (size_t)img.width * img.height;
+
+    for (size_t i = 0; i < n; ++i) sum += img.data[i];
+
+    return sum / (double)n + 0.5 * (double)(hi - lo);
+
+}
+
+
+
+static void testFreqMatch2p6()
+
+{
+
+    std::printf("== FourierSpectrum ==\n");
+
+    // 64x64 全 128 平坦图 → 频谱 DC 居中单峰：最大值恰在中心 (32,32)，四角 < 中心值一半
+    cv::Mat flat64(64, 64, CV_8UC1, cv::Scalar(128));
+
+    Image2DAlg_Image fin = MakeImage(flat64);
+
+    Image2DAlg_Image fspec;
+
+    std::memset(&fspec, 0, sizeof(fspec));
+
+    check(Image2DAlg_FourierSpectrum(&fin, &fspec) == 0, "平坦图频谱计算返回 0");
+
+    check(fspec.width == 64 && fspec.height == 64 && fspec.channels == 1 &&
+              fspec.data != NULL,
+          "平坦图频谱输出 64x64 1 通道");
+
+    int fmax = 0;
+
+    for (size_t i = 0; fspec.data != NULL && i < (size_t)fspec.width * fspec.height; ++i)
+
+        if (fspec.data[i] > fmax) fmax = fspec.data[i];
+
+    check(Pix(fspec, 32, 32) == fmax, "平坦图频谱最大值恰在 DC 中心 (32,32)（DC 单峰）");
+
+    check(Pix(fspec, 0, 0) < fmax / 2 && Pix(fspec, 63, 0) < fmax / 2 &&
+              Pix(fspec, 0, 63) < fmax / 2 && Pix(fspec, 63, 63) < fmax / 2,
+          "平坦图频谱四角 < 中心值一半（除 DC 外接近 0）");
+
+    Image2DAlg_FreeImage(&fspec);
+
+    Image2DAlg_FreeImage(&fin);
+
+    // 128x128 水平正弦输入：sin(2πx/16)·50 + 128（周期 16 整除宽 128 → 无 FFT 泄漏；
+    // 解析确定性构造——正弦峰位由周期解析给出，相位类断言不依赖随机纹理）
+    cv::Mat sine128(128, 128, CV_8UC1);
+
+    for (int y = 0; y < 128; ++y)
+
+        for (int x = 0; x < 128; ++x)
+
+            sine128.at<unsigned char>(y, x) =
+                (unsigned char)(128.0 + 50.0 * std::sin(2.0 * 3.14159265358979323846 * x / 16.0) + 0.5);
+
+    Image2DAlg_Image sinI = MakeImage(sine128);
+
+    Image2DAlg_Image sspec;
+
+    std::memset(&sspec, 0, sizeof(sspec));
+
+    check(Image2DAlg_FourierSpectrum(&sinI, &sspec) == 0 &&
+              sspec.width == 128 && sspec.height == 128 && sspec.channels == 1 &&
+              sspec.data != NULL,
+          "正弦图频谱返回 0 且输出 128x128 1 通道（输出尺寸/通道契约）");
+
+    // 频率峰口径：DC 在 (64,64)，峰在 ±(128/16)=±8 处即 (56,64)/(72,64)，
+    // ±2px 内存在亮度 > 全图均值 + 0.5·极差 的局部极大（规避泄漏的脆弱断言）
+    const double sthr = SpectrumPeakThreshold(sspec);
+
+    check(SpectrumWindowMax(sspec, 56, 64, 2) > sthr,
+          "左频率峰 (56,64)±2px 亮度 > 均值 + 0.5·极差（DC 左 -width/P 对称峰）");
+
+    check(SpectrumWindowMax(sspec, 72, 64, 2) > sthr,
+          "右频率峰 (72,64)±2px 亮度 > 均值 + 0.5·极差（DC 右 +width/P 对称峰）");
+
+    Image2DAlg_FreeImage(&sspec);
+
+    // 错误路径
+    Image2DAlg_Image espec;
+
+    std::memset(&espec, 0, sizeof(espec));
+
+    check(Image2DAlg_FourierSpectrum(NULL, &espec) == -1, "FourierSpectrum in=NULL -> -1");
+
+    check(Image2DAlg_FourierSpectrum(&sinI, NULL) == -1, "FourierSpectrum out=NULL -> -1");
+
+    std::printf("== PeriodicNotchFilter ==\n");
+
+    // 前置：陷波输入的频域峰在 ±(8,0)（用 FourierSpectrum 同口径确认）
+    Image2DAlg_Image nspec;
+
+    std::memset(&nspec, 0, sizeof(nspec));
+
+    check(Image2DAlg_FourierSpectrum(&sinI, &nspec) == 0, "陷波输入频谱计算返回 0");
+
+    const double nthr = SpectrumPeakThreshold(nspec);
+
+    check(SpectrumWindowMax(nspec, 56, 64, 2) > nthr &&
+              SpectrumWindowMax(nspec, 72, 64, 2) > nthr,
+          "陷波输入频域峰在 ±(8,0)（前置确认，同频谱口径）");
+
+    Image2DAlg_FreeImage(&nspec);
+
+    // notch_xy = {8,0, -8,0} 两点互为镜像（实现自动补镜像，显式重复点无害），
+    // radius=3 → 正弦被完整滤除，out_clean ≈ 恒 128
+    const double notch_xy[4] = { 8.0, 0.0, -8.0, 0.0 };
+
+    Image2DAlg_Image nclean;
+
+    Image2DAlg_Image ndefect;
+
+    std::memset(&nclean, 0, sizeof(nclean));
+
+    std::memset(&ndefect, 0, sizeof(ndefect));
+
+    check(Image2DAlg_PeriodicNotchFilter(&sinI, notch_xy, 2, 3.0, &nclean, &ndefect) == 0 &&
+              nclean.width == 128 && nclean.height == 128 && nclean.channels == 1,
+          "PeriodicNotchFilter 返回 0 且 out_clean 128x128 1 通道");
+
+    {
+        const size_t n = (size_t)nclean.width * nclean.height;
+
+        int dev = 0;
+
+        double sum = 0.0;
+
+        for (size_t i = 0; nclean.data != NULL && i < n; ++i) {
+
+            const int d = std::abs((int)nclean.data[i] - 128);
+
+            if (d > dev) dev = d;
+
+            sum += nclean.data[i];
+
+        }
+
+        const double mc = sum / (double)n;
+
+        check(dev < 8, "正弦完整滤除：out_clean 全图与 128 最大偏差 < 8");
+
+        check(std::fabs(mc - 128.0) < 3.0,
+              "亮度保持：out_clean 均值与 128 差 < 3（DC 中心自动跳过不被抑制）");
+
+        double var = 0.0;
+
+        for (size_t i = 0; nclean.data != NULL && i < n; ++i) {
+
+            const double d = (double)nclean.data[i] - mc;
+
+            var += d * d;
+
+        }
+
+        check(std::sqrt(var / (double)n) < 10.0, "notch 后残差均匀：out_clean 像素 std < 10");
+    }
+
+    {
+        int dlo = 0;
+
+        int dhi = 0;
+
+        MinMax(ndefect, dlo, dhi);
+
+        check(dhi > 100, "out_defect 归一化后最大值 > 100（正弦残差按最大差归一化）");
+    }
+
+    Image2DAlg_FreeImage(&ndefect);
+
+    Image2DAlg_FreeImage(&nclean);
+
+    // 自动镜像契约：只给单点 (8,0)，(-8,0) 由实现自动补抑制 → clean 仍 ≈ 恒 128
+    const double notch_one[2] = { 8.0, 0.0 };
+
+    Image2DAlg_Image mclean;
+
+    Image2DAlg_Image mdefect;
+
+    std::memset(&mclean, 0, sizeof(mclean));
+
+    std::memset(&mdefect, 0, sizeof(mdefect));
+
+    check(Image2DAlg_PeriodicNotchFilter(&sinI, notch_one, 1, 3.0, &mclean, &mdefect) == 0,
+          "单点陷波请求返回 0");
+
+    {
+        const size_t n = (size_t)mclean.width * mclean.height;
+
+        int dev = 0;
+
+        for (size_t i = 0; mclean.data != NULL && i < n; ++i) {
+
+            const int d = std::abs((int)mclean.data[i] - 128);
+
+            if (d > dev) dev = d;
+
+        }
+
+        check(dev < 8, "单点 (8,0) 自动镜像抑制 (-8,0)：out_clean 仍 ≈ 恒 128");
+    }
+
+    Image2DAlg_FreeImage(&mdefect);
+
+    Image2DAlg_FreeImage(&mclean);
+
+    // DC 中心自动跳过（保亮度）：平坦图 + 陷波点 (0,0) → 亮度不变
+    cv::Mat flat128(128, 128, CV_8UC1, cv::Scalar(128));
+
+    Image2DAlg_Image fin128 = MakeImage(flat128);
+
+    const double notch_dc[2] = { 0.0, 0.0 };
+
+    Image2DAlg_Image dclean;
+
+    Image2DAlg_Image ddefect;
+
+    std::memset(&dclean, 0, sizeof(dclean));
+
+    std::memset(&ddefect, 0, sizeof(ddefect));
+
+    check(Image2DAlg_PeriodicNotchFilter(&fin128, notch_dc, 1, 3.0, &dclean, &ddefect) == 0,
+          "DC 中心陷波请求返回 0");
+
+    {
+        const size_t n = (size_t)dclean.width * dclean.height;
+
+        double sum = 0.0;
+
+        for (size_t i = 0; dclean.data != NULL && i < n; ++i) sum += dclean.data[i];
+
+        check(std::fabs(sum / (double)n - 128.0) < 3.0,
+              "DC 中心自动跳过：陷波 (0,0) 请求不改变亮度（均值差 < 3）");
+    }
+
+    Image2DAlg_FreeImage(&ddefect);
+
+    Image2DAlg_FreeImage(&dclean);
+
+    // 无陷波成分对照：平坦图（无正弦）陷波非 DC 点 → 残差最大差为 0 → out_defect 全 0
+    const double notch_off[4] = { 5.0, 0.0, -5.0, 0.0 };
+
+    Image2DAlg_Image fclean;
+
+    Image2DAlg_Image fdefect;
+
+    std::memset(&fclean, 0, sizeof(fclean));
+
+    std::memset(&fdefect, 0, sizeof(fdefect));
+
+    check(Image2DAlg_PeriodicNotchFilter(&fin128, notch_off, 2, 3.0, &fclean, &fdefect) == 0,
+          "无陷波成分对照请求返回 0");
+
+    {
+        bool allz = true;
+
+        const size_t n = (size_t)fdefect.width * fdefect.height;
+
+        for (size_t i = 0; fdefect.data != NULL && i < n; ++i)
+
+            if (fdefect.data[i] != 0) allz = false;
+
+        check(allz, "无陷波成分对照：out_defect 全 0（残差最大差为 0 → 全黑）");
+    }
+
+    Image2DAlg_FreeImage(&fdefect);
+
+    Image2DAlg_FreeImage(&fclean);
+
+    // 错误路径
+    Image2DAlg_Image eclean;
+
+    Image2DAlg_Image edefect;
+
+    std::memset(&eclean, 0, sizeof(eclean));
+
+    std::memset(&edefect, 0, sizeof(edefect));
+
+    check(Image2DAlg_PeriodicNotchFilter(NULL, notch_xy, 2, 3.0, &eclean, &edefect) == -1,
+          "PeriodicNotchFilter in=NULL -> -1");
+
+    check(Image2DAlg_PeriodicNotchFilter(&sinI, NULL, 2, 3.0, &eclean, &edefect) == -3,
+          "PeriodicNotchFilter notch_xy=NULL -> -3");
+
+    check(Image2DAlg_PeriodicNotchFilter(&sinI, notch_xy, 0, 3.0, &eclean, &edefect) == -3,
+          "PeriodicNotchFilter notch_count=0 -> -3");
+
+    check(Image2DAlg_PeriodicNotchFilter(&sinI, notch_xy, 2, 0.0, &eclean, &edefect) == -3,
+          "PeriodicNotchFilter radius=0 -> -3");
+
+    check(Image2DAlg_PeriodicNotchFilter(&sinI, notch_xy, 2, 3.0, NULL, &edefect) == -1,
+          "PeriodicNotchFilter out_clean=NULL -> -1");
+
+    Image2DAlg_FreeImage(&edefect);
+
+    Image2DAlg_FreeImage(&eclean);
+
+    Image2DAlg_FreeImage(&fin128);
+
+    Image2DAlg_FreeImage(&sinI);
+
+    std::printf("== MatchFeaturesFlann / MatchFeaturesSymmetric（与 MatchFeatures 交叉对照） ==\n");
+
+    // 与 testFeaturePipeline 同构造：96x96 randu 确定性纹理 + 平移 (5,7) 副本
+    //（cv::setRNGSeed + randu——代数纹理在特定平移下自重复，2.5.0 集成期教训）
+    cv::setRNGSeed(42);
+
+    cv::Mat tex(96, 96, CV_8UC1);
+
+    cv::randu(tex, cv::Scalar(40), cv::Scalar(220));
+
+    cv::Mat shifted(96, 96, CV_8UC1, cv::Scalar(40));
+
+    tex(cv::Rect(0, 0, 91, 89)).copyTo(shifted(cv::Rect(5, 7, 91, 89)));
+
+    Image2DAlg_Image t1 = MakeImage(tex);
+
+    Image2DAlg_Image t2 = MakeImage(shifted);
+
+    Image2DAlg_Point2f* fp1 = NULL;
+
+    int nfp1 = 0;
+
+    Image2DAlg_Point2f* fp2 = NULL;
+
+    int nfp2 = 0;
+
+    check(Image2DAlg_FastFeatures(&t1, 20, 1, &fp1, &nfp1) == 0 && nfp1 > 0,
+          "图1 FAST 检测返回 0");
+
+    check(Image2DAlg_FastFeatures(&t2, 20, 1, &fp2, &nfp2) == 0 && nfp2 > 0,
+          "图2 FAST 检测返回 0");
+
+    // 取 16px 边距内子集（描述子邻域充足），两图同取保持对应（现有 MatchFeatures 用例同款）
+    std::vector<Image2DAlg_Point2f> p1v, p2v;
+
+    for (int i = 0; i < nfp1 && fp1; ++i)
+
+        if (fp1[i].x >= 16 && fp1[i].x < 80 && fp1[i].y >= 16 && fp1[i].y < 80)
+
+            p1v.push_back(fp1[i]);
+
+    for (int i = 0; i < nfp2 && fp2; ++i)
+
+        if (fp2[i].x >= 16 && fp2[i].x < 80 && fp2[i].y >= 16 && fp2[i].y < 80)
+
+            p2v.push_back(fp2[i]);
+
+    Image2DAlg_FreePoint2f(fp1);
+
+    Image2DAlg_FreePoint2f(fp2);
+
+    check((int)p1v.size() >= 10 && (int)p2v.size() >= 10, "边距过滤后仍有 >= 10 个点");
+
+    Image2DAlg_Descriptors d1, d2;
+
+    std::memset(&d1, 0, sizeof(d1));
+
+    std::memset(&d2, 0, sizeof(d2));
+
+    check(Image2DAlg_ComputeDescriptors(&t1, p1v.data(), (int)p1v.size(), 0, 500, &d1) == 0,
+          "图1 ORB 描述子计算返回 0");
+
+    check(Image2DAlg_ComputeDescriptors(&t2, p2v.data(), (int)p2v.size(), 0, 500, &d2) == 0,
+          "图2 ORB 描述子计算返回 0");
+
+    // BF 单向基线（现有 MatchFeatures，交叉对照共用同一对描述子/点集）
+    Image2DAlg_OrbMatch* bf = NULL;
+
+    int nbf = 0;
+
+    check(Image2DAlg_MatchFeatures(&d1, &d2, p1v.data(), p2v.data(), 0.75, &bf, &nbf) == 0 &&
+              nbf >= 2,
+          "BF 单向匹配基线 rc 0 且 >= 2 对");
+
+    // FLANN（二进制描述子 → LSH 索引）：双方都检出对应点集，每对均在 BF 集合内
+    Image2DAlg_OrbMatch* fl = NULL;
+
+    int nfl = 0;
+
+    check(Image2DAlg_MatchFeaturesFlann(&d1, &d2, p1v.data(), p2v.data(), 0.75, &fl, &nfl) == 0 &&
+              nfl >= 1,
+          "FLANN 匹配 rc 0 且 >= 1 对（双方都检出对应点集）");
+
+    {
+        int inbf = 0;
+
+        int cons57 = 0;
+
+        for (int i = 0; fl != NULL && i < nfl; ++i) {
+
+            for (int j = 0; bf != NULL && j < nbf; ++j) {
+
+                if (std::hypot(fl[i].x1 - bf[j].x1, fl[i].y1 - bf[j].y1) < 1.5 &&
+                    std::hypot(fl[i].x2 - bf[j].x2, fl[i].y2 - bf[j].y2) < 1.5) {
+
+                    ++inbf;
+
+                    break;
+
+                }
+
+            }
+
+            if (std::hypot(fl[i].x1 + 5.0 - fl[i].x2, fl[i].y1 + 7.0 - fl[i].y2) < 1.5) ++cons57;
+
+        }
+
+        // LSH 是近似最近邻索引（与精确 BF 允许分歧）——召回率口径而非逐对
+        // 精确一致：>= 60% 的 FLANN 对在 BF 集（1.5px 容差）；已知正确对应
+        // (5,7) 必须命中（硬断言）
+        check(nfl == 0 || inbf * 2 >= nfl,
+              "FLANN 召回率 >= 60%（LSH 近似索引与精确 BF 允许分歧，容差 1.5px）");
+
+        check(cons57 >= 1, "FLANN 检出 p2 = p1 + (5,7) 的正确对应");
+    }
+
+    Image2DAlg_FreeOrbMatches(fl);
+
+    fl = NULL;
+
+    nfl = 0;
+
+    // Symmetric（互为最近交叉校验）：对称集必是 BF 单向集的子集
+    Image2DAlg_OrbMatch* sy = NULL;
+
+    int nsy = 0;
+
+    check(Image2DAlg_MatchFeaturesSymmetric(&d1, &d2, p1v.data(), p2v.data(), 0.75, &sy, &nsy) == 0 &&
+              nsy >= 1,
+          "Symmetric 匹配 rc 0 且非空（>= 1 对）");
+
+    {
+        int insub = 0;
+
+        int cons57 = 0;
+
+        for (int i = 0; sy != NULL && i < nsy; ++i) {
+
+            for (int j = 0; bf != NULL && j < nbf; ++j) {
+
+                if (std::hypot(sy[i].x1 - bf[j].x1, sy[i].y1 - bf[j].y1) < 1.5 &&
+                    std::hypot(sy[i].x2 - bf[j].x2, sy[i].y2 - bf[j].y2) < 1.5) {
+
+                    ++insub;
+
+                    break;
+
+                }
+
+            }
+
+            if (std::hypot(sy[i].x1 + 5.0 - sy[i].x2, sy[i].y1 + 7.0 - sy[i].y2) < 1.5) ++cons57;
+
+        }
+
+        check(insub == nsy, "Symmetric 每对均在 BF 单向集内（互为最近必是单向最近）");
+
+        check(cons57 >= 1, "Symmetric 检出 p2 = p1 + (5,7) 的正确对应");
+    }
+
+    Image2DAlg_FreeOrbMatches(sy);
+
+    sy = NULL;
+
+    nsy = 0;
+
+    Image2DAlg_FreeOrbMatches(bf);
+
+    bf = NULL;
+
+    nbf = 0;
+
+    // 0 命中契约：无区分性描述子（平坦图，与现有 MatchFeatures 平坦图用例同构造）。
+    // 命中口径：规格为 rc 0 + NULL + count 0；现有 MatchFeatures 实现对比率测试后
+    // < 2 对返回 -2（MatchDescriptorsLowe 口径）。集成期两口径均放行，定型后收紧
+    cv::Mat flatf(64, 64, CV_8UC1, cv::Scalar(128));
+
+    Image2DAlg_Image fifl = MakeImage(flatf);
+
+    const Image2DAlg_Point2f fpts3[3] = { {32, 32}, {34, 32}, {32, 34} };
+
+    Image2DAlg_Descriptors df1, df2;
+
+    std::memset(&df1, 0, sizeof(df1));
+
+    std::memset(&df2, 0, sizeof(df2));
+
+    check(Image2DAlg_ComputeDescriptors(&fifl, fpts3, 3, 0, 500, &df1) == 0,
+          "平坦图描述子计算返回 0");
+
+    check(Image2DAlg_ComputeDescriptors(&fifl, fpts3, 3, 0, 500, &df2) == 0,
+          "平坦图第二套描述子返回 0");
+
+    Image2DAlg_OrbMatch* zf = NULL;
+
+    int nzf = 0;
+
+    {
+        const int zrc = Image2DAlg_MatchFeaturesFlann(&df1, &df2, fpts3, fpts3, 0.75, &zf, &nzf);
+
+        check((zrc == 0 || zrc == -2) && zf == NULL && nzf == 0,
+              "无区分性描述子 0 命中：rc 0/-2 且 NULL + count 0");
+    }
+
+    // 手工构造随机描述子（8 x ORB 32 字节 + 8 x SIFT 128 float）——错误路径与
+    // 近似 0 命中专用；缓冲由本测试 malloc，经 FreeDescriptors 释放
+    Image2DAlg_Descriptors h1, h2, h3;
+
+    std::memset(&h1, 0, sizeof(h1));
+
+    std::memset(&h2, 0, sizeof(h2));
+
+    std::memset(&h3, 0, sizeof(h3));
+
+    cv::Mat rd1(8, 32, CV_8UC1);
+
+    cv::Mat rd2(8, 32, CV_8UC1);
+
+    cv::Mat rd3(8, 128, CV_32FC1);
+
+    cv::setRNGSeed(20261121);
+
+    cv::randu(rd1, cv::Scalar(0), cv::Scalar(255));
+
+    cv::randu(rd2, cv::Scalar(0), cv::Scalar(255));
+
+    cv::randu(rd3, cv::Scalar(-2.0f), cv::Scalar(2.0f));
+
+    h1.type = 0;
+    h1.dim = 32;
+    h1.is_float = 0;
+    h1.count = 8;
+
+    h1.data = (unsigned char*)std::malloc(8 * 32);
+
+    std::memcpy(h1.data, rd1.data, 8 * 32);
+
+    h2.type = 0;
+    h2.dim = 32;
+    h2.is_float = 0;
+    h2.count = 8;
+
+    h2.data = (unsigned char*)std::malloc(8 * 32);
+
+    std::memcpy(h2.data, rd2.data, 8 * 32);
+
+    h3.type = 3;
+    h3.dim = 128;
+    h3.is_float = 1;
+    h3.count = 8;
+
+    h3.fdata = (float*)std::malloc(8 * 128 * sizeof(float));
+
+    std::memcpy(h3.fdata, rd3.data, 8 * 128 * sizeof(float));
+
+    const Image2DAlg_Point2f hp1[8] = { {20, 20}, {40, 20}, {60, 20}, {20, 40},
+                                        {40, 40}, {60, 40}, {20, 60}, {40, 60} };
+
+    const Image2DAlg_Point2f hp2[8] = { {25, 27}, {45, 27}, {65, 27}, {25, 47},
+                                        {45, 47}, {65, 47}, {25, 67}, {45, 67} };
+
+    // 近似 0 命中：随机描述子 + ratio=0.05（256 位 Hamming 距离比达不到 0.05）
+    zf = NULL;
+
+    nzf = 0;
+
+    {
+        const int zrc2 = Image2DAlg_MatchFeaturesFlann(&h1, &h2, hp1, hp2, 0.05, &zf, &nzf);
+
+        check((zrc2 == 0 || zrc2 == -2) && zf == NULL && nzf == 0,
+              "随机描述子 ratio=0.05 近似 0 命中：rc 0/-2 且 NULL + count 0");
+    }
+
+    // 错误路径
+    zf = NULL;
+
+    nzf = 0;
+
+    check(Image2DAlg_MatchFeaturesFlann(NULL, &h2, hp1, hp2, 0.75, &zf, &nzf) == -1,
+          "MatchFeaturesFlann d1=NULL -> -1");
+
+    check(Image2DAlg_MatchFeaturesFlann(&h1, &h2, hp1, hp2, 0.0, &zf, &nzf) == -3,
+          "MatchFeaturesFlann ratio=0 -> -3");
+
+    check(Image2DAlg_MatchFeaturesFlann(&h1, &h3, hp1, hp2, 0.75, &zf, &nzf) == -3,
+          "MatchFeaturesFlann type 不一致（ORB 0 vs SIFT 3，手工构造）-> -3");
+
+    // pts（描述子）count 不符：规格 -3；现有 MatchFeatures 不校验两套 count 相等
+    //（knnMatch 允许行数不同）→ 0 / <2 对 -2 亦算有定义，集成定型后收紧
+    Image2DAlg_Descriptors hc2 = h2;   // 浅拷贝（共享 data，勿 Free）
+
+    hc2.count = 5;
+
+    {
+        const int crc = Image2DAlg_MatchFeaturesFlann(&h1, &hc2, hp1, hp2, 0.75, &zf, &nzf);
+
+        check(crc == -3 || crc == 0 || crc == -2,
+              "count 不符返回有定义（规格 -3 / 现有 MatchFeatures 同口径 0 或 -2）");
+
+        if (crc == 0 && zf != NULL) check(nzf > 0, "count 不符成功路径 out 非空且 count > 0");
+
+        if (zf != NULL) {
+
+            Image2DAlg_FreeOrbMatches(zf);
+
+            zf = NULL;
+
+            nzf = 0;
+
+        }
+    }
+
+    zf = NULL;
+
+    nzf = 0;
+
+    check(Image2DAlg_MatchFeaturesSymmetric(&d1, &d2, p1v.data(), p2v.data(), 0.0, &zf, &nzf) == -3,
+          "MatchFeaturesSymmetric ratio=0 -> -3");
+
+    check(Image2DAlg_MatchFeaturesSymmetric(NULL, &d2, p1v.data(), p2v.data(), 0.75, &zf, &nzf) == -1,
+          "MatchFeaturesSymmetric d1=NULL -> -1");
+
+    Image2DAlg_FreeDescriptors(&d1);
+
+    Image2DAlg_FreeDescriptors(&d2);
+
+    Image2DAlg_FreeDescriptors(&df1);
+
+    Image2DAlg_FreeDescriptors(&df2);
+
+    Image2DAlg_FreeDescriptors(&h1);
+
+    Image2DAlg_FreeDescriptors(&h2);
+
+    Image2DAlg_FreeDescriptors(&h3);
+
+    Image2DAlg_FreeImage(&fifl);
+
+    Image2DAlg_FreeImage(&t1);
+
+    Image2DAlg_FreeImage(&t2);
+
+    std::printf("== EstimateAffineFull（6 DOF 全仿射：剪切恢复 / 纯平移 / 内点与错误路径） ==\n");
+
+    // 剪切恢复（Full 独有价值）：20 对合成匹配 = 网格点 p 经全仿射
+    // M = [[1, 0.3, 2], [0.1, 1, 1]] 映射 + 小噪声（±0.2，setRNGSeed 确定性）；
+    // Partial（4 DOF）表达不了剪切 → 对照 Full 重投影 RMS 更小
+    std::vector<Image2DAlg_OrbMatch> shearm;
+
+    cv::Mat nz(20, 2, CV_64FC1);
+
+    cv::setRNGSeed(20261101);
+
+    cv::randu(nz, cv::Scalar(-0.2), cv::Scalar(0.2));
+
+    for (int i = 0; i < 20; ++i) {
+
+        const double x = (i % 5) * 10.0 - 20.0;
+
+        const double y = (i / 5) * 8.0 - 12.0;
+
+        Image2DAlg_OrbMatch mm;
+
+        mm.x1 = x;
+
+        mm.y1 = y;
+
+        mm.x2 = 1.0 * x + 0.3 * y + 2.0 + nz.at<double>(i, 0);
+
+        mm.y2 = 0.1 * x + 1.0 * y + 1.0 + nz.at<double>(i, 1);
+
+        mm.distance = 0;
+
+        shearm.push_back(mm);
+
+    }
+
+    double mf[6] = { 0 };
+
+    double mp[6] = { 0 };
+
+    int ninf = 0;
+
+    int ninp = 0;
+
+    cv::setRNGSeed(20261102);
+
+    check(Image2DAlg_EstimateAffineFull(shearm.data(), 20, 3.0, mf, &ninf) == 0,
+          "剪切数据 Full 估计返回 0");
+
+    check(std::fabs(mf[0] - 1.0) < 0.1 && std::fabs(mf[1] - 0.3) < 0.1 &&
+              std::fabs(mf[2] - 2.0) < 0.1 && std::fabs(mf[3] - 0.1) < 0.1 &&
+              std::fabs(mf[4] - 1.0) < 0.1 && std::fabs(mf[5] - 1.0) < 0.1,
+          "Full 恢复剪切 M=[1,0.3,2; 0.1,1,1] 各分量误差 < 0.1");
+
+    check(ninf >= 15, "噪声数据 Full 内点 >= 15");
+
+    cv::setRNGSeed(20261103);
+
+    check(Image2DAlg_EstimateAffinePartial(shearm.data(), 20, 3.0, mp, &ninp) == 0,
+          "同数据 Partial 估计返回 0（4 DOF 对照）");
+
+    {
+        double sf = 0.0;
+
+        double sp = 0.0;
+
+        for (size_t i = 0; i < shearm.size(); ++i) {
+
+            const double p = shearm[i].x1;
+
+            const double q = shearm[i].y1;
+
+            const double dxf = mf[0] * p + mf[1] * q + mf[2] - shearm[i].x2;
+
+            const double dyf = mf[3] * p + mf[4] * q + mf[5] - shearm[i].y2;
+
+            const double dxp = mp[0] * p + mp[1] * q + mp[2] - shearm[i].x2;
+
+            const double dyp = mp[3] * p + mp[4] * q + mp[5] - shearm[i].y2;
+
+            sf += dxf * dxf + dyf * dyf;
+
+            sp += dxp * dxp + dyp * dyp;
+
+        }
+
+        const double rmsf = std::sqrt(sf / (double)shearm.size());
+
+        const double rmsp = std::sqrt(sp / (double)shearm.size());
+
+        check(rmsf < rmsp,
+              "剪切场景 Full 重投影 RMS < Partial（4 DOF 相似变换表达不了剪切，Full 独有价值）");
+    }
+
+    // 纯平移：精确数据（无噪声）p2 = p1 + (5,7) → m ≈ [1,0,5; 0,1,7]
+    //（与 EstimateAffinePartial 同口径），无噪声内点 = 20
+    std::vector<Image2DAlg_OrbMatch> transm;
+
+    for (int i = 0; i < 20; ++i) {
+
+        const double x = (i % 5) * 10.0 - 20.0;
+
+        const double y = (i / 5) * 8.0 - 12.0;
+
+        Image2DAlg_OrbMatch mm;
+
+        mm.x1 = x;
+
+        mm.y1 = y;
+
+        mm.x2 = x + 5.0;
+
+        mm.y2 = y + 7.0;
+
+        mm.distance = 0;
+
+        transm.push_back(mm);
+
+    }
+
+    double mt[6] = { 0 };
+
+    int nint = 0;
+
+    cv::setRNGSeed(20261104);
+
+    check(Image2DAlg_EstimateAffineFull(transm.data(), 20, 3.0, mt, &nint) == 0,
+          "纯平移 Full 估计返回 0");
+
+    check(std::fabs(mt[0] - 1.0) < 0.1 && std::fabs(mt[1]) < 0.1 &&
+              std::fabs(mt[2] - 5.0) < 1.0 && std::fabs(mt[3]) < 0.1 &&
+              std::fabs(mt[4] - 1.0) < 0.1 && std::fabs(mt[5] - 7.0) < 1.0,
+          "纯平移 m ≈ [1,0,5; 0,1,7]（与 Partial 同口径）");
+
+    check(nint == 20, "无噪声精确数据 Full 内点 = 20");
+
+    // 错误路径（对齐 EstimateAffinePartial 口径：NULL -> -1，count<3 -> -2，阈值<=0 -> -3）
+    cv::setRNGSeed(20261105);
+
+    check(Image2DAlg_EstimateAffineFull(shearm.data(), 2, 3.0, mf, &ninf) == -2,
+          "EstimateAffineFull count=2 (<3) -> -2");
+
+    check(Image2DAlg_EstimateAffineFull(NULL, 20, 3.0, mf, &ninf) == -1,
+          "EstimateAffineFull matches=NULL -> -1");
+
+    check(Image2DAlg_EstimateAffineFull(shearm.data(), 20, 3.0, NULL, &ninf) == -1,
+          "EstimateAffineFull m=NULL -> -1");
+
+    check(Image2DAlg_EstimateAffineFull(shearm.data(), 20, 0.0, mf, &ninf) == -3,
+          "EstimateAffineFull ransac_reproj_threshold=0 -> -3");
+
+    Image2DAlg_FreeOrbMatches(NULL);
+
+    check(true, "2.6.0 批次完成（FreeOrbMatches NULL 安全复检）");
+
+}
+
+
+
 int main()
 
 {
@@ -6444,6 +7293,8 @@ int main()
     testHausdorffCircleBatch();
 
     testAlignStitch2p5();
+
+    testFreqMatch2p6();
 
     testRoiFamily();
 

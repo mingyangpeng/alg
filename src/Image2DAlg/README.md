@@ -1,6 +1,6 @@
 ﻿# Image2DAlg —— 通用 2D 模块
 
-`src/Image2DAlg` 是面向 ComUI 宿主的通用 2D 算法库：图像读取、通用处理、测量/缺陷检测，以及标定接口类（`Image2DAlg_Calib`）。当前版本 **2.5.0**（87 个通用算子：处理 27 + 特征 14 + 测量 41 + 跟踪配准立体 5；另有 Init / ReadImage / GetVersion / Free* 等生命周期与释放接口）。2.5.0 新增对位/拼接流水线：批量相位配准 / 偏移重采样 / 掩膜复核 / 拼接融合 / 模板复合对位。
+`src/Image2DAlg` 是面向 ComUI 宿主的通用 2D 算法库：图像读取、通用处理、测量/缺陷检测，以及标定接口类（`Image2DAlg_Calib`）。当前版本 **2.6.0**（92 个通用算子：处理 29 + 特征 17 + 测量 41 + 跟踪配准立体 5；另有 Init / ReadImage / GetVersion / Free* 等生命周期与释放接口）。2.5.0 新增对位/拼接流水线：批量相位配准 / 偏移重采样 / 掩膜复核 / 拼接融合 / 模板复合对位。2.6.0 新增频域缺陷检测与匹配链路强化：幅度谱显示 / 陷波滤波去周期纹理（频域 2 个，入处理组——同 WarpPolar/OffsetRemap 归属先例，不另设频域分组）；FLANN 大集合匹配 / 双向互为最近匹配 / 全仿射估计（匹配 3 个，入特征组——Descriptors/OrbMatch 容器接口，v1 节点无法持有，C API only）。
 
 ## 定位与依赖
 
@@ -69,6 +69,8 @@ ComUI 适配层在 `integration/comui/Image2DAlg_comui.cpp`，节点声明在 `i
 | `Image2DAlg_OffsetRemap(in, dx, dy, interpolation, out)` | 同输入 | 偏移重采样（2.5.0）：dst(x,y)=src(x−dx,y−dy)，把"内容平移了 (dx,dy)"的图搬回原位（对位流水线回正步）；越界补 0，interpolation 0=最近邻（掩膜/二值图，避免插值产生非 0/255 过渡灰度）/1=双线性（灰度/连续图），其他 -3 |
 | `Image2DAlg_MaskShiftRecheck(golden_mask, current_mask, dx, dy, &matched, &new_cnt, &missed_cnt)` | —（输出 3 个计数） | 掩膜平移复核（2.5.0）：golden 缺陷位图按对位偏移平移采样 shifted(x,y)=golden(x−dx,y−dy)（最近邻，掩膜不做亚像素插值）后与当前掩膜逐像素比对，三计数 = 确认/新增/消失缺陷；两掩膜均须 8U 单通道且同尺寸，dx/dy 来自对位结果（符号语义 = golden 内容相对 current 平移 (dx,dy)） |
 | `Image2DAlg_StitchBlend(base, next, dx, dy, &origin_x, &origin_y, out)` | 同输入 | 两图拼接融合（2.5.0）：next 相对 base 平移 (dx,dy)（floor 取整整数拼接，亚像素精拼先走 OffsetRemap），画布 = 两矩形包围盒，重叠区沿 X 线性渐变（w_base 起点 1→终点 0，重叠宽 1 像素特例 0.5，非重叠区直接拷贝）；out_origin = base 原点在画布中的位置（恒 ≥ 0），画布尺寸读 out->width/height |
+| `Image2DAlg_FourierSpectrum(in, out)` | 1 | 幅度谱显示图（2.6.0）：灰度 → 0 补边到最优 DFT 尺寸（getOptimalDFTSize，宽高各自）→ 复数 DFT → log(1+幅度) min-max 归一化（全图同值输出全 0）→ 象限重排 DC 居中 → 裁回原尺寸；未加窗（工业谱显示口径，补边区边缘能量会进入谱图）；周期纹理（布纹/网纹/摩尔纹）呈关于 DC 对称的亮点对——PeriodicNotchFilter 选陷波点的直接依据 |
+| `Image2DAlg_PeriodicNotchFilter(in, notch_xy, notch_count, notch_radius, out_clean, out_defect)` | 1（clean/defect 双输出） | 陷波滤波去周期纹理（2.6.0）：陷波点 = 相对 DC 中心偏移（像素，可负，取谱图上关于 DC 对称的亮点对），自动清共轭镜像点（两点重合只清一次），与 DC 中心重叠的陷波点自动跳过（保亮度与低频轮廓）；out_clean IDFT 值域 8U 钳制；out_defect = \|原灰度 − clean\| 按全图最大差归一化 ×255（无周期成分被滤除 → 全 0）；notch_count < 1 / notch_radius ≤ 0 → -3 |
 
 ## 测量 / 缺陷检测
 
@@ -116,7 +118,7 @@ ComUI 适配层在 `integration/comui/Image2DAlg_comui.cpp`，节点声明在 `i
 
 测量输入为非零即前景的二值语义；彩色输入内部先转灰度。无结果时返回 `0` 且 `count=0`。
 
-## 特征点与匹配对位（2.0.0 / 2.1.0）
+## 特征点与匹配对位（2.0.0 / 2.1.0 / 2.6.0）
 
 2.0.0 特征点族（大形变对位前置）：
 
@@ -138,7 +140,15 @@ ComUI 适配层在 `integration/comui/Image2DAlg_comui.cpp`，节点声明在 `i
 | `Image2DAlg_EstimateAffinePartial(matches, count, thr, m[6], &inliers)` | 部分仿射估计（4 DOF：旋转+等比缩放+平移，工业对位首选）：RANSAC；count < 3 → -2，thr <= 0 → -3；`m` 为 in1→in2 的 2x3 行主序（同 ORBAlign 方向，可接 WarpAffine） |
 | `Image2DAlg_FindHomography(matches, count, thr, h[9], &inliers)` | 单应估计（3x3 透视，可接 WarpPerspective）：RANSAC；count < 4 → -2，共线/退化 → -2，thr <= 0 → -3；`h` 为 in1→in2 行主序、h[8]=1 |
 
-典型链路：`FastFeatures → ComputeDescriptors → MatchFeatures → EstimateAffinePartial/FindHomography → WarpAffine/WarpPerspective`。
+2.6.0 匹配链路强化（Descriptors/OrbMatch 容器接口，v1 节点无法持有，C API only——同 ComputeFeature 先例）：
+
+| 函数 | 说明 |
+|------|------|
+| `Image2DAlg_MatchFeaturesFlann(d1, d2, pts1, pts2, ratio, &matches, &count)` | FLANN 大集合匹配（2.6.0）：契约同 MatchFeatures（kNN(2) + Lowe、复用 `OrbMatch` + `FreeOrbMatches`）；浮点（SIFT）用 KD-Tree 索引、二进制（ORB/BRISK/AKAZE）用 LSH 索引——数千级描述子显著快于暴力 BF；LSH 为近似索引（不保证返回满 k 个邻居，与精确 BF 允许分歧，邻居不足 2 的对直接丢弃）；比率过滤后 0 命中 = rc 0 + NULL + 0（与 MatchFeatures 的 <2 对 → -2 出口不同） |
+| `Image2DAlg_MatchFeaturesSymmetric(d1, d2, pts1, pts2, ratio, &matches, &count)` | 双向互为最近匹配（2.6.0）：正向 d1→d2 与反向 d2→d1 各做 BF kNN(2) + Lowe 比率过滤后取交集交叉校验——比单向 ratio 更严、误匹配率更低（代价是召回下降）；其余契约同 MatchFeaturesFlann（0 命中 = rc 0 + NULL + 0） |
+| `Image2DAlg_EstimateAffineFull(matches, count, thr, m[6], &inliers)` | 全仿射估计（2.6.0，6 DOF：平移 + 旋转 + 各向异性缩放 + 剪切，cv::estimateAffine2D）：比 EstimateAffinePartial（4 DOF）能表达剪切/各向异性形变（视角倾斜的平面工件）；约束更弱、对误匹配更敏感，用 inliers（≥10 视为可靠）判断质量；count < 3 → -2、thr <= 0 → -3；`m` 为 in1→in2 的 2x3 行主序（同 ORBAlign/Partial 方向，可接 WarpAffine） |
+
+典型链路：`FastFeatures → ComputeDescriptors → MatchFeatures（数千级大集合改 Flann、误匹配敏感改 Symmetric）→ EstimateAffinePartial / EstimateAffineFull（6 DOF）/ FindHomography → WarpAffine/WarpPerspective`。
 
 ## 特征扩展与跟踪配准立体（2.2.0）
 
@@ -168,7 +178,7 @@ ComUI 适配层在 `integration/comui/Image2DAlg_comui.cpp`，节点声明在 `i
 |----|------|
 | 0 | 成功 |
 | -1 | 空指针 / 空图 |
-| -2 | 特征/匹配/估计不足（特征族与 ORBAlign：无关键点、匹配对数过少、几何估计退化；跟踪配准族：ECC 不收敛或相关性不足、PnP 求解失败；ReadImage 例外——-2 为打开失败；FloodFill 例外——-2 为填充失败，底层返回 -1；TemplateAffineAlign——粗对位失败（模板全尺度越界/得分无效）或精修匹配不足（2.5.0）） |
+| -2 | 特征/匹配/估计不足（特征族与 ORBAlign：无关键点、匹配对数过少、几何估计退化——含 EstimateAffineFull 点数不足/无法求解（2.6.0）；跟踪配准族：ECC 不收敛或相关性不足、PnP 求解失败；ReadImage 例外——-2 为打开失败；FloodFill 例外——-2 为填充失败，底层返回 -1；TemplateAffineAlign——粗对位失败（模板全尺度越界/得分无效）或精修匹配不足（2.5.0）；MatchFeaturesFlann/Symmetric 不使用 -2——比率过滤后 0 命中返回 0 + NULL + 0（2.6.0）） |
 | -3 | 通道数、模式或参数不支持 |
 | -4 | 内存不足 |
 | -99 | OpenCV 异常（在 C 边界统一捕获，异常不跨 DLL） |

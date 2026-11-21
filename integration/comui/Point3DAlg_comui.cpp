@@ -1683,8 +1683,8 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiGdt(const AlgoCInput* in, AlgoC
 #endif   // POINT3DALG_HAS_PCL（GD&T）
 
 // ---------------- 算子入口：分割与聚类（node.json: alg.point3d.segment_cloud） ----------------
-// method 与 params 布局以 Point3DAlg_api.h 注释表为权威口径（method 0~4 全量开放）。
-// 固定参数集（filter_cloud 先例）：node.json 声明 1 个 method(int) + 13 个 number，
+// method 与 params 布局以 Point3DAlg_api.h 注释表为权威口径（method 0~7 全量开放）。
+// 固定参数集（filter_cloud 先例）：node.json 声明 1 个 method(int) + 25 个 number，
 // 适配层按 method 分支组装该布局的 params 数组（未用参数保持默认跳过）：
 //   0 planeRANSAC      [distance_threshold=v0]
 //   1 euclideanCluster [cluster_tolerance=v1, min_size=v2, max_size=v3]
@@ -1692,6 +1692,12 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiGdt(const AlgoCInput* in, AlgoC
 //   3 regionGrowing    [k_neighbors=v6, smoothness_deg=v7, curvature_thresh=v8,
 //                       min_size=v9, max_size=v10]（法线由接口内部按 k_neighbors 估计）
 //   4 planesMulti      [distance_threshold=v0, max_planes=v11, min_inliers=v12]
+//   5 conditionalEuclidean（1.6.0）[cluster_tolerance=v1, min_size=v2, max_size=v3,
+//                       max_height_diff=v13]（高度差约束连通——台阶/叠层分层）
+//   6 groundPlane（1.6.0）[max_window_size=v14, slope=v15, initial_distance=v16,
+//                       max_distance=v17, cell_size=v18]（PMF 地面/非地面恒 2 段）
+//   7 minCut（1.6.0）   [sigma=v19, source_weight=v20, radius=v21,
+//                       种子 xyz=v22..v24]（图割前景 1 段；种子 = 前景点）
 // 输出：点数最多的一段点云——node.json 输出端口静态，无法声明可变段数（ABI v1
 // 虽支持多 cloud 数组输出，宿主按 outputs 端口顺序只取第 1 个），故取最大段；
 // 总段数与各段点数（段序 = C API 返回序，多为点数降序）并入节点消息。
@@ -1707,19 +1713,23 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiSegmentCloud(const AlgoCInput* 
 
     int method = 1;
     if (const AlgoCParam* p = FindParam(in, 1, 0)) method = p->i;
-    if (method < 0 || method > 4) {
-        out->error = "method 仅支持 0=planeRANSAC/1=euclideanCluster/2=dbscan/3=regionGrowing/4=planesMulti";
+    if (method < 0 || method > 7) {
+        out->error = "method 仅支持 0=planeRANSAC/1=euclideanCluster/2=dbscan/3=regionGrowing/"
+                     "4=planesMulti/5=conditionalEuclidean/6=groundPlane/7=minCut";
         return 3;
     }
 
-    double v[13] = { 0 };
-    for (int i = 0; i < 13; ++i)
+    double v[25] = { 0 };
+    for (int i = 0; i < 25; ++i)
         if (const AlgoCParam* p = FindParam(in, 0, i)) v[i] = p->d;
     // v 声明序（= node.json params 中 number 的声明序）：
     //   0 distance_threshold  1 cluster_tolerance  2 min_size  3 max_size
     //   4 eps  5 min_points  6 k_neighbors  7 smoothness_deg  8 curvature_thresh
     //   9 min_size_rg  10 max_size_rg  11 max_planes  12 min_inliers
-    double params[5];
+    //  13 max_height_diff  14 pmf_window  15 pmf_slope  16 pmf_initial
+    //  17 pmf_max_dist  18 pmf_cell  19 mc_sigma  20 mc_weight  21 mc_radius
+    //  22 seed_x  23 seed_y  24 seed_z
+    double params[6];
     int pc = 0;
     switch (method) {
         case 0: params[0] = v[0];                                        pc = 1; break;
@@ -1727,7 +1737,13 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiSegmentCloud(const AlgoCInput* 
         case 2: params[0] = v[4]; params[1] = v[5];                      pc = 2; break;
         case 3: params[0] = v[6]; params[1] = v[7]; params[2] = v[8];
                 params[3] = v[9]; params[4] = v[10];                     pc = 5; break;
-        default: params[0] = v[0]; params[1] = v[11]; params[2] = v[12]; pc = 3; break;
+        case 4: params[0] = v[0]; params[1] = v[11]; params[2] = v[12]; pc = 3; break;
+        case 5: params[0] = v[1]; params[1] = v[2]; params[2] = v[3];
+                params[3] = v[13];                                       pc = 4; break;
+        case 6: params[0] = v[14]; params[1] = v[15]; params[2] = v[16];
+                params[3] = v[17]; params[4] = v[18];                    pc = 5; break;
+        default: params[0] = v[19]; params[1] = v[20]; params[2] = v[21];
+                 params[3] = v[22]; params[4] = v[23]; params[5] = v[24]; pc = 6; break;
     }
 
     Point3DAlg_PointCloud pin = CloudViewOf(src);
@@ -1736,7 +1752,7 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiSegmentCloud(const AlgoCInput* 
     const int rc = Point3DAlg_SegmentCloud(&pin, method, pc > 0 ? params : NULL, pc,
                                            &segs, &seg_count);
     if (rc == -3) { out->error = "分割失败（params 与 method 布局不符或取值非法，见 api.h 布局表）"; return 3; }
-    if (rc == -2) { out->error = "分割失败：无有效段（DBSCAN 全噪声、平面拟合失败或区域生长为空）"; return 4; }
+    if (rc == -2) { out->error = "分割失败：无有效段（DBSCAN 全噪声、平面拟合失败、区域生长为空、PMF 全非地面或 minCut 图割前景为空）"; return 4; }
     if (rc != 0)  { out->error = "分割失败（内存不足或内部异常）"; return 2; }
     if (!segs || seg_count <= 0) { out->error = "分割失败：返回段为空"; return 2; }
 

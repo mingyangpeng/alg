@@ -1810,14 +1810,13 @@ bool torusRobust(const std::vector<Eigen::Vector3d>& pts, double scale, double t
     torusCascadeRefine(pts, scale, t, bestTh, bestInl);
     int bestCnt = (int)bestInl.size();
     double bestScore = scoreOf(bestTh, bestCnt);
-    std::fprintf(stderr, "[torusDBG] det raw=%d cascade=%d\n", bestRawCnt, bestCnt);   // TEMP
     // 随机采样试验：原始计数刷新 bestRawCnt 的试验立即级联，级联解按最终口径
     // （RANSAC 计数 / MSAC 截断代价）与现任比较择优
     const int s = (std::min)(32, (std::max)(kTorusMinPts, n / 4));
     std::mt19937 rng(kTorusSeed);
     std::vector<int> idx((size_t)n);
     std::iota(idx.begin(), idx.end(), 0);
-    const int kMaxTrials = 400;
+    const int kMaxTrials = 800;
     const double kConf = 0.999;
     for (int trials = 0; trials < kMaxTrials; ++trials) {
         // 提前终止：当前最优内点率 w 已足以保证 0.999 置信时停止
@@ -1855,10 +1854,12 @@ bool torusRobust(const std::vector<Eigen::Vector3d>& pts, double scale, double t
         }
         if (!subAny)
             continue;
-        // 子集去偏二级精化：外点对子集 LM 的系统性拉偏是试验失败的主因
+        // 子集去偏二级精化：外点对子集普通 LM 的系统性拉偏是试验失败的主因
         //（实测 20% 外点下多数试验落点偏 1~3 单位，全云 t 口径只捕 20~60 内点，
-        // 仅靠运气才有近命中）。按残差中值剔除子集内的外点后二次精化——
-        // 相当于在试验内部做轻量截断最小二乘，把落点拉回真盆附近；迭代两轮。
+        // 仅靠运气才有近命中）。这里在试验内部跑两轮**截断残差 LM**：
+        // 残差被限幅到 ±c（c = 2.5×median|r|，自适应尺度），即最小化
+        // Σ min(r_i², c²)——MSAC 代价口径。外点贡献恒为 c²（梯度为零），
+        // 真面点主导下降方向，把落点稳定拉回真盆附近。
         for (int debias = 0; debias < 2; ++debias) {
             const Eigen::VectorXd subRes = torusResiduals(sub, subTh);
             std::vector<double> a((size_t)s);
@@ -1866,22 +1867,19 @@ bool torusRobust(const std::vector<Eigen::Vector3d>& pts, double scale, double t
                 a[(size_t)k] = std::fabs(subRes[k]);
             const size_t mid = (size_t)s / 2;
             std::nth_element(a.begin(), a.begin() + (std::ptrdiff_t)mid, a.end());
-            const double cut = (std::max)(1.5 * a[mid], t);
-            std::vector<Eigen::Vector3d> kept;
-            kept.reserve((size_t)s);
-            for (int k = 0; k < s; ++k)
-                if (std::fabs(subRes[k]) <= cut)
-                    kept.push_back(sub[(size_t)k]);
-            if ((int)kept.size() < kTorusMinPts || (int)kept.size() >= s)
-                break;
-            auto keptFn = [&kept](const Eigen::VectorXd& th) { return torusResiduals(kept, th); };
-            torusSolveLM(keptFn, subTh, 60, clamp);
+            const double c = (std::max)(2.5 * a[mid], t);
+            auto truncFn = [&sub, c](const Eigen::VectorXd& th) {
+                Eigen::VectorXd res = torusResiduals(sub, th);
+                for (Eigen::Index k = 0; k < res.size(); ++k)
+                    res[k] = std::clamp(res[k], -c, c);
+                return res;
+            };
+            torusSolveLM(truncFn, subTh, 60, clamp);
         }
         int cnt = 0;
         scoreOf(subTh, cnt);
         if (cnt > bestRawCnt) {
             bestRawCnt = cnt;
-            std::fprintf(stderr, "[torusDBG] trial=%d raw=%d\n", trials, cnt);   // TEMP
             Eigen::VectorXd candTh = subTh;
             std::vector<int> candInl;
             torusCascadeRefine(pts, scale, t, candTh, candInl);
@@ -1900,10 +1898,8 @@ bool torusRobust(const std::vector<Eigen::Vector3d>& pts, double scale, double t
                 bestTh = candTh;
                 bestInl = candInl;
             }
-            std::fprintf(stderr, "[torusDBG] trial=%d cascaded=%d best=%d\n", trials, candCnt, bestCnt);   // TEMP
         }
     }
-    std::fprintf(stderr, "[torusDBG] final best=%d\n", bestCnt);   // TEMP
     if (bestCnt < kTorusMinPts)
         return false;
     out_th = bestTh;
@@ -2232,6 +2228,73 @@ int CloudProcessor<PointT>::segmentPlanesMulti(const CloudConstPtr& src,
         active.swap(next);
     }
     return found;
+}
+
+template <typename PointT>
+std::vector<typename CloudProcessor<PointT>::CloudPtr>
+CloudProcessor<PointT>::segmentConditionalEuclidean(const CloudConstPtr& src, double tolerance,
+                                                    int min_size, int max_size,
+                                                    double max_height_diff)
+{
+    if (!src || src->empty() || tolerance <= 0 || min_size < 1 || max_size < min_size ||
+        max_height_diff <= 0)
+        return {};
+    CloudPtr clean;
+    std::vector<int> global;
+    if (!fitInputClean<PointT>(src, clean, global))
+        return {};
+
+    const int n = (int)clean->size();
+    // 1) 每点 tolerance 半径邻居缓存（radiusSearch 含自身）
+    typename pcl::search::KdTree<PointT>::Ptr tree(new pcl::search::KdTree<PointT>);
+    tree->setInputCloud(clean);
+    std::vector<std::vector<int>> neighbors((size_t)n);
+    std::vector<std::vector<float>> neighbor_dists((size_t)n);
+    for (int i = 0; i < n; ++i)
+        tree->radiusSearch((*clean)[(size_t)i], tolerance, neighbors[(size_t)i],
+                           neighbor_dists[(size_t)i]);
+
+    // 2) 条件连通洪泛（BFS）：边 = 欧氏距离 <= tolerance（邻居缓存已过滤）且
+    //    |Δz| <= max_height_diff（成对条件，扩展时逐邻点判定）
+    std::vector<char> visited((size_t)n, 0);
+    std::vector<std::vector<int>> clusters;
+    std::vector<int> stack;
+    for (int i = 0; i < n; ++i) {
+        if (visited[(size_t)i])
+            continue;
+        std::vector<int> comp;
+        stack.clear();
+        stack.push_back(i);
+        visited[(size_t)i] = 1;
+        while (!stack.empty()) {
+            const int u = stack.back();
+            stack.pop_back();
+            comp.push_back(u);
+            const float zu = (*clean)[(size_t)u].z;
+            for (int j : neighbors[(size_t)u]) {
+                if (visited[(size_t)j])
+                    continue;
+                if (std::fabs((*clean)[(size_t)j].z - zu) > max_height_diff)
+                    continue;
+                visited[(size_t)j] = 1;
+                stack.push_back(j);
+            }
+        }
+        if ((int)comp.size() >= min_size && (int)comp.size() <= max_size)
+            clusters.push_back(std::move(comp));
+    }
+
+    // 3) 点数降序输出（segmentEuclideanCluster 同款）
+    std::sort(clusters.begin(), clusters.end(),
+              [](const std::vector<int>& a, const std::vector<int>& b) {
+                  return a.size() > b.size();
+              });
+
+    std::vector<CloudPtr> out;
+    out.reserve(clusters.size());
+    for (const std::vector<int>& c : clusters)
+        out.push_back(extractByIndices(clean, c));
+    return out;
 }
 
 // ---------------- regist ----------------

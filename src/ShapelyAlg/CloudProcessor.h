@@ -397,9 +397,11 @@ public:
     /// [out] out_inliers        局内点索引（映射回原始 src 行号）
     /// 返回：false = 剔除非有限点后 < 8 点（7 自由度模型至少 8 点才超定）/
     ///       点云尺度退化（全部重合）/ 精化后局内点 < 8。
-    /// 稳健性边界（实测口径见 Point3DAlg 交付说明）：采样稳健层在合成数据上对
-    ///   均匀盒内随机外点 ≈ 30% 内可稳定恢复；更高外点比例或成簇外点下
-    ///   RANSAC 可能落入伪吸引盆，此时建议先 filterStatisticalOutlier 预清理。
+    /// 稳健性边界（实测口径见 Point3DAlg 交付说明；768 点合成环面、噪声 ±0.02、
+    ///   阈值 0.1、三种子扫描）：均匀盒内随机外点 ≤20% 全部恢复、30~40% 多数
+    ///   恢复（种子相关）、≥50% 不可靠（落入伪吸引盆）；成簇薄片外点 20% 全部
+    ///   恢复。高外点场景建议先 filterStatisticalOutlier 预清理，阈值取噪声
+    ///   σ 的 3~5 倍（过大的阈值会强化"包裹型巨环"伪吸引盆）。
     static bool fitTorus(const CloudConstPtr& src, FitMethod method, double distance_threshold,
                          std::vector<float>& out_center, std::vector<float>& out_axis,
                          double& out_R, double& out_r, std::vector<int>& out_inliers);
@@ -497,6 +499,22 @@ public:
                                   int max_planes, int min_inliers,
                                   std::vector<std::vector<float>>& out_coeffs,
                                   std::vector<std::vector<int>>& out_inliers);
+
+    /// 条件欧氏聚类（高度差约束版）：邻点对同时满足欧氏距离 <= tolerance 且
+    /// |Δz| <= max_height_diff 才连通，连通分量 = 簇。
+    /// 不走 PCL ConditionalEuclideanClustering（1.9 版条件函数是函数指针，
+    /// 无法捕获参数；且 SoA 容器无法传法线/颜色——高度差约束是 v1 容器下
+    /// 可用的工业条件），KdTree 邻域 + 条件洪泛（BFS）手工实现
+    /// （segmentDBSCAN 同类的手工先例）。
+    /// 工业口径：台阶/叠层工件按高度分层——z 差超过阈值的相邻点不断开，
+    /// 侧面连通但上下表面分离。
+    /// [in] tolerance        欧氏连通距离（>0）
+    /// [in] min_size/max_size 簇点数上下限（范围外的簇丢弃）
+    /// [in] max_height_diff  相邻连通点的最大高度差（>0；与坐标同单位）
+    /// 返回：簇列表（按点数降序）。
+    static std::vector<CloudPtr> segmentConditionalEuclidean(
+        const CloudConstPtr& src, double tolerance, int min_size, int max_size,
+        double max_height_diff);
 
     // ---------------- regist：配准与位姿估计 ----------------
 

@@ -4,7 +4,7 @@
     "name": "点云分割聚类",
     "group": "3D 点云",
     "category": "处理",
-    "description": "点云分割/聚类（method 0~4）：0=主平面RANSAC分割(恒2段：平面内点+其余) 1=欧式聚类 2=DBSCAN密度聚类(噪声丢弃) 3=区域生长(内部自动估计法线) 4=多平面迭代；输出点数最多的一段点云（输出端口静态、无法声明可变段数），总段数与各段点数并入节点消息；平面方程等详情接 fit_model 另取；未用参数保持默认跳过"
+    "description": "点云分割/聚类（method 0~7）：0=主平面RANSAC分割(恒2段：平面内点+其余) 1=欧式聚类 2=DBSCAN密度聚类(噪声丢弃) 3=区域生长(内部自动估计法线) 4=多平面迭代 5=条件欧氏聚类·高度差约束(1.6.0——台阶/叠层按高度分层) 6=地面分割PMF(1.6.0——恒2段：地面+非地面) 7=minCut图割前景分割(1.6.0——需前景种子点)；输出点数最多的一段点云（输出端口静态、无法声明可变段数），总段数与各段点数并入节点消息；平面方程等详情接 fit_model 另取；未用参数保持默认跳过"
   },
   "runtime": "native",
   "assembly": "Point3DAlg.dll",
@@ -22,8 +22,8 @@
       "type": "int",
       "default": 1,
       "min": 0,
-      "max": 4,
-      "description": "0=planeRANSAC主平面分割 1=euclideanCluster欧式聚类 2=dbscan密度聚类 3=regionGrowing区域生长 4=planesMulti多平面迭代"
+      "max": 7,
+      "description": "0=planeRANSAC主平面分割 1=euclideanCluster欧式聚类 2=dbscan密度聚类 3=regionGrowing区域生长 4=planesMulti多平面迭代 5=conditionalEuclidean条件欧氏聚类(高度差约束) 6=groundPlane地面分割(PMF) 7=minCut图割前景分割"
     },
     {
       "name": "distance_threshold",
@@ -141,6 +141,114 @@
       "min": 3,
       "max": 100000000,
       "description": "method 4：每个平面最少内点数（>=3）"
+    },
+    {
+      "name": "max_height_diff",
+      "label": "最大高度差(方法5)",
+      "type": "number",
+      "default": 1.0,
+      "min": 0.0001,
+      "max": 1000000,
+      "description": "method 5：相邻连通点的最大高度差（>0；z 差超过该值的相邻点不连通——台阶/叠层分层口径）"
+    },
+    {
+      "name": "pmf_window",
+      "label": "窗口上限(方法6)",
+      "type": "number",
+      "default": 20,
+      "min": 1,
+      "max": 1000,
+      "description": "method 6：PMF 渐进形态学最大窗口尺寸（>=1，网格单位）"
+    },
+    {
+      "name": "pmf_slope",
+      "label": "坡度(方法6)",
+      "type": "number",
+      "default": 1.0,
+      "min": 0.0001,
+      "max": 1000,
+      "description": "method 6：PMF 地形坡度系数（>0，越大保留越陡地形）"
+    },
+    {
+      "name": "pmf_initial",
+      "label": "初始距离(方法6)",
+      "type": "number",
+      "default": 0.5,
+      "min": 0.0001,
+      "max": 1000000,
+      "description": "method 6：PMF 初始高度阈值（>0，与坐标同单位）"
+    },
+    {
+      "name": "pmf_max_dist",
+      "label": "最大距离(方法6)",
+      "type": "number",
+      "default": 3.0,
+      "min": 0.0001,
+      "max": 1000000,
+      "description": "method 6：PMF 最终高度阈值（>0，与坐标同单位）"
+    },
+    {
+      "name": "pmf_cell",
+      "label": "格网边长(方法6)",
+      "type": "number",
+      "default": 1.0,
+      "min": 0.0001,
+      "max": 1000000,
+      "description": "method 6：PMF 格网 cell 边长（>0，与坐标同单位）"
+    },
+    {
+      "name": "mc_sigma",
+      "label": "sigma(方法7)",
+      "type": "number",
+      "default": 0.5,
+      "min": 0.0001,
+      "max": 1000000,
+      "description": "method 7：minCut 高斯平滑 sigma（>0，与坐标同单位）"
+    },
+    {
+      "name": "mc_weight",
+      "label": "源点权重(方法7)",
+      "type": "number",
+      "default": 3.0,
+      "min": 0.0001,
+      "max": 1000000,
+      "description": "method 7：minCut 源点权重（>0，越大前景越收紧）"
+    },
+    {
+      "name": "mc_radius",
+      "label": "图构建半径(方法7)",
+      "type": "number",
+      "default": 1.0,
+      "min": 0.0001,
+      "max": 1000000,
+      "description": "method 7：minCut 图构建邻域半径（>0，与坐标同单位，PCL setRadius）"
+    },
+    {
+      "name": "seed_x",
+      "label": "种子X(方法7)",
+      "type": "number",
+      "default": 0,
+      "min": -1000000000,
+      "max": 1000000000,
+      "description": "method 7：前景种子点 X（须落在前景物体上）"
+    },
+    {
+      "name": "seed_y",
+      "label": "种子Y(方法7)",
+      "type": "number",
+      "default": 0,
+      "min": -1000000000,
+      "max": 1000000000,
+      "description": "method 7：前景种子点 Y"
+    },
+    {
+      "name": "seed_z",
+      "label": "种子Z(方法7)",
+      "type": "number",
+      "default": 0,
+      "min": -1000000000,
+      "max": 1000000000,
+      "description": "method 7：前景种子点 Z"
     }
   ],
   "outputs": [

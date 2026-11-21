@@ -44,6 +44,18 @@ extern "C" {
  *          MeasurePointToMeshSignedDistance 点到闭合网格带符号距离
  *          （Mesh 面积/体积/无符号逐点距离已由 MeshOp op 3/4/5 覆盖，
  *          不重复）
+ *   1.6.0  聚类/分割扩展（无新导出，既有签名扩展取值域）：
+ *          SegmentCloud method 5 = conditionalEuclidean 条件欧氏聚类
+ *          （params [tolerance,min,max,height_diff]；高度差约束连通，
+ *          底层 CloudProcessor::segmentConditionalEuclidean——PCL 1.9
+ *          条件函数是函数指针无法捕获参数，KdTree+并查集手工实现）；
+ *          method 6 = groundPlane 地面分割（params [window,slope,
+ *          initial,max,cell]，底层 PCL ProgressiveMorphologicalFilter，
+ *          本层组合管线直调）；method 7 = minCut 图割前景分割（params
+ *          [sigma,weight,radius, 种子点 xyz...]，底层 PCL
+ *          MinCutSegmentation extract，本层组合管线直调）。
+ *          regionGrowingRGB（需 rgb 容器扩展）与 supervoxel（标签载荷
+ *          需 ABI v2）暂缓，见待开发清单。
  *
  * 错误码全局约定（§8.3）：
  *   点云计算族（LoadCloud/SaveCloudEx/Filter/Extract/Transform 等）：
@@ -85,7 +97,7 @@ POINT3DALG_EXPORT void Point3DAlg_FreeBuffer(void* p);
  * 版本与生命周期（1.1.0 新增，对齐 Image2DAlg）
  * ===================================================================== */
 
-/* 返回 DLL 版本字符串（静态存储，调用方不得释放）。当前 "1.5.0"。 */
+/* 返回 DLL 版本字符串（静态存储，调用方不得释放）。当前 "1.6.0"。 */
 POINT3DALG_EXPORT const char* Point3DAlg_GetVersion(void);
 
 /* 初始化（占位实现：当前模块无全局状态，恒返回 0；为宿主统一生命周期而设）。
@@ -360,6 +372,20 @@ POINT3DALG_EXPORT int Point3DAlg_FitModel(const Point3DAlg_PointCloud* in, int m
  *   4  planesMulti 多平面迭代  [0]=distance_threshold（>0）
  *                              [1]=max_planes（>=1） [2]=min_inliers（>=3）
  *                              必填 3 个
+ *   5  conditionalEuclidean   [0]=cluster_tolerance（>0）
+ *      条件欧氏聚类（高度差  [1]=min_size（>=1） [2]=max_size（>=min）
+ *      约束，1.6.0 新增）    [3]=max_height_diff 相邻连通点最大高度差（>0）
+ *                              必填 4 个（邻点对同时满足欧氏距离与高度差
+ *                              才连通——台阶/叠层工件按高度分层）
+ *   6  groundPlane 地面分割   [0]=max_window_size（>=1，窗口上限）
+ *      （PMF 渐进形态学，    [1]=slope 坡度（>0）
+ *      1.6.0 新增）          [2]=initial_distance（>0） [3]=max_distance（>0）
+ *                              [4]=cell_size（>0）
+ *                              必填 5 个
+ *   7  minCut 图割前景分割   [0]=sigma（>0） [1]=source_weight（>0）
+ *      （1.6.0 新增）        [2]=radius 图构建邻域半径（>0，PCL setRadius）
+ *                              [3..5]=前景种子点 xyz
+ *                              必填 6 个（另可追加更多种子：6+3K，K>=0）
  *
  * out_segments 语义（库 malloc 数组 + 每段 xyz，全部用 FreeClouds 释放）：
  *   0 → 恒 2 段：[0]=主平面局内点（恒非空），[1]=其余点——**允许为空段
@@ -371,14 +397,20 @@ POINT3DALG_EXPORT int Point3DAlg_FitModel(const Point3DAlg_PointCloud* in, int m
  *       回原始坐标）
  *   3 → 每区域一段（点数降序；法线由本接口内部按 k_neighbors KNN 估计）
  *   4 → 每平面局内点一段（按检出顺序 = 点数降序趋势）
+ *   5 → 每簇一段（点数降序；高度差条件连通，见上表）
+ *   6 → 恒 2 段：[0]=地面点（PMF 局内），[1]=非地面点——允许为空段
+ *       （全部点被判为地面/非地面时）
+ *   7 → 前景段 1 段（minCut 图割 object 簇——PCL 口径 clusters[1]；多种子
+ *       仍归同一前景簇；背景不输出）
  * out_segments/out_segment_count 必填（NULL → -1）；无有效段 → -2（
  *   out_segments 置 NULL、*out_segment_count=0）。
  * 错误码（本接口口径）：
  *   0 成功；
  *   -1 in/out_segments/out_segment_count 为 NULL、in->xyz 为 NULL、
  *      in->count<=0；
- *   -2 无有效结果（分割 0 段，如 DBSCAN 全噪声、平面拟合失败）；
- *   -3 method 不是 0~4、param_count 与布局表不符、参数值非法（见上表）；
+ *   -2 无有效结果（分割 0 段，如 DBSCAN 全噪声、平面拟合失败、minCut
+ *      图割 0 前景点）；
+ *   -3 method 不是 0~7、param_count 与布局表不符、参数值非法（见上表）；
  *   -4 内存分配失败；
  *   -99 PCL 异常。 */
 POINT3DALG_EXPORT int Point3DAlg_SegmentCloud(const Point3DAlg_PointCloud* in, int method,

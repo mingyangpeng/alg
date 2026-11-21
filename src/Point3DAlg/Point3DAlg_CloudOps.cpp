@@ -32,6 +32,8 @@
 #include <pcl/point_cloud.h>
 #include <pcl/surface/convex_hull.h>
 #include <pcl/surface/concave_hull.h>
+#include <pcl/segmentation/progressive_morphological_filter.h>
+#include <pcl/segmentation/min_cut_segmentation.h>
 
 #include <algorithm>
 #include <cmath>
@@ -839,7 +841,7 @@ int Point3DAlg_SegmentCloud(const Point3DAlg_PointCloud* in, int method,
     const int rcIn = CheckInOnly(in);
     if (rcIn != 0)
         return rcIn;
-    if (method < 0 || method > 4)
+    if (method < 0 || method > 7)
         return -3;
     const double* p = params;
     const int n = param_count;
@@ -930,7 +932,7 @@ int Point3DAlg_SegmentCloud(const Point3DAlg_PointCloud* in, int method,
                     parts.push_back(CP::extractByIndices(src, idx));
             break;
         }
-        default: {  // planesMulti：每平面局内点一段（检出顺序）
+        case 4: {   // planesMulti：每平面局内点一段（检出顺序）
             if (!p || n != 3) return -3;
             if (!(p[0] > 0.0)) return -3;
             const int maxPlanes = ParamInt(p, 1);
@@ -946,6 +948,92 @@ int Point3DAlg_SegmentCloud(const Point3DAlg_PointCloud* in, int method,
                     parts.push_back(CP::extractByIndices(src, idx));
             break;
         }
+        case 5: {   // conditionalEuclidean：高度差约束条件欧氏聚类（1.6.0 新增；
+                    // 底层 KdTree+并查集手工实现——PCL 1.9 条件函数是函数指针
+                    // 无法捕获参数，见 CloudProcessor::segmentConditionalEuclidean）
+            if (!p || n != 4) return -3;
+            if (!(p[0] > 0.0)) return -3;
+            const int minS = ParamInt(p, 1);
+            const int maxS = ParamInt(p, 2);
+            if (minS < 1 || maxS < minS) return -3;
+            if (!(p[3] > 0.0)) return -3;
+            parts = CP::segmentConditionalEuclidean(src, p[0], minS, maxS, p[3]);
+            break;
+        }
+        case 6: {   // groundPlane：PMF 渐进形态学地面分割（1.6.0 新增；PCL
+                    // ProgressiveMorphologicalFilter 组合管线直调——convexHull
+                    // 同款先例，见文件头注释）。契约恒 2 段：[0]=地面 [1]=其余
+            if (!p || n != 5) return -3;
+            const int win = ParamInt(p, 0);
+            if (win < 1 || !(p[1] > 0.0) || !(p[2] > 0.0) || !(p[3] > 0.0) ||
+                !(p[4] > 0.0))
+                return -3;
+            pcl::ProgressiveMorphologicalFilter<pcl::PointXYZ> pmf;
+            pmf.setInputCloud(src);
+            pmf.setMaxWindowSize(win);
+            pmf.setSlope((float)p[1]);
+            pmf.setInitialDistance((float)p[2]);
+            pmf.setMaxDistance((float)p[3]);
+            pmf.setCellSize((float)p[4]);
+            std::vector<int> groundIdx;
+            pmf.extract(groundIdx);
+            if (groundIdx.empty())
+                return -2;   // 全部点被判非地面（或全空）→ 地面段为空无意义
+            std::vector<char> isGround((size_t)src->size(), 0);
+            for (int i : groundIdx) {
+                if (i < 0 || (size_t)i >= src->size())
+                    return -2;   // 契约外索引（防御）
+                isGround[(size_t)i] = 1;
+            }
+            std::vector<int> ground, nonground;
+            ground.reserve(groundIdx.size());
+            nonground.reserve(src->size() - groundIdx.size());
+            for (size_t i = 0; i < src->size(); ++i)
+                (isGround[i] ? ground : nonground).push_back((int)i);
+            parts.push_back(CP::extractByIndices(src, ground));
+            // 非地面段允许为空（全部点都是地面）——空段照常入列（method 0
+            // 同款契约：按下标配段无需判段数分支）。extractByIndices 对空
+            // 索引返回 nullptr，必须兜底为空云（FromPcl 不接受空指针）
+            CloudPtr rest = CP::extractByIndices(src, nonground);
+            parts.push_back(rest ? rest : CloudPtr(new CloudXYZ));
+            break;
+        }
+        case 7: {   // minCut：图割前景分割（1.6.0 新增；PCL MinCutSegmentation
+                    // 组合管线直调）。params = [sigma, source_weight,
+                    // search_radius, 种子 xyz...]——6 或 6+3K 个。
+                    // PCL 1.9 无独立 compute()——extract() 即启动算法，且
+                    // clusters[0]=背景、clusters[1]=前景（头注释权威口径）；
+                    // 前景多种子仍归一个 object 簇，只输出 clusters[1]
+            if (!p || n < 6 || (n - 6) % 3 != 0) return -3;
+            if (!(p[0] > 0.0) || !(p[1] > 0.0) || !(p[2] > 0.0)) return -3;
+            const int nSeeds = (n - 6) / 3 + 1;
+            for (int k = 0; k < nSeeds; ++k) {
+                const double* s = p + 3 + (size_t)k * 3;
+                if (!std::isfinite(s[0]) || !std::isfinite(s[1]) || !std::isfinite(s[2]))
+                    return -3;
+            }
+            pcl::MinCutSegmentation<pcl::PointXYZ> mc;
+            mc.setInputCloud(src);
+            mc.setSigma(p[0]);
+            mc.setSourceWeight(p[1]);
+            mc.setRadius(p[2]);   // PCL 1.9 该参数名是 setRadius（非 setSearchRadius）
+            CloudPtr seeds(new CloudXYZ);
+            for (int k = 0; k < nSeeds; ++k) {
+                const double* s = p + 3 + (size_t)k * 3;
+                seeds->push_back(pcl::PointXYZ((float)s[0], (float)s[1], (float)s[2]));
+            }
+            seeds->width = (uint32_t)seeds->size();
+            seeds->height = 1;
+            mc.setForegroundPoints(seeds);
+            std::vector<pcl::PointIndices> clusters;
+            mc.extract(clusters);
+            if (clusters.size() < 2 || clusters[1].indices.empty())
+                return -2;   // 图割 0 前景点（种子落在空区域/图构建失败）
+            parts.push_back(CP::extractByIndices(src, clusters[1].indices));
+            break;
+        }
+        default:    // method 5~7 已在上方显式处理；此处不可达（入口已拦截）
+            return -3;
         }
         if (parts.empty())
             return -2;

@@ -60,7 +60,7 @@ static void check(bool ok, const char* name)
 static void TestLifecycle()
 {
     std::printf("---- A1. 版本与生命周期 ----\n");
-    check(std::strcmp(Point3DAlg_GetVersion(), "1.5.0") == 0, "GetVersion 返回 1.5.0");
+    check(std::strcmp(Point3DAlg_GetVersion(), "1.6.0") == 0, "GetVersion 返回 1.6.0");
     check(Point3DAlg_Init() == 0, "Init 返回 0");
     Point3DAlg_Cleanup();   // 占位实现，可安全调用
     Point3DAlg_FreeCloud(nullptr);   // NULL 安全（不崩溃即通过）
@@ -959,8 +959,8 @@ static void TestSegmentCloud()
         Point3DAlg_PointCloud* segs = nullptr;
         int nSeg = 0;
         const double p1[1] = { 0.05 };
-        check(Point3DAlg_SegmentCloud(&in, 5, p1, 1, &segs, &nSeg) == -3,
-              "SegmentCloud method 越界 → -3");
+        check(Point3DAlg_SegmentCloud(&in, 8, p1, 1, &segs, &nSeg) == -3,
+              "SegmentCloud method 越界(8) → -3");
         check(Point3DAlg_SegmentCloud(&in, 1, p1, 1, &segs, &nSeg) == -3,
               "euclideanCluster params 数量不符 → -3");
         check(Point3DAlg_SegmentCloud(&in, 0, p1, 1, nullptr, &nSeg) == -1,
@@ -1093,6 +1093,110 @@ static void TestSegmentCloud()
         for (int i = 0; ok && i < g.n; ++i)
             ok = g.s[i].count == 100;
         check(ok, "planesMulti → 2 平面各 100 局内点");
+        Point3DAlg_FreeCloud(&in);
+    }
+
+    // conditionalEuclidean（1.6.0）：高度差约束分层。两组各 20 点：
+    //   层 A z=0（x 0~1.5）、层 B z=3（x 5.5~7）；层内点距 0.5（tolerance 1 连通）。
+    //   斜楼梯桥 5 点（x 步 0.7 + z 步 0.6，步长 0.92 ≤ tolerance）验证高度差条件：
+    //   高约束（hdiff=0.5）桥步 Δz=0.6 > 0.5 被截断 → 2 层 + 5 单点簇 = 7 簇；
+    //   低约束（hdiff=5）桥连通 A→B → 1 簇 45 点
+    {
+        std::vector<float> v;
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 5; ++j) {
+                PushPt(v, (float)i * 0.5f, (float)j * 0.5f, 0.0f);   // 层 A
+                PushPt(v, 5.5f + (float)i * 0.5f, (float)j * 0.5f, 3.0f);   // 层 B
+            }
+        for (int k = 0; k < 5; ++k)
+            PushPt(v, 2.2f + k * 0.7f, 1.0f, 0.6f + k * 0.6f);   // 斜楼梯桥
+        Point3DAlg_PointCloud in = MakeCloudFrom(v);
+        const double pHi[4] = { 1.0, 1.0, 1000.0, 0.5 };
+        SegsGuard g;
+        const int rc = Point3DAlg_SegmentCloud(&in, 5, pHi, 4, &g.s, &g.n);
+        int total = 0;
+        for (int i = 0; i < g.n; ++i)
+            total += g.s[i].count;
+        check(rc == 0 && g.n == 6 && g.s[0].count == 21 && g.s[1].count == 20 &&
+                  g.s[5].count == 1,
+              "conditionalEuclidean 高约束 → 6 簇（B+桥顶 21、A 20、桥身 4 单点）");
+        check(total == 45, "conditionalEuclidean 点数守恒 45（单点簇保留）");
+        const double pLo[4] = { 1.0, 1.0, 1000.0, 5.0 };
+        SegsGuard g2;
+        const int rc2 = Point3DAlg_SegmentCloud(&in, 5, pLo, 4, &g2.s, &g2.n);
+        check(rc2 == 0 && g2.n == 1 && g2.s[0].count == 45,
+              "conditionalEuclidean 低约束 → 桥连通全图 1 簇 45 点");
+        // 错误路径：params 数量不符 / height_diff<=0 / min>max
+        Point3DAlg_PointCloud* s3 = nullptr;
+        int n3 = 0;
+        const double pBad1[3] = { 1.0, 1.0, 1000.0 };
+        check(Point3DAlg_SegmentCloud(&in, 5, pBad1, 3, &s3, &n3) == -3,
+              "conditionalEuclidean params=3 → -3");
+        const double pBad2[4] = { 1.0, 1.0, 1000.0, 0.0 };
+        check(Point3DAlg_SegmentCloud(&in, 5, pBad2, 4, &s3, &n3) == -3,
+              "conditionalEuclidean height_diff=0 → -3");
+        const double pBad3[4] = { 1.0, 10.0, 5.0, 1.0 };
+        check(Point3DAlg_SegmentCloud(&in, 5, pBad3, 4, &s3, &n3) == -3,
+              "conditionalEuclidean min>max → -3");
+        Point3DAlg_FreeCloud(&in);
+    }
+
+    // groundPlane（PMF，1.6.0）：z=0 平面网格（10×10 地面）+ z=5 处 2×2 架空块
+    //（**必须悬在平面上方**——PMF 形态学开运算的窗口内要能看到平面点，块才
+    // 会被判非地面；远离平面的孤立块其格网内只有自身点，地形=块本身 → 整块
+    // 被判地面，nonground 为空段）→ [0]=地面 100、[1]=非地面 4
+    {
+        std::vector<float> v;
+        for (int i = 0; i < 10; ++i)
+            for (int j = 0; j < 10; ++j)
+                PushPt(v, (float)i, (float)j, 0.0f);
+        for (int i = 0; i < 2; ++i)
+            for (int j = 0; j < 2; ++j)
+                PushPt(v, 4.0f + (float)i, 4.0f + (float)j, 5.0f);
+        Point3DAlg_PointCloud in = MakeCloudFrom(v);
+        const double p[5] = { 8.0, 1.0, 0.5, 3.0, 1.0 };
+        SegsGuard g;
+        const int rc = Point3DAlg_SegmentCloud(&in, 6, p, 5, &g.s, &g.n);
+        const bool ok = rc == 0 && g.n == 2 && g.s[0].count == 100 &&
+                        g.s[1].count == 4;
+        check(ok, "groundPlane PMF → [地面 100, 非地面 4]（恒 2 段）");
+        // 错误路径：params 数量不符 → -3
+        Point3DAlg_PointCloud* s3 = nullptr;
+        int n3 = 0;
+        const double pBad[4] = { 8.0, 1.0, 0.5, 3.0 };
+        check(Point3DAlg_SegmentCloud(&in, 6, pBad, 4, &s3, &n3) == -3,
+              "groundPlane params=4 → -3");
+        Point3DAlg_FreeCloud(&in);
+    }
+
+    // minCut（1.6.0）：中心紧凑团 30 点（前景，含种子点）+ 远端稀疏环 30 点
+    //（背景）→ 前景段 1 段 ≈ 30 点（图割把与种子连通致密的团判为 object）
+    {
+        std::vector<float> v;
+        for (int i = 0; i < 30; ++i)
+            PushPt(v, (float)(i % 6) * 0.3f, (float)(i / 6) * 0.3f, 0.0f);   // 前景团
+        for (int k = 0; k < 30; ++k) {
+            const double a = 2.0 * kPi * k / 30.0;
+            PushPt(v, (float)(25.0 + 8.0 * std::cos(a)), (float)(8.0 * std::sin(a)),
+                   0.0f);   // 远端环
+        }
+        Point3DAlg_PointCloud in = MakeCloudFrom(v);
+        const double p[6] = { 0.5, 3.0, 1.0, 0.3, 0.3, 0.0 };   // 种子 = 前景团内点
+        SegsGuard g;
+        const int rc = Point3DAlg_SegmentCloud(&in, 7, p, 6, &g.s, &g.n);
+        const bool ok = rc == 0 && g.n == 1 && g.s[0].count >= 25 &&
+                        g.s[0].count <= 35;
+        check(ok, "minCut → 前景团 1 段（25~35 点，背景不输出）");
+        // 错误路径：种子非有限 → -3；params=5 → -3
+        Point3DAlg_PointCloud* s3 = nullptr;
+        int n3 = 0;
+        const double pBad1[5] = { 0.5, 3.0, 1.0, 0.3, 0.3 };
+        check(Point3DAlg_SegmentCloud(&in, 7, pBad1, 5, &s3, &n3) == -3,
+              "minCut params=5 → -3");
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        const double pBad2[6] = { 0.5, 3.0, 1.0, nan, 0.0, 0.0 };
+        check(Point3DAlg_SegmentCloud(&in, 7, pBad2, 6, &s3, &n3) == -3,
+              "minCut 种子含 NaN → -3");
         Point3DAlg_FreeCloud(&in);
     }
 }

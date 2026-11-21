@@ -1,0 +1,102 @@
+{
+  "node": {
+    "id": "alg.image2d.template_affine_align",
+    "name": "模板复合仿射对位",
+    "group": "2D 图像",
+    "category": "处理",
+    "description": "模板复合仿射对位（golden EB align / scan area align 二合一）：金样模板对位三步复合——模板匹配粗对位（多尺度×多角度 TM_CCOEFF_NORMED，步进 0.05，抗重复图案；lo==hi 只算单尺度/单角度）→ golden warp 到 current 帧 → ORB+RANSAC 精修，合成 golden→current 的 2x3 仿射（行主序，与 ORB 对位/估计变换同向）；矩阵 m=[...]、tx/ty（下游最常用平移量）、RANSAC 内点数（>=10 可靠）、粗对位得分并入节点消息；贴回当前图用仿射变换节点抄入 m；粗对位无有效落点/精修匹配不足报错（平坦图属正常失败，可调宽区间重试）"
+  },
+  "runtime": "native",
+  "assembly": "Image2DAlg.dll",
+  "method": "Image2DAlg_ComuiTemplateAffineAlign",
+  "inputs": [
+    {
+      "name": "金样模板",
+      "type": "image"
+    },
+    {
+      "name": "当前图",
+      "type": "image"
+    }
+  ],
+  "params": [
+    {
+      "name": "rough_scale_lo",
+      "label": "粗对位尺度下限",
+      "type": "number",
+      "default": 1.0,
+      "min": 0.01,
+      "max": 100,
+      "description": "粗对位尺度区间下限（0 < lo <= hi；lo==hi = 只算单尺度）"
+    },
+    {
+      "name": "rough_scale_hi",
+      "label": "粗对位尺度上限",
+      "type": "number",
+      "default": 1.0,
+      "min": 0.01,
+      "max": 100,
+      "description": "粗对位尺度区间上限（0 < lo <= hi；lo==hi = 只算单尺度；区间非退化时步进 0.05）"
+    },
+    {
+      "name": "rough_angle_lo",
+      "label": "粗对位角度下限(度)",
+      "type": "number",
+      "default": 0,
+      "min": -360,
+      "max": 360,
+      "description": "粗对位角度区间下限（度，lo <= hi；lo==hi = 只算单角度）"
+    },
+    {
+      "name": "rough_angle_hi",
+      "label": "粗对位角度上限(度)",
+      "type": "number",
+      "default": 0,
+      "min": -360,
+      "max": 360,
+      "description": "粗对位角度区间上限（度，lo <= hi；lo==hi = 只算单角度；区间非退化时步进 0.05）"
+    },
+    {
+      "name": "n_features",
+      "label": "ORB特征点上限",
+      "type": "number",
+      "default": 500,
+      "min": 100,
+      "max": 10000,
+      "description": "ORB 特征点上限（>= 100，给足特征量）"
+    },
+    {
+      "name": "ratio",
+      "label": "Lowe比率系数",
+      "type": "number",
+      "default": 0.8,
+      "min": 0.01,
+      "max": 1,
+      "description": "Lowe 比率测试系数（(0,1]；越小匹配越严格）"
+    },
+    {
+      "name": "ransac_threshold",
+      "label": "RANSAC阈值(px)",
+      "type": "number",
+      "default": 3.0,
+      "min": 0.01,
+      "max": 1000,
+      "description": "RANSAC 重投影阈值（像素，> 0）"
+    }
+  ],
+  "outputs": [],
+  "source": {
+    "files": [
+      "integration/comui/Image2DAlg_comui.cpp",
+      "integration/comui/comui_native_abi.h",
+      "src/AlgExport.h",
+      "src/Image2DAlg/Image2DAlg_api.cpp",
+      "src/Image2DAlg/Image2DAlg_Ops.cpp",
+      "src/Image2DAlg/include/Image2DAlg_api.h"
+    ],
+    "includes": [
+      "src",
+      "src/Image2DAlg/include"
+    ]
+  }
+}

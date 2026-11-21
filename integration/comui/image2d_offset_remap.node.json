@@ -1,0 +1,67 @@
+{
+  "node": {
+    "id": "alg.image2d.offset_remap",
+    "name": "偏移重采样",
+    "group": "2D 图像",
+    "category": "处理",
+    "description": "偏移重采样（对位后内容回正）：dst(x,y)=src(x−dx, y−dy)——把\"内容平移了 (dx,dy)\"的图搬回原位，对位节点输出 (dx,dy) 后接本节点内容回到参考帧坐标；越界区域补 0；interpolation 0=最近邻（掩膜/二值图，避免插值产生非 0/255 的灰度过渡）/1=双线性（灰度/连续图）；dx/dy 亚像素合法；输出与输入同尺寸同通道"
+  },
+  "runtime": "native",
+  "assembly": "Image2DAlg.dll",
+  "method": "Image2DAlg_ComuiOffsetRemap",
+  "inputs": [
+    {
+      "name": "输入",
+      "type": "image"
+    }
+  ],
+  "params": [
+    {
+      "name": "dx",
+      "label": "X 平移(px)",
+      "type": "number",
+      "default": 0,
+      "min": -100000,
+      "max": 100000,
+      "description": "X 平移量（像素，亚像素合法；通常取对位节点输出的 dx）"
+    },
+    {
+      "name": "dy",
+      "label": "Y 平移(px)",
+      "type": "number",
+      "default": 0,
+      "min": -100000,
+      "max": 100000,
+      "description": "Y 平移量（像素，亚像素合法；通常取对位节点输出的 dy）"
+    },
+    {
+      "name": "interpolation",
+      "label": "插值方式",
+      "type": "int",
+      "default": 1,
+      "min": 0,
+      "max": 1,
+      "description": "0=最近邻（掩膜/二值图）/ 1=双线性（灰度/连续图；其他值参数非法）"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "校正后图像",
+      "type": "image"
+    }
+  ],
+  "source": {
+    "files": [
+      "integration/comui/Image2DAlg_comui.cpp",
+      "integration/comui/comui_native_abi.h",
+      "src/AlgExport.h",
+      "src/Image2DAlg/Image2DAlg_api.cpp",
+      "src/Image2DAlg/Image2DAlg_Ops.cpp",
+      "src/Image2DAlg/include/Image2DAlg_api.h"
+    ],
+    "includes": [
+      "src",
+      "src/Image2DAlg/include"
+    ]
+  }
+}

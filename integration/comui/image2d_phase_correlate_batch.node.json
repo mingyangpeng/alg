@@ -1,0 +1,57 @@
+{
+  "node": {
+    "id": "alg.image2d.phase_correlate_batch",
+    "name": "批量局部相位配准",
+    "group": "2D 图像",
+    "category": "处理",
+    "description": "批量局部相位配准（相位相关平移的瓦片版）：两图按统一网格切 tile_w×tile_h 瓦片逐瓦片相位配准（灰度+CV_32F+默认窗），检测晶圆/面板大图的局部错位分布；瓦片行主序 index=r*cols+c、起点 (c*tile_w, r*tile_h)，网格整除向下取整、余数边缘条带裁掉；逐瓦片 dx/dy/峰值响应（4 位小数，最多列前 8 组）并入节点消息，低响应瓦片未过滤需自行取舍；tile 需 >=16 且不超图尺寸，两图尺寸/通道须一致"
+  },
+  "runtime": "native",
+  "assembly": "Image2DAlg.dll",
+  "method": "Image2DAlg_ComuiPhaseCorrelateBatch",
+  "inputs": [
+    {
+      "name": "参考图",
+      "type": "image"
+    },
+    {
+      "name": "待配图",
+      "type": "image"
+    }
+  ],
+  "params": [
+    {
+      "name": "tile_w",
+      "label": "瓦片宽(px)",
+      "type": "number",
+      "default": 64,
+      "min": 16,
+      "max": 100000,
+      "description": "瓦片宽（像素；>=16 且 <= 图宽，否则参数非法）"
+    },
+    {
+      "name": "tile_h",
+      "label": "瓦片高(px)",
+      "type": "number",
+      "default": 64,
+      "min": 16,
+      "max": 100000,
+      "description": "瓦片高（像素；>=16 且 <= 图高，否则参数非法）"
+    }
+  ],
+  "outputs": [],
+  "source": {
+    "files": [
+      "integration/comui/Image2DAlg_comui.cpp",
+      "integration/comui/comui_native_abi.h",
+      "src/AlgExport.h",
+      "src/Image2DAlg/Image2DAlg_api.cpp",
+      "src/Image2DAlg/Image2DAlg_Ops.cpp",
+      "src/Image2DAlg/include/Image2DAlg_api.h"
+    ],
+    "includes": [
+      "src",
+      "src/Image2DAlg/include"
+    ]
+  }
+}

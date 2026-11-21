@@ -52,6 +52,13 @@
 //            ContourHausdorff 双轮廓 Hausdorff 距离（形状偏差量化）/
 //            FitCircleBatch 批量圆拟合（焊盘/孔阵列）
 //
+//   2.5.0  + 对位拼接扩展 5 算子：PhaseCorrelateBatch 批量局部相位配准（大图
+//            分瓦片错位检测）/ OffsetRemap 偏移重采样（对位后内容回正）/
+//            MaskShiftRecheck 掩膜平移复核（缺陷确认/新增/消失统计）/
+//            StitchBlend 两图拼接融合（重叠区 X 向线性渐变混合）/
+//            TemplateAffineAlign 模板复合仿射对位（模板匹配粗对位 + ORB 精修）
+//            ——客户场景：对位/拼接流水线（golden align/缺陷复核/拼接 merge）
+//
 // 【通道语义】Image2DAlg_Image.channels 支持 1（灰度）/ 3（BGR）/ 4（BGRA），
 //   data 为紧排像素（行步长 = width * channels，无对齐填充）：
 //   * 通用算子保持输入真实通道数（1→1、3→3、4→4，alpha 随通道参与运算）；
@@ -1410,6 +1417,123 @@ IMAGE2DALG_EXPORT int Image2DAlg_FitCircleBatch(const float* xy, const int* grou
                                                 Image2DAlg_CircleFit* out_fits,
                                                 unsigned char* out_valid,
                                                 unsigned int seed, int max_iters);
+
+// ---------------- 2.5.0 批次：批量相位配准 / 偏移重采样 / 掩膜复核 / 拼接融合 / 模板复合对位 ----------------
+
+/// 批量局部相位配准（大图局部错位检测）：两图按统一网格切 tile_w×tile_h 瓦片，
+/// 逐瓦片相位配准（口径同 Image2DAlg_PhaseCorrelate：灰度 + CV_32F + 默认窗），
+/// 每次瓦片 (dx,dy) 各异——晶圆/面板大图的局部错位分布检测。
+/// [in]  ref/moved      两张图（同尺寸同通道，否则 -3；彩色先转灰度）
+/// [in]  tile_w/tile_h  瓦片尺寸（>= 16 且 <= 图宽/高，否则 -3）。网格 cols =
+///                      width/tile_w、rows = height/tile_h（整除向下取整，余数
+///                      边缘条带裁掉不参与）；tile 索引行主序 index = r*cols + c，
+///                      瓦片起点 (c*tile_w, r*tile_h)
+/// [out] out_dx/out_dy/out_response  各 tile_count 个 double 的调用方预分配数组
+///                      （任一 NULL -> -1）：逐瓦片平移量与峰值响应 [0,1]；
+///                      response 低的瓦片原样输出，由调用方自行过滤
+/// [out] out_count      两段式容量契约（必填，NULL -> -1）：传入 = 三个输出数组
+///                      各自的容量；tile_count = cols*rows > 容量 -> -3 且
+///                      *out_count = tile_count（扩容后重调）；成功 *out_count =
+///                      tile_count
+/// 返回：0 成功；-1 空指针/空图；-3 tile 参数非法 / 两图尺寸通道不符 / 容量不足；
+///       -99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_PhaseCorrelateBatch(const Image2DAlg_Image* ref,
+                                                     const Image2DAlg_Image* moved,
+                                                     int tile_w, int tile_h,
+                                                     double* out_dx, double* out_dy,
+                                                     double* out_response, int* out_count);
+
+/// 偏移重采样（对位后内容回正）：dst(x, y) = src(x−dx, y−dy)——把"内容平移了
+/// (dx,dy)"的图搬回原位（对位流水线：对位输出 (dx,dy) 后按本口径重采样，内容
+/// 回到参考帧坐标）；越界区域补 0（BORDER_CONSTANT）。
+/// [in]  in             输入图（1/3/4 通道；输出与输入同尺寸同通道）
+/// [in]  dx/dy          平移量（像素，亚像素合法——插值口径见 interpolation）
+/// [in]  interpolation  0 = INTER_NEAREST（掩膜/二值图，避免插值产生非 0/255 的
+///                      灰度过渡）/ 1 = INTER_LINEAR（灰度/连续图；其他 -> -3）
+/// [out] out            同尺寸同通道（malloc 新紧排缓冲，用 Image2DAlg_FreeImage
+///                      释放）
+/// 返回：0 成功；-1 空指针/空图；-3 interpolation 非法；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_OffsetRemap(const Image2DAlg_Image* in, double dx, double dy,
+                                             int interpolation, Image2DAlg_Image* out);
+
+/// 掩膜平移复核（缺陷确认/新增/消失统计）：golden 掩膜的缺陷点 q 在 current 帧
+/// 出现在 q+(dx,dy)——先把 golden 掩膜平移采样 shifted(x, y) = golden(x−dx,
+/// y−dy)（最近邻，掩膜不做亚像素插值），再与 current 逐像素比对：
+///   out_matched = shifted≠0 且 current≠0（缺陷在预期偏移处复现——确认）
+///   out_new     = shifted==0 且 current≠0（golden 没有、current 新出现——新增）
+///   out_missed  = shifted≠0 且 current==0（golden 有、current 没有——消失）
+/// 与对位输出配套：dx/dy 来自对位结果（PhaseCorrelate/ORBAlign/ECCAlign 等），
+/// 符号语义 = golden 内容相对 current 平移 (dx,dy)。
+/// [in]  golden_mask/current_mask  两帧掩膜（均须 8U 单通道且同尺寸，否则 -3；
+///                      非 0 像素视为缺陷前景）
+/// [out] out_matched/out_new/out_missed  三类像素计数（必填，任一 NULL -> -1）
+/// 返回：0 成功；-1 空指针/空图；-3 非 8U 单通道/尺寸不一致；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_MaskShiftRecheck(const Image2DAlg_Image* golden_mask,
+                                                  const Image2DAlg_Image* current_mask,
+                                                  double dx, double dy,
+                                                  int* out_matched, int* out_new,
+                                                  int* out_missed);
+
+/// 两图拼接融合（拼接 merge）：next 的内容相对 base 平移了 (dx,dy)——next 的
+/// (0,0) 放置在 base 坐标系的 (floor(dx), floor(dy)) 处（与 PhaseCorrelate(base,
+/// next) 输出直接配套）。dx/dy 按 floor 取整后整数平移拼接（亚像素精拼先走
+/// OffsetRemap 预对齐再拼）。画布 = base 矩形 [0,w_b)×[0,h_b) ∪ next 矩形
+/// [fx,fx+w_n)×[fy,fy+h_n) 的包围盒（fx=(int)floor(dx), fy=(int)floor(dy)）。
+/// 融合规则：两图重叠区内沿 X 方向线性渐变——重叠列区间 [x0,x1)（x0 = 重叠
+/// 起点列，x1 = 重叠终点边界），weight_base(x) = (x1−x)/(x1−x0)，dst =
+/// base·w + next·(1−w)（逐像素按通道混合：起点列 w=1 全 base，沿 X 渐变到
+/// next 侧；重叠宽 1 像素时 w=0.5）；非重叠区直接拷贝来源图；矩形
+/// 不相交 = 直接放置（画布空隙为 0）。
+/// [in]  base/next      两张同通道图（通道数不一致 -> -3；尺寸可不同）
+/// [in]  dx/dy          next 相对 base 的平移量（像素；floor 取整后整数拼接）
+/// [out] out_origin_x/out_origin_y  base 的 (0,0) 在输出画布中的位置（必填，
+///                      任一 NULL -> -1）
+/// [out] out            画布（malloc 新紧排缓冲，用 Image2DAlg_FreeImage 释放；
+///                      通道数同输入；画布尺寸按输入动态确定，调用方读
+///                      out->width/height 使用）
+/// 返回：0 成功；-1 空指针/空图；-3 通道数不一致；-4 画布内存不足；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_StitchBlend(const Image2DAlg_Image* base,
+                                             const Image2DAlg_Image* next,
+                                             double dx, double dy,
+                                             int* out_origin_x, int* out_origin_y,
+                                             Image2DAlg_Image* out);
+
+/// 模板复合仿射对位（golden EB align / scan area align 二合一）：金样模板对位，
+/// 模板匹配粗对位（抗重复图案，限定搜索范围）+ ORB 精修三步复合，输出
+/// golden→current 的 2x3 仿射（行主序，与 ORBAlign/EstimateAffinePartial 同向：
+/// 图1 点 → 图2 点，可直接接 WarpAffine）。实现配方：
+///   1. 粗对位：多尺度×多角度模板匹配（口径同 MatchTemplateEx，TM_CCOEFF_NORMED；
+///      步进 = 区间非退化时 0.05 / 退化区间（lo==hi）只算单尺度/单角度），得
+///      (cx, cy, scale, angle, score)——cx/cy 为 golden 中心在 current 上的落点；
+///      旋转外接画布超出 current 尺寸的角度跳过（模板与 current 尺寸接近时
+///      大角度必然越界，属正常搜索边界而非失败；全尺度全角度无效 -> -2）；
+///   2. 粗变换：M_rough = T(cx,cy)·R(angle)·S(scale)·T(−golden 中心)，把 golden
+///      warpAffine 到 current 帧（尺寸 = current，INTER_LINEAR，越界补 0）；
+///   3. 精修：对 (warpedGolden, current) 做 ORB 匹配 + RANSAC 仿射估计（内部
+///      口径同 ORBAlign），得残差 m_local（warpedGolden → current）；
+///   合成：M_total = M_local ∘ M_rough（A = A_l·A_r，b = A_l·b_r + b_l）写入 m[6]。
+/// [in]  golden/current      金样模板图与当前图（彩色先转灰度）
+/// [in]  rough_scale_lo/hi   粗对位尺度区间（0 < lo <= hi，否则 -3；lo==hi 允许
+///                           = 只算单尺度）
+/// [in]  rough_angle_lo/hi   粗对位角度区间（度，lo <= hi，否则 -3；lo==hi 允许
+///                           = 只算单角度）
+/// [in]  n_features    ORB 特征点上限（>= 100，否则 -3——给足特征量）
+/// [in]  ratio         Lowe 比率测试系数（(0,1]，否则 -3）
+/// [in]  ransac_reproj_threshold  RANSAC 重投影阈值（像素，> 0，否则 -3）
+/// [out] m             2x3 行主序 golden→current（必填，NULL -> -1）
+/// [out] out_inliers   精修 RANSAC 内点数（仿射质量指标：>= 10 视为可靠；必填）
+/// [out] out_rough_score  粗对位得分（TM_CCOEFF_NORMED，越大越好；必填）
+/// 返回：0 成功；-1 空指针/空图；-2 粗对位失败（模板全尺度越界/得分无效）或
+///       精修匹配不足（< 3 对/内点 < 8——小样本仿射解不可信）或求解失败
+///       ——平坦图属正常失败；-3 参数越界；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_TemplateAffineAlign(const Image2DAlg_Image* golden,
+                                                     const Image2DAlg_Image* current,
+                                                     double rough_scale_lo, double rough_scale_hi,
+                                                     double rough_angle_lo, double rough_angle_hi,
+                                                     int n_features, double ratio,
+                                                     double ransac_reproj_threshold,
+                                                     double m[6], int* out_inliers,
+                                                     double* out_rough_score);
 
 #ifdef __cplusplus
 }

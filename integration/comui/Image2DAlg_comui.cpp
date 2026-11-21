@@ -3496,3 +3496,332 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiDenoiseNLMeans(const AlgoCInput* in, AlgoC
 }
 
 } // extern "C"（2.3.0 滤波扩展追加段）
+
+// =====================================================================
+// 2.5.0 对位拼接扩展接入（2026-11-21，5 个入口，追加在文件尾部，
+// 封装 Image2DAlg 2.5.0 对位拼接扩展 C API——与 2.4.0/2.3.0 段同规则：
+// 只做参数组装、错误码映射与消息拼装，不新增算法）：
+//   alg.image2d.phase_correlate_batch  —— PhaseCorrelateBatch（批量局部相位配准：
+//                                          大图瓦片级局部错位分布检测）
+//   alg.image2d.offset_remap           —— OffsetRemap（偏移重采样：对位后内容回正）
+//   alg.image2d.mask_shift_recheck     —— MaskShiftRecheck（掩膜平移复核：
+//                                          缺陷确认/新增/消失统计）
+//   alg.image2d.stitch_blend           —— StitchBlend（两图拼接融合：拼接 merge）
+//   alg.image2d.template_affine_align  —— TemplateAffineAlign（模板复合仿射对位：
+//                                          golden EB align / scan area align 二合一）
+// 测量类节点结果并入 error 消息通道（phase_correlate/region_stats 先例）；
+// mask_shift_recheck 的掩膜输入沿用 match_template_masked 的宿主侧灰度 BGRA
+// 约定（适配层转单通道后交核心）。
+// =====================================================================
+
+extern "C" {
+
+// 追加 4 位小数 double 列表（最多列前 8 个，超出截断加 "…"；逗号分隔），
+// 返回新写入位置——%.4f 对极端 double 的展开宽度无上界，写后钳制 pos 防
+// 后续 snprintf 的剩余容量参数下溢（hough 消息的同款增量拼装风格 + 钳制）。
+static int AppendDoubleList4(char* msg, size_t cap, int pos, const double* vals, int count) {
+    const int shown = (count < 8) ? count : 8;
+    for (int i = 0; i < shown && pos < (int)cap - 32; ++i) {
+        pos += snprintf(msg + pos, cap - (size_t)pos, "%s%.4f", i ? "," : "", vals[i]);
+        if (pos > (int)cap - 1) pos = (int)cap - 1;
+    }
+    if (count > 8 && pos < (int)cap - 8) {
+        pos += snprintf(msg + pos, cap - (size_t)pos, ",…");
+        if (pos > (int)cap - 1) pos = (int)cap - 1;
+    }
+    return pos;
+}
+
+// ---------------- 算子入口：批量局部相位配准（node.json: alg.image2d.phase_correlate_batch） ----------------
+// phase_correlate 的批量版：两图按统一网格切 tile_w×tile_h 瓦片逐瓦片相位配准
+//（口径同 Image2DAlg_PhaseCorrelate：灰度 + CV_32F + 默认窗），输出逐瓦片平移量
+// 与峰值响应——晶圆/面板大图的局部错位分布检测。瓦片行主序 index = r*cols + c、
+// 起点 (c*tile_w, r*tile_h)；网格整除向下取整，余数边缘条带裁掉不参与。
+// 输入 2 张图像：images[0]=参考图，images[1]=待配图（同尺寸同通道，彩色核心层
+// 先转灰度）。
+// 参数（按声明顺序）：
+//   tile_w  number  默认 64  [16,100000]  瓦片宽（>=16 且 <= 图宽，否则核心层 -3）
+//   tile_h  number  默认 64  [16,100000]  瓦片高（>=16 且 <= 图高，否则核心层 -3）
+// 输出：无端口；逐瓦片结果并入消息通道（phase_correlate 先例），每组 4 位小数、
+//   最多列前 8 组（超出截断加 "…"）：
+//   "tiles=N dx=…,… dy=…,… resp=…,…"（低响应瓦片未过滤，由下游自行取舍）。
+// 注：核心层两段式容量契约——先按容量 0 探询 tile_count（-3 回填所需容量，探询
+//     调用须传非空数组），malloc 三段输出数组后重调。
+// 错误码：1 输入不足；2 输入为空/计算失败（核心层 -1/-99）/内存不足；
+//         3 参数非法（tile 需 >=16 且不超图尺寸；两图尺寸/通道须一致，核心层 -3）。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiPhaseCorrelateBatch(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 2 || !in->images || !in->images[1].bgra) {
+        out->error = "需要 2 个图像输入（参考图/待配图）"; return 1;
+    }
+    double tw = 64.0, th = 64.0;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) tw = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 1)) th = p->d;
+    const int tile_w = (int)tw, tile_h = (int)th;
+
+    Image2DAlg_Image ref = CoreInputFrom(in->images[0]);
+    Image2DAlg_Image moved = CoreInputFrom(in->images[1]);
+
+    // 两段式容量契约（api.h 2.5.0）：核心层先查输出指针非空再查容量，探询调用
+    // 须传非空数组——按 1 容量 malloc 占位、以容量 0 探询（-3 回填 tile_count）
+    double* dx = (double*)malloc(sizeof(double));
+    double* dy = (double*)malloc(sizeof(double));
+    double* resp = (double*)malloc(sizeof(double));
+    if (!dx || !dy || !resp) { free(dx); free(dy); free(resp); out->error = "内存不足"; return 2; }
+    int count = 0;
+    int rc = Image2DAlg_PhaseCorrelateBatch(&ref, &moved, tile_w, tile_h,
+                                            dx, dy, resp, &count);
+    if (rc == -1) { free(dx); free(dy); free(resp); out->error = "输入为空"; return 2; }
+    if (rc == -3 && count <= 0) {   // 容量探询未发生（tile 参数/两图尺寸通道错误）
+        free(dx); free(dy); free(resp);
+        out->error = "批量相位配准失败（tile 需 >=16 且不超图尺寸；两图尺寸/通道须一致）";
+        return 3;
+    }
+    if (rc != 0 && rc != -3) { free(dx); free(dy); free(resp); out->error = "批量相位配准失败"; return 2; }
+    // rc == -3 且 count = 所需 tile_count：释放占位数组，扩容后重调
+    free(dx); free(dy); free(resp);
+    dx = (double*)malloc(sizeof(double) * (size_t)count);
+    dy = (double*)malloc(sizeof(double) * (size_t)count);
+    resp = (double*)malloc(sizeof(double) * (size_t)count);
+    if (!dx || !dy || !resp) { free(dx); free(dy); free(resp); out->error = "内存不足"; return 2; }
+    rc = Image2DAlg_PhaseCorrelateBatch(&ref, &moved, tile_w, tile_h, dx, dy, resp, &count);
+    if (rc == -1) { free(dx); free(dy); free(resp); out->error = "输入为空"; return 2; }
+    if (rc == -3) {
+        free(dx); free(dy); free(resp);
+        out->error = "批量相位配准失败（tile 需 >=16 且不超图尺寸；两图尺寸/通道须一致）";
+        return 3;
+    }
+    if (rc != 0) { free(dx); free(dy); free(resp); out->error = "批量相位配准失败"; return 2; }
+
+    static char msg[900];
+    int pos = snprintf(msg, sizeof(msg), "tiles=%d dx=", count);
+    pos = AppendDoubleList4(msg, sizeof(msg), pos, dx, count);
+    pos += snprintf(msg + pos, sizeof(msg) - (size_t)pos, " dy=");
+    pos = AppendDoubleList4(msg, sizeof(msg), pos, dy, count);
+    pos += snprintf(msg + pos, sizeof(msg) - (size_t)pos, " resp=");
+    AppendDoubleList4(msg, sizeof(msg), pos, resp, count);
+    free(dx); free(dy); free(resp);
+
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：偏移重采样（node.json: alg.image2d.offset_remap） ----------------
+// 对位后内容回正：dst(x, y) = src(x−dx, y−dy)——把"内容平移了 (dx,dy)"的图搬回
+// 原位（对位流水线：对位节点输出 (dx,dy) 后按本口径重采样，内容回到参考帧坐标）；
+// 越界区域补 0，输出与输入同尺寸同通道。
+// 输入：images[0]=输入图（1/3/4 通道，宿主 BGRA 直通）。
+// 参数（按声明顺序）：
+//   dx             number  默认 0  X 平移量（像素，亚像素合法）
+//   dy             number  默认 0  Y 平移量（像素，亚像素合法）
+//   interpolation  int     默认 1  0=最近邻（掩膜/二值图，避免插值产生非 0/255
+//                                  的灰度过渡）/ 1=双线性（灰度/连续图；其他 -3）
+// 输出：校正后图像（BGRA）。
+// 消息通道："offset=(dx, dy) interp=N size=WxH"。
+// 错误码：1 输入未连线；2 输入为空/处理失败（核心层 -1/-99）/内存不足；
+//         3 参数非法（interpolation 非 0/1，核心层 -3）。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiOffsetRemap(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 1 || !in->images) { out->error = "输入未连线"; return 1; }
+    double dx = 0.0, dy = 0.0;
+    int interpolation = 1;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) dx = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 1)) dy = p->d;
+    if (const AlgoCParam* p = FindParam(in, 1, 0)) interpolation = p->i;
+
+    Image2DAlg_Image input = CoreInputFrom(in->images[0]);
+    Image2DAlg_Image result = {};
+    const int rc = Image2DAlg_OffsetRemap(&input, dx, dy, interpolation, &result);
+    if (rc == -1) { out->error = "输入为空"; return 2; }
+    if (rc == -3) { out->error = "偏移重采样失败（interpolation 仅 0=最近邻/1=双线性）"; return 3; }
+    if (rc != 0)  { out->error = "偏移重采样失败"; return 2; }
+
+    static char msg[128];
+    snprintf(msg, sizeof(msg), "offset=(%.4f, %.4f) interp=%d size=%dx%d",
+             dx, dy, interpolation, result.width, result.height);
+
+    out->images = MakeBgraOut(result);
+    Image2DAlg_FreeImage(&result);
+    if (!out->images) { out->error = "内存不足"; return 2; }
+    out->imageCount = 1;
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：掩膜平移复核（node.json: alg.image2d.mask_shift_recheck） ----------------
+// 缺陷确认/新增/消失统计：golden 掩膜的缺陷点 q 在 current 帧出现在 q+(dx,dy)——
+// 先把 golden 掩膜平移采样（最近邻，掩膜不做亚像素插值），再与 current 逐像素
+// 比对：matched = 平移后 golden 与 current 均非 0（缺陷在预期偏移处复现——确认）、
+// new = 仅 current 非 0（golden 没有、current 新出现——新增）、missed = 仅平移后
+// golden 非 0（golden 有、current 没有——消失）。dx/dy 与对位节点（相位相关/
+// ORB/ECC 对位）输出配套，符号语义 = golden 内容相对 current 平移 (dx,dy)。
+// 输入 2 张图像：images[0]=golden 掩膜，images[1]=current 掩膜（8U 单通道语义，
+// 非 0 = 缺陷前景，两帧须同尺寸；宿主 BGRA 按灰度语义转单通道后交核心——核心
+// 只收 1 通道掩膜，match_template_masked 先例）。
+// 参数（按声明顺序）：
+//   dx  number  默认 0  X 平移量（像素，来自对位结果）
+//   dy  number  默认 0  Y 平移量（像素，来自对位结果）
+// 输出：无端口；三类像素计数并入消息通道（region_stats/phase_correlate 先例）：
+//   "matched=A new=B missed=C dx=… dy=…"（new > 0 = 出现 golden 没有的新增
+//   缺陷——建议下游按 new > 0 判 NG，matched/missed 供工艺确认）。
+// 错误码：1 输入不足；2 输入为空/复核失败（核心层 -1/-99）；
+//         3 掩膜非法（须单通道语义且两帧同尺寸，核心层 -3）。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiMaskShiftRecheck(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 2 || !in->images || !in->images[1].bgra) {
+        out->error = "需要 2 个图像输入（golden 掩膜/current 掩膜）"; return 1;
+    }
+    double dx = 0.0, dy = 0.0;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) dx = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 1)) dy = p->d;
+
+    // 掩膜宿主侧为 BGRA（B=G=R 灰度语义），适配层转单通道后交核心（核心只收
+    // 8U 单通道掩膜，match_template_masked 先例）
+    cv::Mat gVis(in->images[0].height, in->images[0].width, CV_8UC4,
+                 (void*)in->images[0].bgra);
+    cv::Mat cVis(in->images[1].height, in->images[1].width, CV_8UC4,
+                 (void*)in->images[1].bgra);
+    cv::Mat gGray, cGray;
+    cv::cvtColor(gVis, gGray, cv::COLOR_BGRA2GRAY);
+    cv::cvtColor(cVis, cGray, cv::COLOR_BGRA2GRAY);
+    Image2DAlg_Image golden = {};
+    golden.width = in->images[0].width;
+    golden.height = in->images[0].height;
+    golden.channels = 1;
+    golden.data = gGray.data;
+    Image2DAlg_Image current = {};
+    current.width = in->images[1].width;
+    current.height = in->images[1].height;
+    current.channels = 1;
+    current.data = cGray.data;
+
+    int matched = 0, added = 0, missed = 0;
+    const int rc = Image2DAlg_MaskShiftRecheck(&golden, &current, dx, dy,
+                                               &matched, &added, &missed);
+    if (rc == -3) { out->error = "掩膜复核失败（掩膜须单通道语义且两帧同尺寸）"; return 3; }
+    if (rc != 0)  { out->error = "掩膜复核失败"; return 2; }
+
+    static char msg[160];
+    snprintf(msg, sizeof(msg), "matched=%d new=%d missed=%d dx=%.4f dy=%.4f",
+             matched, added, missed, dx, dy);
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：两图拼接融合（node.json: alg.image2d.stitch_blend） ----------------
+// 拼接 merge：next 的内容相对 base 平移了 (dx,dy)——next 的 (0,0) 放置在 base
+// 坐标系的 (floor(dx), floor(dy)) 处（与相位相关平移 PhaseCorrelate(base, next)
+// 输出直接配套；亚像素精拼先接偏移重采样节点预对齐再拼）。画布 = base 矩形 ∪
+// next 矩形的包围盒，重叠区沿 X 方向线性渐变融合（起点列全 base、渐变到 next
+// 侧），非重叠区直接拷贝来源图，画布空隙为 0。
+// 输入 2 张图像：images[0]=基准图，images[1]=拼接图（通道数须一致，尺寸可不同）。
+// 参数（按声明顺序）：
+//   dx  number  默认 0  next 相对 base 的 X 平移量（像素，floor 取整后整数拼接）
+//   dy  number  默认 0  next 相对 base 的 Y 平移量（像素，floor 取整后整数拼接）
+// 输出：拼接画布（BGRA；尺寸按输入动态确定）。
+// 消息通道："origin=(ox, oy) size=WxH dx=… dy=…"（origin = base 原点在画布中的
+//            位置——下游坐标换算用）。
+// 错误码：1 输入不足；2 输入为空/拼接失败（核心层 -1/-99）/内存不足；
+//         3 通道数不一致（核心层 -3）。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiStitchBlend(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 2 || !in->images || !in->images[1].bgra) {
+        out->error = "需要 2 个图像输入（基准图/拼接图）"; return 1;
+    }
+    double dx = 0.0, dy = 0.0;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) dx = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 1)) dy = p->d;
+
+    Image2DAlg_Image base = CoreInputFrom(in->images[0]);
+    Image2DAlg_Image next = CoreInputFrom(in->images[1]);
+    int origin_x = 0, origin_y = 0;
+    Image2DAlg_Image result = {};
+    const int rc = Image2DAlg_StitchBlend(&base, &next, dx, dy,
+                                          &origin_x, &origin_y, &result);
+    if (rc == -1) { out->error = "输入为空"; return 2; }
+    if (rc == -3) { out->error = "拼接失败（两图通道数须一致）"; return 3; }
+    if (rc != 0)  { out->error = "拼接失败"; return 2; }
+
+    static char msg[160];
+    snprintf(msg, sizeof(msg), "origin=(%d, %d) size=%dx%d dx=%.4f dy=%.4f",
+             origin_x, origin_y, result.width, result.height, dx, dy);
+
+    out->images = MakeBgraOut(result);
+    Image2DAlg_FreeImage(&result);
+    if (!out->images) { out->error = "内存不足"; return 2; }
+    out->imageCount = 1;
+    out->error = msg;
+    return 0;
+}
+
+// ---------------- 算子入口：模板复合仿射对位（node.json: alg.image2d.template_affine_align） ----------------
+// golden EB align / scan area align 二合一：金样模板对位三步复合——
+//   1. 粗对位：多尺度×多角度模板匹配（TM_CCOEFF_NORMED，步进 0.05；lo==hi 退化
+//      区间只算单尺度/单角度），得 golden 中心在 current 上的落点/尺度/角度；
+//   2. 粗变换：把 golden warpAffine 到 current 帧；
+//   3. 精修：ORB 匹配 + RANSAC 仿射估计（口径同 ORBAlign），合成 golden→current
+//      的 2x3 仿射（行主序，与 ORB 对位/估计变换同向：golden 点 → current 点）。
+// 输入 2 张图像：images[0]=金样模板，images[1]=当前图（彩色核心层先转灰度）。
+// 参数（按 C API 参数顺序，全部 number）：
+//   rough_scale_lo/hi  number  默认 1.0/1.0  粗对位尺度区间（0 < lo <= hi；
+//                                       lo==hi = 只算单尺度）
+//   rough_angle_lo/hi  number  默认 0/0     粗对位角度区间（度，lo <= hi；
+//                                       lo==hi = 只算单角度）
+//   n_features         number  默认 500     ORB 特征点上限（>= 100，给足特征量）
+//   ratio              number  默认 0.8     Lowe 比率测试系数（(0,1]）
+//   ransac_threshold   number  默认 3.0     RANSAC 重投影阈值（像素，> 0）
+// 输出：无端口；仿射矩阵并入消息通道（warp_affine 节点的 m 参数可直接抄入）：
+//   "m=[a00 a01 tx; a10 a11 ty] tx=… ty=… inliers=N rough=S"（tx/ty = 平移列
+//   m[2]/m[5]，下游最常用；inliers >= 10 视为可靠，rough = 粗对位得分）。
+// 错误码：1 输入不足；2 输入为空/计算失败（核心层 -1/-99）/内存不足；
+//         3 参数非法（尺度区间 0<lo<=hi、角度区间 lo<=hi、n_features >= 100、
+//           ratio ∈ (0,1]、threshold > 0，核心层 -3）；
+//         4 对位失败（粗对位全尺度越界/得分无效或精修匹配不足 < 3 对——平坦图
+//           属正常失败，核心层 -2）。
+
+IMAGE2DALG_EXPORT int Image2DAlg_ComuiTemplateAffineAlign(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->imageCount < 2 || !in->images || !in->images[1].bgra) {
+        out->error = "需要 2 个图像输入（金样模板/当前图）"; return 1;
+    }
+    double s_lo = 1.0, s_hi = 1.0, a_lo = 0.0, a_hi = 0.0;
+    double n_feat = 500.0, ratio = 0.8, thr = 3.0;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) s_lo = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 1)) s_hi = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 2)) a_lo = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 3)) a_hi = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 4)) n_feat = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 5)) ratio = p->d;
+    if (const AlgoCParam* p = FindParam(in, 0, 6)) thr = p->d;
+
+    Image2DAlg_Image golden = CoreInputFrom(in->images[0]);
+    Image2DAlg_Image current = CoreInputFrom(in->images[1]);
+    double m[6] = { 0 };
+    int inliers = 0;
+    double rough = 0.0;
+    const int rc = Image2DAlg_TemplateAffineAlign(&golden, &current, s_lo, s_hi,
+                                                  a_lo, a_hi, (int)n_feat, ratio,
+                                                  thr, m, &inliers, &rough);
+    if (rc == -2) {
+        out->error = "模板对位失败（粗对位无有效落点或精修匹配不足——平坦图/形变过大属正常失败，可调宽尺度角度区间重试）";
+        return 4;
+    }
+    if (rc == -3) {
+        out->error = "模板对位失败（尺度需 0<lo<=hi、角度需 lo<=hi、n_features>=100、ratio∈(0,1]、threshold>0）";
+        return 3;
+    }
+    if (rc != 0)  { out->error = "模板对位失败"; return 2; }
+
+    static char msg[256];
+    snprintf(msg, sizeof(msg),
+             "m=[%.4f %.4f %.4f; %.4f %.4f %.4f] tx=%.4f ty=%.4f inliers=%d rough=%.4f",
+             m[0], m[1], m[2], m[3], m[4], m[5], m[2], m[5], inliers, rough);
+    out->error = msg;
+    return 0;
+}
+
+} // extern "C"（2.5.0 对位拼接扩展追加段）

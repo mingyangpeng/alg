@@ -1,0 +1,62 @@
+{
+  "node": {
+    "id": "alg.image2d.stitch_blend",
+    "name": "两图拼接融合",
+    "group": "2D 图像",
+    "category": "处理",
+    "description": "两图拼接融合（拼接 merge）：next 的内容相对 base 平移了 (dx,dy)，next 的 (0,0) 放置在 base 坐标系 (floor(dx),floor(dy)) 处——与相位相关平移节点的输出直接配套（亚像素精拼先接偏移重采样预对齐再拼）；画布 = 两图矩形并集的包围盒，重叠区沿 X 方向线性渐变融合（起点列全 base、渐变到 next 侧），非重叠区直接拷贝来源图，空隙为 0；origin（base 原点在画布中的位置）与画布尺寸并入节点消息，供下游坐标换算"
+  },
+  "runtime": "native",
+  "assembly": "Image2DAlg.dll",
+  "method": "Image2DAlg_ComuiStitchBlend",
+  "inputs": [
+    {
+      "name": "基准图",
+      "type": "image"
+    },
+    {
+      "name": "拼接图",
+      "type": "image"
+    }
+  ],
+  "params": [
+    {
+      "name": "dx",
+      "label": "X 平移(px)",
+      "type": "number",
+      "default": 0,
+      "min": -100000,
+      "max": 100000,
+      "description": "next 相对 base 的 X 平移量（像素；floor 取整后整数拼接，通常取 PhaseCorrelate(base,next) 的 dx）"
+    },
+    {
+      "name": "dy",
+      "label": "Y 平移(px)",
+      "type": "number",
+      "default": 0,
+      "min": -100000,
+      "max": 100000,
+      "description": "next 相对 base 的 Y 平移量（像素；floor 取整后整数拼接，通常取 PhaseCorrelate(base,next) 的 dy）"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "拼接画布",
+      "type": "image"
+    }
+  ],
+  "source": {
+    "files": [
+      "integration/comui/Image2DAlg_comui.cpp",
+      "integration/comui/comui_native_abi.h",
+      "src/AlgExport.h",
+      "src/Image2DAlg/Image2DAlg_api.cpp",
+      "src/Image2DAlg/Image2DAlg_Ops.cpp",
+      "src/Image2DAlg/include/Image2DAlg_api.h"
+    ],
+    "includes": [
+      "src",
+      "src/Image2DAlg/include"
+    ]
+  }
+}

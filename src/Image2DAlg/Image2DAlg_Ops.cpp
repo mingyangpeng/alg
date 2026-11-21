@@ -3091,4 +3091,320 @@ int Image2DAlg_FitCircleBatch(const float* xy, const int* group_offsets, int gro
     }
 }
 
+// ---------------- 对位拼接扩展（2.5.0 新增） ----------------
+
+int Image2DAlg_PhaseCorrelateBatch(const Image2DAlg_Image* ref, const Image2DAlg_Image* moved,
+                                   int tile_w, int tile_h,
+                                   double* out_dx, double* out_dy,
+                                   double* out_response, int* out_count) {
+    cv::Mat a, b;
+    if (!out_dx || !out_dy || !out_response || !out_count) return -1;
+    if (int rc = Wrap(ref, a)) return rc;
+    if (int rc = Wrap(moved, b)) return rc;
+    if (a.rows != b.rows || a.cols != b.cols || a.channels() != b.channels()) return -3;
+    // 瓦片尺寸落在 [16, 图宽/高]；网格整除向下取整，余数边缘条带裁掉
+    if (tile_w < 16 || tile_h < 16 || tile_w > a.cols || tile_h > a.rows) return -3;
+    const int cols = a.cols / tile_w;
+    const int rows = a.rows / tile_h;
+    const int tile_count = cols * rows;   // tile_w/h <= 图宽/高 保证 >= 1
+    // 两段式容量契约：容量不足 -> 报所需 tile_count，调用方扩容后重调
+    if (tile_count > *out_count) {
+        *out_count = tile_count;
+        return -3;
+    }
+    try {
+        // 瓦片起点 (c*tile_w, r*tile_h)，行主序 index = r*cols + c；
+        // 逐瓦片口径同 PhaseCorrelate：灰度 -> CV_32F -> phaseCorrelate（默认窗）
+        for (int r = 0; r < rows; ++r) {
+            for (int c = 0; c < cols; ++c) {
+                const cv::Rect tile(c * tile_w, r * tile_h, tile_w, tile_h);
+                cv::Mat f1, f2;
+                GrayOf(a(tile)).convertTo(f1, CV_32F);   // phaseCorrelate 要求 float
+                GrayOf(b(tile)).convertTo(f2, CV_32F);
+                double response = 0.0;
+                const cv::Point2d shift = cv::phaseCorrelate(f1, f2, cv::noArray(), &response);
+                const int index = r * cols + c;
+                out_dx[index] = shift.x;
+                out_dy[index] = shift.y;
+                out_response[index] = response;   // 低响应瓦片原样输出，调用方过滤
+            }
+        }
+        *out_count = tile_count;
+        return 0;
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+int Image2DAlg_OffsetRemap(const Image2DAlg_Image* in, double dx, double dy,
+                           int interpolation, Image2DAlg_Image* out) {
+    cv::Mat src;
+    if (int rc = Wrap(in, src)) return rc;
+    if (!out) return -1;
+    // 0 = INTER_NEAREST（掩膜/二值图）/ 1 = INTER_LINEAR（灰度/连续图）
+    if (interpolation != 0 && interpolation != 1) return -3;
+    try {
+        // dst(x,y) = src(x-dx, y-dy)：平移矩阵 M = (1,0,-dx / 0,1,-dy) 叠加
+        // WARP_INVERSE_MAP 使 cv 直接按 M 采样（dst(x,y) = src(M·[x,y,1]ᵀ)）——
+        // 不加该位 cv 会先对 M 求逆，方向相反。越界补 0
+        cv::Mat m = (cv::Mat_<double>(2, 3) << 1.0, 0.0, -dx, 0.0, 1.0, -dy);
+        const int flags = (interpolation == 0 ? cv::INTER_NEAREST : cv::INTER_LINEAR)
+                          | cv::WARP_INVERSE_MAP;
+        cv::Mat dst;
+        cv::warpAffine(src, dst, m, src.size(), flags, cv::BORDER_CONSTANT,
+                       cv::Scalar::all(0));
+        return CopyOut(dst, out);
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+int Image2DAlg_MaskShiftRecheck(const Image2DAlg_Image* golden_mask,
+                                const Image2DAlg_Image* current_mask,
+                                double dx, double dy,
+                                int* out_matched, int* out_new, int* out_missed) {
+    cv::Mat g, c;
+    if (!out_matched || !out_new || !out_missed) return -1;
+    if (int rc = Wrap(golden_mask, g)) return rc;
+    if (int rc = Wrap(current_mask, c)) return rc;
+    // 掩膜契约：8U 单通道（深度 8U 由 Wrap 保证，同 DistanceTransform 口径），
+    // 非 0 = 前景；两帧同尺寸
+    if (g.channels() != 1 || c.channels() != 1) return -3;
+    if (g.rows != c.rows || g.cols != c.cols) return -3;
+    try {
+        // shifted(x,y) = golden(x-dx, y-dy)：最近邻 + 越界补 0（掩膜不做亚像素
+        // 插值；平移口径同 OffsetRemap——M + WARP_INVERSE_MAP 直接按 M 采样）
+        cv::Mat m = (cv::Mat_<double>(2, 3) << 1.0, 0.0, -dx, 0.0, 1.0, -dy);
+        cv::Mat shifted;
+        cv::warpAffine(g, shifted, m, g.size(),
+                       cv::INTER_NEAREST | cv::WARP_INVERSE_MAP,
+                       cv::BORDER_CONSTANT, cv::Scalar::all(0));
+        int matched = 0, added = 0, missed = 0;
+        for (int y = 0; y < c.rows; ++y) {
+            const unsigned char* sr = shifted.ptr<unsigned char>(y);
+            const unsigned char* cr = c.ptr<unsigned char>(y);
+            for (int x = 0; x < c.cols; ++x) {
+                const bool s = sr[x] != 0;
+                const bool k = cr[x] != 0;
+                if (s && k) ++matched;          // 确认缺陷（预期偏移处复现）
+                else if (!s && k) ++added;      // 新增缺陷
+                else if (s && !k) ++missed;     // 消失缺陷
+            }
+        }
+        *out_matched = matched;
+        *out_new = added;
+        *out_missed = missed;
+        return 0;
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+int Image2DAlg_StitchBlend(const Image2DAlg_Image* base, const Image2DAlg_Image* next,
+                           double dx, double dy,
+                           int* out_origin_x, int* out_origin_y,
+                           Image2DAlg_Image* out) {
+    cv::Mat mb, mn;
+    if (!out || !out_origin_x || !out_origin_y) return -1;
+    if (int rc = Wrap(base, mb)) return rc;
+    if (int rc = Wrap(next, mn)) return rc;
+    if (mb.channels() != mn.channels()) return -3;   // 尺寸可不同，通道须一致
+    // next 的 (0,0) 放置在 base 坐标系 (floor(dx), floor(dy))（亚像素精拼先走
+    // OffsetRemap 预对齐）；画布 = 两矩形并集的包围盒，原点 = (min(0,fx), min(0,fy))
+    const int fx = (int)std::floor(dx);
+    const int fy = (int)std::floor(dy);
+    const int ox = std::min(0, fx);
+    const int oy = std::min(0, fy);
+    const int canvas_w = std::max(mb.cols, fx + mn.cols) - ox;
+    const int canvas_h = std::max(mb.rows, fy + mn.rows) - oy;
+    // 两图在画布中的可见矩形（base 的 (0,0) 落在画布 (0-origin) = out_origin）
+    const int bx = 0 - ox, by = 0 - oy;
+    const int nx = fx - ox, ny = fy - oy;
+    try {
+        cv::Mat canvas(canvas_h, canvas_w, mb.type(), cv::Scalar::all(0));
+        mb.copyTo(canvas(cv::Rect(bx, by, mb.cols, mb.rows)));
+        mn.copyTo(canvas(cv::Rect(nx, ny, mn.cols, mn.rows)));
+        // 重叠矩形（画布坐标）：列区间 [x0, x1)（x1 = 重叠终点边界）同时被两图
+        // 覆盖，沿 X 线性渐变；其余区域只有单一来源图（copyTo 已就位）。
+        // 矩形不相交时跳过混合
+        const int x0 = std::max(bx, nx);
+        const int x1 = std::min(bx + mb.cols, nx + mn.cols);
+        const int y0 = std::max(by, ny);
+        const int y1 = std::min(by + mb.rows, ny + mn.rows);
+        if (x1 > x0 && y1 > y0) {
+            // weight_base(x) = (x1−x)/(x1−x0)：起点列全 base（w=1）、沿 X 渐变
+            // 到 next 侧（终点列 w=1/W）；重叠宽 1 像素时公式退化为 w=1，
+            // 按规格特例取 0.5（base/next 各半）
+            const int wcols = x1 - x0;
+            const int ch = mb.channels();
+            std::vector<double> weight((size_t)wcols);
+            for (int i = 0; i < wcols; ++i)
+                weight[i] = (wcols == 1) ? 0.5
+                            : (double)(wcols - i) / (double)wcols;
+            for (int y = y0; y < y1; ++y) {
+                unsigned char* dr = canvas.ptr<unsigned char>(y);
+                const unsigned char* br = mb.ptr<unsigned char>(y - by);
+                const unsigned char* nr = mn.ptr<unsigned char>(y - ny);
+                for (int x = x0; x < x1; ++x) {
+                    const double w = weight[(size_t)(x - x0)];
+                    const double w2 = 1.0 - w;
+                    unsigned char* dp = dr + (size_t)x * ch;
+                    const unsigned char* bp = br + (size_t)(x - bx) * ch;
+                    const unsigned char* np = nr + (size_t)(x - nx) * ch;
+                    for (int k = 0; k < ch; ++k)
+                        dp[k] = cv::saturate_cast<unsigned char>(bp[k] * w + np[k] * w2);
+                }
+            }
+        }
+        *out_origin_x = -ox;   // base 的 (0,0) 在画布中的位置 = (0 − origin)
+        *out_origin_y = -oy;
+        return CopyOut(canvas, out);
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+int Image2DAlg_TemplateAffineAlign(const Image2DAlg_Image* golden,
+                                   const Image2DAlg_Image* current,
+                                   double rough_scale_lo, double rough_scale_hi,
+                                   double rough_angle_lo, double rough_angle_hi,
+                                   int n_features, double ratio,
+                                   double ransac_reproj_threshold,
+                                   double m[6], int* out_inliers,
+                                   double* out_rough_score) {
+    cv::Mat mg, mc;
+    if (!m || !out_inliers || !out_rough_score) return -1;
+    if (int rc = Wrap(golden, mg)) return rc;
+    if (int rc = Wrap(current, mc)) return rc;
+    // 参数校验（退化区间 lo==hi 允许——只算单尺度/单角度）
+    if (n_features < 100) return -3;
+    if (!(ratio > 0.0 && ratio <= 1.0)) return -3;
+    if (!(ransac_reproj_threshold > 0.0)) return -3;
+    if (!(rough_scale_lo > 0.0) || rough_scale_lo > rough_scale_hi) return -3;
+    if (rough_angle_lo > rough_angle_hi) return -3;
+    try {
+        cv::Mat gg = GrayOf(mg), gc = GrayOf(mc);
+        // ---- 1. 粗对位：多尺度 × 多角度模板匹配（TM_CCOEFF_NORMED(5)，口径同
+        //         MatchTemplateEx / findRotatedMatch；步进 0.05 保证退化区间只算
+        //         一次）。逐角度展开而非调 findRotatedMatch 的原因：旋转外接画布
+        //        （|cos|+|sin| 外接矩形）在模板与 current 尺寸接近时必然越界，
+        //         cv::matchTemplate 对 oversized 模板抛异常——此处跳过该角度继续
+        //        搜索，属正常搜索边界而非失败 ----
+        const double scale_step = (rough_scale_hi > rough_scale_lo) ? 0.05 : 1.0;
+        const double angle_step = (rough_angle_hi > rough_angle_lo) ? 0.05 : 1.0;
+        const int ns = (int)((rough_scale_hi - rough_scale_lo) / scale_step + 1e-9) + 1;
+        bool found = false;
+        double best_score = 0.0, best_scale = 0.0, best_angle = 0.0;
+        cv::Point2f best_loc(0.0f, 0.0f);
+        for (int i = 0; i < ns; ++i) {
+            const double s = rough_scale_lo + i * scale_step;
+            const int tw = (int)std::lround(gg.cols * s);
+            const int th = (int)std::lround(gg.rows * s);
+            if (tw < 1 || th < 1 || tw > gc.cols || th > gc.rows)
+                continue;   // 该尺度下模板越界，跳过
+            cv::Mat scaled;
+            ImageProcessor::resize(gg, scaled, cv::Size(tw, th), 0, 0, 1);
+            const int steps = (std::min)(3600,
+                (int)std::floor((rough_angle_hi - rough_angle_lo) / angle_step) + 1);
+            for (int k = 0; k < steps; ++k) {
+                const double ang = rough_angle_lo + angle_step * (double)k;
+                const double rad = ang * CV_PI / 180.0;
+                const double ca = std::cos(rad), sa = std::sin(rad);
+                const int bw = (std::max)(1, (int)std::ceil(
+                    std::fabs((double)tw * ca) + std::fabs((double)th * sa)));
+                const int bh = (std::max)(1, (int)std::ceil(
+                    std::fabs((double)tw * sa) + std::fabs((double)th * ca)));
+                if (bw > gc.cols || bh > gc.rows)
+                    continue;   // 旋转外接画布超出 current，跳过该角度
+                cv::Mat m_rot = cv::getRotationMatrix2D(
+                    cv::Point2f(tw * 0.5f, th * 0.5f), ang, 1.0);
+                m_rot.at<double>(0, 2) += (double)bw * 0.5 - (double)tw * 0.5;
+                m_rot.at<double>(1, 2) += (double)bh * 0.5 - (double)th * 0.5;
+                cv::Mat rotated, result;
+                cv::warpAffine(scaled, rotated, m_rot, cv::Size(bw, bh), cv::INTER_LINEAR,
+                               cv::BORDER_CONSTANT, cv::Scalar::all(0));
+                ImageProcessor::matchTemplate(gc, rotated, result, 5);
+                if (result.empty()) continue;
+                cv::Point2f sub;
+                double subScore = 0.0;
+                ImageProcessor::findBestMatchSubPix(result, 5, sub, subScore);
+                // TM_CCOEFF_NORMED 越大越好；平坦块得分 NaN 跳过（全部无效 → -2）
+                if (std::isfinite(subScore) && (!found || subScore > best_score)) {
+                    found = true;
+                    best_score = subScore;
+                    // 命中中心 = 旋转画布左上角（亚像素）+ 画布半宽高（同
+                    // findRotatedMatch 口径）
+                    best_loc = cv::Point2f(sub.x + bw * 0.5f, sub.y + bh * 0.5f);
+                    best_scale = s;
+                    best_angle = ang;
+                }
+            }
+        }
+        // 粗对位失败：全尺度/全角度越界或得分无效（平坦图等）
+        if (!found)
+            return -2;
+        // ---- 2. 粗变换：M_rough = T(cx,cy)·R(angle)·S(scale)·T(−golden 中心)。
+        //         getRotationMatrix2D 与 findRotatedMatch 内部旋转同口径（绕中心
+        //         R·s），平移列加 (命中点 − golden 中心) 即"中心 → 落点"----
+        const cv::Point2f c_golden((float)gg.cols * 0.5f, (float)gg.rows * 0.5f);
+        cv::Mat m_rough = cv::getRotationMatrix2D(c_golden, best_angle, best_scale);
+        m_rough.at<double>(0, 2) += (double)best_loc.x - c_golden.x;
+        m_rough.at<double>(1, 2) += (double)best_loc.y - c_golden.y;
+        cv::Mat warped;
+        cv::warpAffine(gg, warped, m_rough, gc.size(), cv::INTER_LINEAR,
+                       cv::BORDER_CONSTANT, cv::Scalar::all(0));
+        // ---- 3. 精修：warpedGolden ↔ current 的 ORB 匹配 + RANSAC 仿射
+        //         （内部口径同 Image2DAlg_ORBAlign，比率/阈值按参数开放）----
+        cv::Ptr<cv::ORB> orb = cv::ORB::create(n_features, 1.2f, 8, 8);
+        std::vector<cv::KeyPoint> kp1, kp2;
+        cv::Mat d1, d2;
+        orb->detectAndCompute(warped, cv::noArray(), kp1, d1);
+        orb->detectAndCompute(gc, cv::noArray(), kp2, d2);
+        if ((int)kp1.size() < 4 || (int)kp2.size() < 4 || d1.empty() || d2.empty())
+            return -2;   // 平坦图属正常失败
+        cv::BFMatcher matcher(cv::NORM_HAMMING);
+        std::vector<std::vector<cv::DMatch>> knn;
+        matcher.knnMatch(d1, d2, knn, 2);
+        std::vector<cv::DMatch> good;
+        for (const auto& km : knn)
+            if (km.size() == 2 && km[0].distance < ratio * km[1].distance)
+                good.push_back(km[0]);
+        if ((int)good.size() < 3) return -2;
+        std::vector<cv::Point2f> p1, p2;
+        p1.reserve(good.size());
+        p2.reserve(good.size());
+        for (const auto& gm : good) {
+            p1.push_back(kp1[gm.queryIdx].pt);
+            p2.push_back(kp2[gm.trainIdx].pt);
+        }
+        cv::Mat inlier_mask;
+        cv::Mat a_local = cv::estimateAffine2D(p1, p2, inlier_mask, cv::RANSAC,
+                                               ransac_reproj_threshold);
+        if (a_local.empty() || a_local.rows < 2 || a_local.cols < 3) return -2;
+        // 内点下限：仿射 6 自由度至少 3 点即可解，但 <8 点的解不可信
+        //（RANSAC 小样本易锁死在伪解上）——按"精修失败"报 -2
+        const int inlierCount = cv::countNonZero(inlier_mask);
+        if (inlierCount < 8) return -2;
+        // ---- 4. 合成：M_total = M_local ∘ M_rough（A = A_l·A_r，
+        //         b = A_l·b_r + b_l），行主序写 m[6]：golden 点 → current 点 ----
+        const double a00 = a_local.at<double>(0, 0), a01 = a_local.at<double>(0, 1);
+        const double a10 = a_local.at<double>(1, 0), a11 = a_local.at<double>(1, 1);
+        const double r00 = m_rough.at<double>(0, 0), r01 = m_rough.at<double>(0, 1);
+        const double r02 = m_rough.at<double>(0, 2);
+        const double r10 = m_rough.at<double>(1, 0), r11 = m_rough.at<double>(1, 1);
+        const double r12 = m_rough.at<double>(1, 2);
+        m[0] = a00 * r00 + a01 * r10;
+        m[1] = a00 * r01 + a01 * r11;
+        m[2] = a00 * r02 + a01 * r12 + a_local.at<double>(0, 2);
+        m[3] = a10 * r00 + a11 * r10;
+        m[4] = a10 * r01 + a11 * r11;
+        m[5] = a10 * r02 + a11 * r12 + a_local.at<double>(1, 2);
+        *out_inliers = inlierCount;
+        *out_rough_score = best_score;
+        return 0;
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
 } // extern "C"

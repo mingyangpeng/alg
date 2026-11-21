@@ -1,0 +1,57 @@
+{
+  "node": {
+    "id": "alg.image2d.mask_shift_recheck",
+    "name": "掩膜平移复核",
+    "group": "2D 图像",
+    "category": "处理",
+    "description": "掩膜平移复核（缺陷确认/新增/消失统计）：golden 掩膜按对位输出 (dx,dy) 平移采样（最近邻，掩膜不做亚像素插值）后与当前掩膜逐像素比对——matched=缺陷在预期偏移处复现（确认）、new=新增缺陷（golden 没有、current 新出现）、missed=消失缺陷；new>0 = 出现 golden 没有的新增缺陷，建议下游按 new>0 判 NG；掩膜须 8U 单通道语义（非 0 = 前景）且两帧同尺寸；三类计数与 dx/dy 回显并入节点消息"
+  },
+  "runtime": "native",
+  "assembly": "Image2DAlg.dll",
+  "method": "Image2DAlg_ComuiMaskShiftRecheck",
+  "inputs": [
+    {
+      "name": "golden掩膜",
+      "type": "image"
+    },
+    {
+      "name": "当前掩膜",
+      "type": "image"
+    }
+  ],
+  "params": [
+    {
+      "name": "dx",
+      "label": "X 平移(px)",
+      "type": "number",
+      "default": 0,
+      "min": -100000,
+      "max": 100000,
+      "description": "X 平移量（像素；来自对位结果，符号语义 = golden 内容相对 current 平移 (dx,dy)）"
+    },
+    {
+      "name": "dy",
+      "label": "Y 平移(px)",
+      "type": "number",
+      "default": 0,
+      "min": -100000,
+      "max": 100000,
+      "description": "Y 平移量（像素；来自对位结果，符号语义 = golden 内容相对 current 平移 (dx,dy)）"
+    }
+  ],
+  "outputs": [],
+  "source": {
+    "files": [
+      "integration/comui/Image2DAlg_comui.cpp",
+      "integration/comui/comui_native_abi.h",
+      "src/AlgExport.h",
+      "src/Image2DAlg/Image2DAlg_api.cpp",
+      "src/Image2DAlg/Image2DAlg_Ops.cpp",
+      "src/Image2DAlg/include/Image2DAlg_api.h"
+    ],
+    "includes": [
+      "src",
+      "src/Image2DAlg/include"
+    ]
+  }
+}

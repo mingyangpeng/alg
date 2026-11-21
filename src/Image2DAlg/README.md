@@ -1,6 +1,6 @@
 ﻿# Image2DAlg —— 通用 2D 模块
 
-`src/Image2DAlg` 是面向 ComUI 宿主的通用 2D 算法库：图像读取、通用处理、测量/缺陷检测，以及标定接口类（`Image2DAlg_Calib`）。当前版本 **2.4.0**（82 个通用算子：处理 24 + 特征 14 + 测量 39 + 跟踪配准立体 5；另有 Init / ReadImage / GetVersion / Free* 等生命周期与释放接口）。
+`src/Image2DAlg` 是面向 ComUI 宿主的通用 2D 算法库：图像读取、通用处理、测量/缺陷检测，以及标定接口类（`Image2DAlg_Calib`）。当前版本 **2.5.0**（87 个通用算子：处理 27 + 特征 14 + 测量 41 + 跟踪配准立体 5；另有 Init / ReadImage / GetVersion / Free* 等生命周期与释放接口）。2.5.0 新增对位/拼接流水线：批量相位配准 / 偏移重采样 / 掩膜复核 / 拼接融合 / 模板复合对位。
 
 ## 定位与依赖
 
@@ -66,6 +66,9 @@ ComUI 适配层在 `integration/comui/Image2DAlg_comui.cpp`，节点声明在 `i
 | `Image2DAlg_FloodFill(in, seed_x, seed_y, new_val, lo_diff, up_diff, out, out_rect, out_filled)` | 1 | 泛洪填充（2.4.0）：种子连通同色域（与当前像素差 ∈ [lo_diff, up_diff]）重绘为 new_val，8U 单通道限定、内部拷贝工作副本不改输入；out_rect=[x,y,w,h] 包围盒（可 NULL）、out_filled=重绘像素数（必填）；二值图孔洞封闭 |
 | `Image2DAlg_Remap(in, map1, map2, interpolation, out)` | 同输入 | 任意重映射（2.4.0）：dst(x,y)=src(map1(x,y),map2(x,y))；map1/map2 契约=1 通道 CV_32F 位流（w·h 个 float、w·h·4 字节由调用方保证）、宽高须与 in 一致；标定畸变校正查表（initUndistortRectifyMap 输出直接喂入） |
 | `Image2DAlg_WarpPolar(in, dsize_w, dsize_h, center_x, center_y, max_radius, flags, out)` | 同输入 | 极坐标展开（2.4.0）：圆形区域 → dsize 矩形条带，flags 0=LINEAR/1=LOG、max_radius>0、圆心可在图外；轴序实测口径：**列 X = rho 半径轴、行 Y = 角度轴**；环形工件（点阵 COB/圆形基板）等角度缺陷在展开图中变等间距 |
+| `Image2DAlg_OffsetRemap(in, dx, dy, interpolation, out)` | 同输入 | 偏移重采样（2.5.0）：dst(x,y)=src(x−dx,y−dy)，把"内容平移了 (dx,dy)"的图搬回原位（对位流水线回正步）；越界补 0，interpolation 0=最近邻（掩膜/二值图，避免插值产生非 0/255 过渡灰度）/1=双线性（灰度/连续图），其他 -3 |
+| `Image2DAlg_MaskShiftRecheck(golden_mask, current_mask, dx, dy, &matched, &new_cnt, &missed_cnt)` | —（输出 3 个计数） | 掩膜平移复核（2.5.0）：golden 缺陷位图按对位偏移平移采样 shifted(x,y)=golden(x−dx,y−dy)（最近邻，掩膜不做亚像素插值）后与当前掩膜逐像素比对，三计数 = 确认/新增/消失缺陷；两掩膜均须 8U 单通道且同尺寸，dx/dy 来自对位结果（符号语义 = golden 内容相对 current 平移 (dx,dy)） |
+| `Image2DAlg_StitchBlend(base, next, dx, dy, &origin_x, &origin_y, out)` | 同输入 | 两图拼接融合（2.5.0）：next 相对 base 平移 (dx,dy)（floor 取整整数拼接，亚像素精拼先走 OffsetRemap），画布 = 两矩形包围盒，重叠区沿 X 线性渐变（w_base 起点 1→终点 0，重叠宽 1 像素特例 0.5，非重叠区直接拷贝）；out_origin = base 原点在画布中的位置（恒 ≥ 0），画布尺寸读 out->width/height |
 
 ## 测量 / 缺陷检测
 
@@ -108,6 +111,8 @@ ComUI 适配层在 `integration/comui/Image2DAlg_comui.cpp`，节点声明在 `i
 | `Image2DAlg_MatchShapes(xy1, count1, xy2, count2, method, &score)` | 形状相似度（Hu 矩，越小越相似，0=一致；method 1/2/3 = cv::CONTOURS_MATCH_I1~I3） |
 | `Image2DAlg_ConvexityDefects(xy, count, &defects, &count)` | 凸性缺陷（引脚变形/缺料检测），返回 `Image2DAlg_Defect{start/end/farthest 索引, depth, fx, fy}`；无凹陷 count=0 |
 | `Image2DAlg_ContourHausdorff(xy_a, count_a, xy_b, count_b, &distance)` | 双轮廓 Hausdorff 距离（2.4.0）：2D 双向最大-最小距离（暴力 O(n·m)）；实测轮廓 vs 理论轮廓形状偏差直接量化（MatchShapes Hu 矩之外的直接口径）；相同点集 → 0、平移方 → 平移量 |
+| `Image2DAlg_PhaseCorrelateBatch(ref, moved, tile_w, tile_h, out_dx, out_dy, out_response, out_count)` | 批量局部相位配准（2.5.0）：两图按统一网格切 tile_w×tile_h 瓦片逐块相位配准（口径同 PhaseCorrelate：灰度 + CV_32F + 默认窗），瓦片行主序 index = r*cols+c、整除向下取整余数边缘条带裁掉；两段式容量（tile_count 超容量 → -3 且 *out_count = tile_count，扩容重调）；response 低的瓦片原样输出由调用方过滤——晶圆/面板大图局部错位分布检测 |
+| `Image2DAlg_TemplateAffineAlign(golden, current, rough_scale_lo/hi, rough_angle_lo/hi, n_features, ratio, ransac_threshold, m[6], &inliers, &rough_score)` | 模板复合仿射对位（2.5.0）：多尺度×多角度模板匹配粗对位（口径同 MatchTemplateEx，退化区间 lo==hi 只算单值；旋转外接画布超出 current 的角度跳过）限定 ROI 后 ORB 精修，输出 golden→current 2x3 仿射（行主序，可接 WarpAffine）+ RANSAC 内点数（≥10 可靠）+ 粗对位得分——金样 EB align / scan area align 二合一 |
 
 测量输入为非零即前景的二值语义；彩色输入内部先转灰度。无结果时返回 `0` 且 `count=0`。
 
@@ -163,7 +168,7 @@ ComUI 适配层在 `integration/comui/Image2DAlg_comui.cpp`，节点声明在 `i
 |----|------|
 | 0 | 成功 |
 | -1 | 空指针 / 空图 |
-| -2 | 特征/匹配/估计不足（特征族与 ORBAlign：无关键点、匹配对数过少、几何估计退化；跟踪配准族：ECC 不收敛或相关性不足、PnP 求解失败；ReadImage 例外——-2 为打开失败；FloodFill 例外——-2 为填充失败，底层返回 -1） |
+| -2 | 特征/匹配/估计不足（特征族与 ORBAlign：无关键点、匹配对数过少、几何估计退化；跟踪配准族：ECC 不收敛或相关性不足、PnP 求解失败；ReadImage 例外——-2 为打开失败；FloodFill 例外——-2 为填充失败，底层返回 -1；TemplateAffineAlign——粗对位失败（模板全尺度越界/得分无效）或精修匹配不足（2.5.0）） |
 | -3 | 通道数、模式或参数不支持 |
 | -4 | 内存不足 |
 | -99 | OpenCV 异常（在 C 边界统一捕获，异常不跨 DLL） |

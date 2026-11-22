@@ -752,7 +752,9 @@ int FitEllipsoidRansac(const CloudPtr& src, double threshold,
         if (!mInvP.allFinite())
             return false;
         const double k = d - pv.dot(mInvP);   // F(c)——有真实表面点时恒 < 0
-        if (!std::isfinite(k) || std::fabs(k) < 1e-12)
+        // k >= 0（含数值退化）= 无实曲面的"幻影"候选：其表面与采样数据无关，
+        // 内点计数可虚高误胜真解——与 fabs 判据不同，此处强制拒绝
+        if (!std::isfinite(k) || !(k < -1e-12))
             return false;
         const Eigen::Matrix3d Mp = M / std::fabs(k);   // (x−c)ᵀMp(x−c) = 1
         Eigen::Vector3d axes;

@@ -1302,7 +1302,7 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiFitCircle2D(const AlgoCInput* i
 // 模型支持度（PCL 1.9 限制，底层自动回退不报错）：sphere 的 MSAC 回退 RANSAC；
 // cylinder/cone 仅 RANSAC（fit 参数被忽略）；circle3D 的 fit/threshold 复用内部
 // 平面拟合口径；plane/line3D/torus 三种 fit 均支持（torus 的 0/1 = 采样稳健层、
-// 2 = 确定性多候选 LM）。out_coeffs 预分配 8（= 布局最长 torus 8）免两段式调用。
+// 2 = 确定性多候选 LM）。out_coeffs 预分配 12（= 布局最长 ellipsoid 12，1.8.0）免两段式调用。
 // 输入：一片点云；无云输出，系数与内点数并入节点消息（manual_regist 先例）。
 // 错误码：1 输入未连线；2 点云为空/内存不足；3 参数非法（-3）；4 拟合失败（-2：
 //         无局内点/退化——点数不足、投影共线、圆锥不收敛、环面内点<8）。
@@ -1327,11 +1327,11 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiFitModel(const AlgoCInput* in, 
     if (dist_thr <= 0.0) { out->error = "distance_threshold 须 > 0"; return 3; }
 
     Point3DAlg_PointCloud pin = CloudViewOf(src);
-    double coeffs[8] = { 0 };
+    double coeffs[12] = { 0 };   // 布局最长 = ellipsoid 12（1.8.0；此前 8 = torus）
     int coeff_count = 0;
     int* inliers = NULL;
     int inlier_count = 0;
-    const int rc = Point3DAlg_FitModel(&pin, method, fit, dist_thr, coeffs, 8,
+    const int rc = Point3DAlg_FitModel(&pin, method, fit, dist_thr, coeffs, 12,
                                        &inliers, &inlier_count);
     if (rc == -3) { out->error = "拟合失败（method/fit 越界或 distance_threshold<=0）"; return 3; }
     if (rc == -2) { out->error = "拟合失败：无局内点/退化（点数不足、投影共线、圆锥不收敛、环面内点<8、并行/垂直平面轴约束下无平面）"; return 4; }

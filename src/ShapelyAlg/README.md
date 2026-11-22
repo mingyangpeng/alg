@@ -767,6 +767,16 @@ if (CP::fitCone(cloud, FitMethod::RANSAC, /*threshold=*/0.3, apex, coneAxis, con
     ;  // apex=顶点，coneAng=半开角（弧度）。顶点由三切平面交解析求得，
        // 法线角度误差会放大成顶点漂移——阈值需覆盖（法线无定向不影响）
 
+// 圆环面拟合（O 型圈/环形密封面，全自研——PCL 1.9 无 SACMODEL_TORUS）：
+// 残差为点到环面面的精确距离（无需法线）；分布初值多候选 → LM 数值雅可比；
+// RANSAC/MSAC 加随机采样稳健层（截断残差去偏 + 窄进宽出级联精化，固定种子），
+// LMEDS = 确定性多候选 LM 中值择优（不抗外点）
+std::vector<float> torusC, torusAxis; double torusR, torusR2; std::vector<int> torusIn;
+if (CP::fitTorus(cloud, FitMethod::RANSAC, /*threshold=*/0.1, torusC, torusAxis, torusR, torusR2, torusIn))
+    ;  // torusC=中心，torusAxis=单位轴（符号不定），torusR=主半径，torusR2=管半径。
+       // 稳健性边界：均匀随机外点 ≤20% 稳定恢复、≥50% 不可靠——高外点先预清理；
+       // 平面/低曲率点集会收敛到局部贴面巨环（合法局部最优，非错误）
+
 // 多平面迭代分割（阶梯/挡墙类多平面工件）：拟合 → 剔内点 → 重复
 std::vector<std::vector<float>> planes; std::vector<std::vector<int>> planeIn;
 int n = CP::segmentPlanesMulti(cloud, /*threshold=*/0.05, /*max_planes=*/5,

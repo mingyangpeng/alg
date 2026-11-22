@@ -2760,6 +2760,34 @@ void CloudProcessor<PointT>::treeOctreeChangeDetection(const CloudConstPtr& src1
     out_new_indices = std::move(newIdx);
 }
 
+template <typename PointT>
+void CloudProcessor<PointT>::treeOctreeBoxSearch(const CloudConstPtr& src, const float box_min[3],
+                                                 const float box_max[3], std::vector<int>& out_indices)
+{
+    out_indices.clear();
+    if (!src || src->empty())
+        return;
+    // 树分辨率仅影响树粒度、不影响 boxSearch 结果（盒内点恒全集），
+    // 取盒对角线/64 自适应；退化输入钳到 1e-6 防 octree 死循环（同上）
+    double diag = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        const double d = (double)box_max[i] - (double)box_min[i];
+        diag += d * d;
+    }
+    double res = std::sqrt(diag) / 64.0;
+    if (!(res > 1e-6))
+        res = 1e-6;
+    pcl::octree::OctreePointCloudSearch<PointT> oct((float)res);
+    oct.setInputCloud(src);
+    oct.addPointsFromInputCloud();
+    // PCL 1.9 boxSearch 入参是 Eigen::Vector3f（轴对齐盒角点，非点型）
+    const Eigen::Vector3f minPt(box_min[0], box_min[1], box_min[2]);
+    const Eigen::Vector3f maxPt(box_max[0], box_max[1], box_max[2]);
+    std::vector<int> bidx;
+    oct.boxSearch(minPt, maxPt, bidx);
+    out_indices = std::move(bidx);
+}
+
 // ---------------- surface ----------------
 
 template <typename PointT>

@@ -39,12 +39,17 @@
 #include <pcl/segmentation/min_cut_segmentation.h>
 // 1.7.0 缺陷修复：FitModel method 7/8/9 不再经 PCL SAC 直调（sac_segmentation/
 // ransac/sac_model_stick 头已摘除），改为手写确定性搜索——PCA 精化需特征分解
+// 1.8.0 追加：FitModel method 10 = ellipsoid 椭球拟合（全自研手写 RANSAC——
+// PCL 1.9 无椭球模型：9 点最小样本二次方程 JacobiSVD 零空间求解 + 3x3 特征
+// 分解取参 + Sampson 一阶近似内点，见 FitEllipsoidRansac 注；同样依赖 Eigen）
 #include <Eigen/Dense>
+#include <Eigen/SVD>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <string>
 #include <utility>
@@ -606,6 +611,323 @@ int FitStickRansac(const CloudPtr& src, double threshold,
     return 0;
 }
 
+// method 10 公共段：椭球拟合（手写 RANSAC，1.8.0 自研——PCL 1.9 无椭球模型，
+// 无底层包装可直调）。两阶段（固定种子，同 FitPlaneConstrained/FitStickRansac
+// 先例；fit 取值无关——仅 RANSAC，fit 1/2 回退且参数被忽略）。
+//   一般二次方程（系数含 2 的约定，与设计行/解码一一对应）：
+//     F(x) = a·x² + b·y² + c·z² + 2f·yz + 2g·zx + 2h·xy
+//            + 2p·x + 2q·y + 2r·z + d = 0
+//   阶段 1 候选生成 + Sampson 内点评分：
+//   1. 非有限点剔除（同 1.7.0 两先例口径），剔除后 <9 点 → -2（一般二次
+//      曲面 10 系数，最小样本 9 点）；
+//   2. 固定种子 mt19937 采样 9 个互异点为一组，组数 = min(2000, C(n,9))
+//      （n <= 13 精确计算 C(n,9)，n >= 14 时 C(n,9) >= 2002 恒取 2000——
+//      大 n 组合数直接展开会溢出；重复点会产生秩亏系统，与共面/共线同属
+//      退化，故互异采样）；
+//   3. 每组 9 点解 10 系数齐次线性系统：设计行 [x²,y²,z²,2yz,2zx,2xy,
+//      2x,2y,2z,1]，JacobiSVD（double，ComputeFullV）取最小奇异右奇异
+//      向量 V.col(9)（9x10 时第 10 个奇异值恒 0——V 末列即零空间方向）；
+//      唯一性校验：sv[8] < 1e-10·sv[0] → 零空间维数 >= 2（9 点共面/共线/
+//      重复）→ 解不唯一 → 跳过该组（"第二小奇异值"按含恒零位的 10 维
+//      奇异谱计——9 行时 sv[8] 即列示最小值，>=10 行时 sv[9] 在精确拟合
+//      时合法塌陷为 0、判据取第二小 sv[8]，两种行数下统一为 sv[8]）；
+//   4. 二次矩阵 M = [[a,h,g],[h,b,f],[g,f,c]] 特征分解：正定即椭球候选；
+//      负定整体取反（θ 与 −θ 同一曲面）；不定（取反后仍非正定——半虚轴/
+//      圆柱/抛物面/双曲面/平面族）→ 非椭球候选跳过；
+//   5. 中心 c = −M⁻¹·p_vec（p_vec = [p,q,r]）；k = F(c) = d − p·M⁻¹·p
+//      （有真实表面点时恒 < 0）；M' = M/|k| → (x−c)ᵀM'(x−c) = 1 →
+//      半轴_i = sqrt(1/λ_i(M'))（λ 升序 → 半轴降序，coeffs[3] 恒最长）；
+//   6. 候选评分：逐点 Sampson 一阶近似距离 |F(p)|/||∇F(p)||（∇F =
+//      2(Mx + p_vec)，与 (x−c)ᵀM'(x−c) − 1 形式正比缩放不变——点到椭球
+//      面精确距离需解四次方程，内点判定统一用一阶近似口径，见 api.h 支持
+//      度表），<= threshold 计内点；内点数最大者为最优候选（平局保持先到，
+//      确定序；样本点自身残差恒 0 → 最优候选内点数 >= 9）。
+//   阶段 2 精化：最优候选内点重解二次方程（同一设计行整体代数最小二乘 +
+//      同一唯一性校验）→ 仍须为合法椭球 → 重算内点；迭代两轮，任一轮
+//      求解退化/非椭球/内点减少 → 沿用上一轮结果。
+//   输出 coeffs 12 值：[cx,cy,cz, a,b,c, rx,ry,rz, 保留×3]（[9..11] 恒 0）；
+//      rx,ry,rz = 把 +Z 轴转到第一半轴方向（最长半轴，特征向量 col(0)）的
+//      Rodrigues 旋转向量（右手系最小旋转 ω = unit(ez×v)·acos(ez·v)；
+//      特征向量符号规范化为分量绝对值最大者取正——半轴方向是无向直线，
+//      特征向量符号任意）。
+//   全部候选退化（无正定候选）/最优候选仍退化（半轴 <= 0 或非有限等）→ -2。
+int FitEllipsoidRansac(const CloudPtr& src, double threshold,
+                       std::vector<float>& coeffs, std::vector<int>& inlierIdx)
+{
+    coeffs.clear();
+    inlierIdx.clear();
+    // 非有限点剔除 + 原始行号映射（同 FitPlaneConstrained/FitStickRansac 口径）
+    CloudPtr clean(new CloudXYZ);
+    std::vector<int> global;
+    clean->reserve(src->size());
+    global.reserve(src->size());
+    for (size_t i = 0; i < src->size(); ++i) {
+        const pcl::PointXYZ& pt = (*src)[i];
+        if (std::isfinite(pt.x) && std::isfinite(pt.y) && std::isfinite(pt.z)) {
+            clean->push_back(pt);
+            global.push_back((int)i);
+        }
+    }
+    if (clean->size() < 9)
+        return -2;   // 一般二次曲面 10 系数，最小样本 9 点
+    const int n = (int)clean->size();
+
+    // 设计行（系数含 2 的约定）：[x², y², z², 2yz, 2zx, 2xy, 2x, 2y, 2z, 1]
+    // ↔ θ = [a,b,c,f,g,h,p,q,r,d]——由此 M = [[a,h,g],[h,b,f],[g,f,c]]
+    // 即二次型矩阵（2M 的非对角 = 交叉项系数）、pv = [p,q,r] 为线性半向量，
+    // 中心 = −M⁻¹·pv（∇F = 2(Mx + pv) = 0）。注意设计行若省略 2（如
+    // [.., yz, zx, xy, x, y, z, ..]）则 M/pv 与多项式不一致，中心会错。
+    auto designRow = [](const pcl::PointXYZ& pt) {
+        const double x = pt.x, y = pt.y, z = pt.z;
+        Eigen::Matrix<double, 1, 10> row;
+        row << x * x, y * y, z * z,
+               2.0 * y * z, 2.0 * z * x, 2.0 * x * y,
+               2.0 * x, 2.0 * y, 2.0 * z, 1.0;
+        return row;
+    };
+
+    // 10 系数齐次系统求解：rows（每行 = designRow）→ 最小奇异右奇异向量
+    // V.col(9)（9 行 = 零空间方向；>=10 行 = 代数最小二乘方向）。
+    // 返回 false = 零空间维数 >= 2（第二小奇异值 < 1e-10·最大——共面/共线/
+    // 重复点等退化，解不唯一）或结果非有限。
+    auto solveQuadric = [](const Eigen::MatrixXd& rows,
+                           Eigen::Matrix<double, 10, 1>& q) -> bool {
+        if (rows.rows() < 9 || rows.cols() != 10)
+            return false;
+        Eigen::JacobiSVD<Eigen::MatrixXd> svd(rows, Eigen::ComputeFullV);
+        const Eigen::VectorXd& sv = svd.singularValues();   // 长度 = min(m,10) ∈ {9,10}
+        if (sv.size() < 9 || !(sv[0] > 0.0))
+            return false;
+        // 唯一性校验（"第二小奇异值"按含恒零位的 10 维奇异谱计）：秩 <= 8
+        // → 零空间维数 >= 2 → 解不唯一 → 跳过。9 行时列示奇异值共 9 个、
+        // sv[8] 即最小（第 10 个恒 0）；>=10 行时 sv[9] 在精确拟合（秩 9）
+        // 时合法塌陷为 0、判据取第二小 sv[8]——两种行数下判据统一为 sv[8]。
+        if (!(sv[8] >= 1e-10 * sv[0]))
+            return false;
+        q = svd.matrixV().col(9);
+        const double qn = q.norm();
+        if (!(qn > 1e-12))
+            return false;
+        q /= qn;
+        return q.allFinite();
+    };
+
+    // θ → 椭球参数解码：M 特征分解正定（负定整体取反——θ 与 −θ 同一曲面）
+    // → 中心/半轴/方向列 + 归一化二次矩阵 Mp（(x−c)ᵀMp(x−c) = 1，Sampson
+    // 评分用）。返回 false = 非椭球候选（不定/半退化）或半轴退化（<=0/非有限）。
+    struct EllipsoidShape
+    {
+        Eigen::Vector3d center;
+        Eigen::Vector3d axes;   // 半轴（λ 升序 → sqrt(1/λ) 降序：axes[0] 最长）
+        Eigen::Matrix3d dirs;   // 列 i = 第 i 半轴方向（单位特征向量）
+    };
+    auto decodeEllipsoid = [](const Eigen::Matrix<double, 10, 1>& q,
+                              EllipsoidShape& out, Eigen::Matrix3d& outMp) -> bool {
+        const double a = q[0], b = q[1], c = q[2], f = q[3], g = q[4], h = q[5];
+        double d = q[9];
+        Eigen::Matrix3d M;
+        M << a, h, g, h, b, f, g, f, c;
+        Eigen::Vector3d pv(q[6], q[7], q[8]);
+        if (!M.allFinite() || !pv.allFinite() || !std::isfinite(d))
+            return false;
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(M);
+        if (es.info() != Eigen::Success)
+            return false;
+        Eigen::Vector3d lam = es.eigenvalues();   // 升序
+        if (lam[0] <= 1e-12) {   // 存在特征值 <= 0（非正定）
+            if (lam[2] < -1e-12) {   // 负定 → 整体取反（同一曲面）
+                M = -M;
+                pv = -pv;
+                d = -d;
+                es.compute(M);
+                lam = es.eigenvalues();
+            } else {
+                return false;   // 不定/半退化（圆柱/抛物面/双曲面/平面族）→ 非椭球
+            }
+        }
+        const Eigen::LLT<Eigen::Matrix3d> llt(M);   // 正定三角分解求 M⁻¹·pv
+        if (llt.info() != Eigen::Success)
+            return false;
+        const Eigen::Vector3d mInvP = llt.solve(pv);
+        if (!mInvP.allFinite())
+            return false;
+        const double k = d - pv.dot(mInvP);   // F(c)——有真实表面点时恒 < 0
+        if (!std::isfinite(k) || std::fabs(k) < 1e-12)
+            return false;
+        const Eigen::Matrix3d Mp = M / std::fabs(k);   // (x−c)ᵀMp(x−c) = 1
+        Eigen::Vector3d axes;
+        for (int i = 0; i < 3; ++i) {
+            axes[i] = std::sqrt(1.0 / (lam[i] / std::fabs(k)));
+            if (!std::isfinite(axes[i]) || !(axes[i] > 0.0))
+                return false;   // 半轴退化（<= 0 或非有限）
+        }
+        out.center = -mInvP;
+        out.axes = axes;
+        out.dirs = es.eigenvectors();
+        outMp = Mp;
+        return true;
+    };
+
+    // 采样组数 = min(2000, C(n,9))：n <= 13 精确计算（C(13,9) = 715），
+    // n >= 14 时 C(n,9) >= C(14,9) = 2002 恒取 2000（同 FitPlaneConstrained
+    // 的组合数封顶策略——大 n 组合数直接展开会溢出，不精确计算）
+    long long trials = 2000;
+    if (n < 14) {
+        long long cn9 = 1;
+        for (long long kk = 1; kk <= 9; ++kk)
+            cn9 = cn9 * (n - 9 + kk) / kk;   // 逐步得 C(n,kk)，每步整除恒成立
+        if (cn9 < trials)
+            trials = cn9;
+    }
+
+    std::mt19937 rng(20261122u);   // 固定种子：结果确定、可复现（同 1.7.0 先例）
+    std::uniform_int_distribution<int> pick(0, n - 1);
+
+    long long bestCnt = -1;
+    Eigen::Matrix<double, 10, 1> bestQ = Eigen::Matrix<double, 10, 1>::Zero();
+    for (long long t = 0; t < trials; ++t) {
+        // 采 9 个互异下标（有界重试；n >= 9 恒可满足，拥挤时放弃本组）
+        int s9[9];
+        bool sampled = true;
+        for (int k = 0; k < 9 && sampled; ++k) {
+            bool uniq = false;
+            for (int r = 0; r < 64 && !uniq; ++r) {
+                const int v = pick(rng);
+                uniq = true;
+                for (int j = 0; j < k; ++j) {
+                    if (s9[j] == v) {
+                        uniq = false;
+                        break;
+                    }
+                }
+                if (uniq)
+                    s9[k] = v;
+            }
+            if (!uniq)
+                sampled = false;
+        }
+        if (!sampled)
+            continue;
+
+        Eigen::MatrixXd A(9, 10);
+        for (int r = 0; r < 9; ++r)
+            A.row(r) = designRow((*clean)[(size_t)s9[r]]);
+        Eigen::Matrix<double, 10, 1> q;
+        if (!solveQuadric(A, q))
+            continue;   // 9 点共面/共线/重复 → 零空间维数 >= 2，解不唯一
+        EllipsoidShape sh;
+        Eigen::Matrix3d Mp;
+        if (!decodeEllipsoid(q, sh, Mp))
+            continue;   // 非正定（圆柱/抛物面/双曲面/平面族）或半轴退化
+        // 内点计数（Sampson 一阶近似，(x−c)ᵀMp(x−c) − 1 形式——与 F 正比，
+        // Sampson 距离缩放不变）；样本点自身残差恒 0 → cnt >= 9
+        long long cnt = 0;
+        for (int i = 0; i < n; ++i) {
+            const Eigen::Vector3d p((*clean)[(size_t)i].x, (*clean)[(size_t)i].y,
+                                    (*clean)[(size_t)i].z);
+            const Eigen::Vector3d yv = p - sh.center;
+            const Eigen::Vector3d Myv = Mp * yv;
+            const double gn = 2.0 * Myv.norm();
+            if (!(gn > 1e-12))
+                continue;
+            const double Fv = yv.dot(Myv) - 1.0;
+            if (std::fabs(Fv) / gn <= threshold)
+                ++cnt;
+        }
+        if (cnt > bestCnt) {   // 平局保持先到候选（确定序）
+            bestCnt = cnt;
+            bestQ = q;
+        }
+    }
+    if (bestCnt < 9)
+        return -2;   // 全部候选退化（无正定候选）/防御（样本点恒内点，cnt >= 9）
+
+    // 阶段 2 精化：内点整体代数最小二乘重解 + 重算内点（两轮迭代；任一轮
+    // 求解退化/非椭球/内点减少 → 沿用上一轮结果）
+    Eigen::Matrix<double, 10, 1> q = bestQ;
+    auto collectInliers = [&](const Eigen::Matrix<double, 10, 1>& qq,
+                              std::vector<int>& outIdx) -> bool {
+        EllipsoidShape sh;
+        Eigen::Matrix3d Mp;
+        if (!decodeEllipsoid(qq, sh, Mp))
+            return false;   // 非椭球/半轴退化
+        for (int i = 0; i < n; ++i) {
+            const Eigen::Vector3d p((*clean)[(size_t)i].x, (*clean)[(size_t)i].y,
+                                    (*clean)[(size_t)i].z);
+            const Eigen::Vector3d yv = p - sh.center;
+            const Eigen::Vector3d Myv = Mp * yv;
+            const double gn = 2.0 * Myv.norm();
+            if (!(gn > 1e-12))
+                continue;
+            const double Fv = yv.dot(Myv) - 1.0;
+            if (std::fabs(Fv) / gn <= threshold)
+                outIdx.push_back(i);
+        }
+        return true;
+    };
+    std::vector<int> inl;
+    if (!collectInliers(q, inl))
+        return -2;   // 最优候选解码退化（防御——候选阶段已验过）
+    for (int round = 0; round < 2 && (int)inl.size() >= 9; ++round) {
+        Eigen::MatrixXd A((Eigen::Index)inl.size(), 10);
+        for (size_t r = 0; r < inl.size(); ++r)
+            A.row((Eigen::Index)r) = designRow((*clean)[(size_t)inl[r]]);
+        Eigen::Matrix<double, 10, 1> q2;
+        if (!solveQuadric(A, q2))
+            break;   // 精化退化（内点共面等）→ 沿用上一轮
+        std::vector<int> inl2;
+        if (!collectInliers(q2, inl2))
+            break;   // 精化结果非椭球/半轴退化 → 沿用上一轮
+        if ((int)inl2.size() < (int)inl.size())
+            break;   // 精化后内点减少 → 沿用上一轮
+        q = q2;
+        inl = std::move(inl2);
+    }
+    if ((int)inl.size() < 9)
+        return -2;   // 内点不足最小样本（防御）
+
+    // 终解 → 参数提取（12 值：中心 + 半轴（降序）+ rvec + 保留×3）
+    EllipsoidShape sh;
+    Eigen::Matrix3d Mp;
+    if (!decodeEllipsoid(q, sh, Mp))
+        return -2;   // 最优候选仍退化
+    Eigen::Vector3d v = sh.dirs.col(0);   // 第一半轴（最长）方向
+    // 特征向量符号规范化（分量绝对值最大者取正——半轴方向是无向直线，符号
+    // 任意；规范化使同一椭球输出确定）
+    int dom = 0;
+    for (int i = 1; i < 3; ++i)
+        if (std::fabs(v[i]) > std::fabs(v[dom]))
+            dom = i;
+    if (v[dom] < 0.0)
+        v = -v;
+    // Rodrigues（右手系最小旋转）：ω = unit(ez×v)·acos(ez·v)——+Z 轴转到
+    // 第一半轴方向（规格约定，见 api.h）。规范化后 v ∥ −ez 不可达；v ∥ +ez
+    // 时恒等旋转（rvec = 0）。
+    const Eigen::Vector3d ez(0.0, 0.0, 1.0);
+    const double cd = std::max(-1.0, std::min(1.0, ez.dot(v)));
+    const Eigen::Vector3d kv = ez.cross(v);
+    const double kn = kv.norm();
+    Eigen::Vector3d rvec(Eigen::Vector3d::Zero());
+    if (kn > 1e-12)
+        rvec = kv / kn * std::acos(cd);
+    coeffs.assign(12, 0.0f);
+    coeffs[0] = (float)sh.center[0];
+    coeffs[1] = (float)sh.center[1];
+    coeffs[2] = (float)sh.center[2];
+    coeffs[3] = (float)sh.axes[0];   // 半轴降序：coeffs[3] 恒最长
+    coeffs[4] = (float)sh.axes[1];
+    coeffs[5] = (float)sh.axes[2];
+    coeffs[6] = (float)rvec[0];
+    coeffs[7] = (float)rvec[1];
+    coeffs[8] = (float)rvec[2];
+    // coeffs[9..11] 保留位恒 0（缓冲 12 值，见 api.h 布局表）
+
+    inlierIdx.reserve(inl.size());
+    for (int i : inl)
+        inlierIdx.push_back(global[(size_t)i]);   // clean 行 → 原始行号
+    return 0;
+}
+
 } // namespace
 
 // =====================================================================
@@ -1061,12 +1383,12 @@ int Point3DAlg_FitModel(const Point3DAlg_PointCloud* in, int method, int fit,
     const int rcIn = CheckInOnly(in);
     if (rcIn != 0)
         return rcIn;
-    if (method < 0 || method > 9 || fit < 0 || fit > 2)
+    if (method < 0 || method > 10 || fit < 0 || fit > 2)
         return -3;
     if (!(distance_threshold > 0.0))
         return -3;
     // 系数布局长度：plane/sphere/parallelPlane/perpendicularPlane = 4，
-    // line3D/stick = 6，torus = 8，cylinder/circle3D/cone = 7（见 api.h 表）
+    // line3D/stick = 6，torus = 8，ellipsoid = 12，cylinder/circle3D/cone = 7（见 api.h 表）
     int needed;
     switch (method) {
     case 0:
@@ -1076,6 +1398,7 @@ int Point3DAlg_FitModel(const Point3DAlg_PointCloud* in, int method, int fit,
     case 5:
     case 9: needed = 6; break;
     case 6: needed = 8; break;
+    case 10: needed = 12; break;
     default: needed = 7; break;   // method 2/3/4
     }
     if (!out_coeffs || coeffs_capacity < needed) {
@@ -1202,6 +1525,21 @@ int Point3DAlg_FitModel(const Point3DAlg_PointCloud* in, int method, int fit,
                 coeffs.size() < 6)
                 return -2;
             for (int i = 0; i < 6; ++i)
+                out_coeffs[i] = (double)coeffs[(size_t)i];
+            break;
+        }
+        case 10: {  // ellipsoid：[cx,cy,cz, a,b,c, rx,ry,rz, 保留×3]（1.8.0 新增；
+                    // 全自研手写 RANSAC——PCL 1.9 无椭球模型。9 点最小样本二次
+                    // 方程 SVD 零空间求解 + 特征分解椭球参数提取；内点判定为
+                    // Sampson 一阶近似口径；仅 RANSAC：fit 1/2 回退（fit 取值
+                    // 不影响结果）；半轴降序（coeffs[3] 恒最长）、rx/ry/rz =
+                    // 把 +Z 轴转到第一半轴方向的 Rodrigues 旋转向量，见 api.h
+                    // 布局表与支持度表）
+            std::vector<float> coeffs;
+            if (FitEllipsoidRansac(src, distance_threshold, coeffs, inlierIdx) != 0 ||
+                coeffs.size() < 12)
+                return -2;
+            for (int i = 0; i < 12; ++i)
                 out_coeffs[i] = (double)coeffs[(size_t)i];
             break;
         }
@@ -1499,6 +1837,61 @@ void Point3DAlg_FreeClouds(Point3DAlg_PointCloud* segments, int count)
 // 空间索引与近邻搜索（1.2.0 P1；距离口径见 api.h——欧氏距离非平方）
 // =====================================================================
 
+// 搜索结果按距离升序稳定重排（indices/dists 同步，保持对应）；n<=1 免排
+static void SortResultByDist(std::vector<int>& idx, std::vector<float>& dist)
+{
+    const size_t n = idx.size();
+    if (n <= 1)
+        return;
+    std::vector<size_t> order(n);
+    for (size_t i = 0; i < n; ++i)
+        order[i] = i;
+    std::sort(order.begin(), order.end(),
+              [&dist](size_t a, size_t b) { return dist[a] < dist[b]; });
+    std::vector<int> idxSorted(n);
+    std::vector<float> distSorted(n);
+    for (size_t i = 0; i < n; ++i) {
+        idxSorted[i] = idx[order[i]];
+        distSorted[i] = dist[order[i]];
+    }
+    idx.swap(idxSorted);
+    dist.swap(distSorted);
+}
+
+// 搜索输出通道统一尾段（tree 组六接口共用，api.h §9.9 口径）：idx/dist 按
+// 需 malloc 填充；out_count 恒回填；任一分配失败 → -4（另一缓冲回收，出参保持 NULL）
+static int EmitResult(std::vector<int>& idx, std::vector<float>& dist,
+                      int** out_indices, float** out_dists, int* out_count)
+{
+    const size_t n = idx.size();
+    int* idxOut = nullptr;
+    float* distOut = nullptr;
+    if (out_indices && n > 0) {
+        idxOut = (int*)malloc(n * sizeof(int));
+        if (!idxOut)
+            return -4;
+    }
+    if (out_dists && n > 0) {
+        distOut = (float*)malloc(n * sizeof(float));
+        if (!distOut) {
+            free(idxOut);
+            return -4;
+        }
+    }
+    for (size_t i = 0; i < n; ++i) {
+        if (idxOut)
+            idxOut[i] = idx[i];
+        if (distOut)
+            distOut[i] = dist[i];
+    }
+    if (idxOut)
+        *out_indices = idxOut;
+    if (distOut)
+        *out_dists = distOut;
+    *out_count = (int)n;
+    return 0;
+}
+
 // KNN/半径搜索公共实现（mode: 0=KNN 1=radius；param = k 或 radius）
 static int SearchCommon(const Point3DAlg_PointCloud* in, const double query[3],
                         int mode, double param,
@@ -1531,50 +1924,12 @@ static int SearchCommon(const Point3DAlg_PointCloud* in, const double query[3],
         // 底层 KdTree 返回平方距离 → 本层开方为欧氏距离（api.h 口径）
         for (size_t i = 0; i < n; ++i)
             dist[i] = (float)std::sqrt((double)dist[i]);
-        // 契约"按距离升序"（api.h，两接口共用）：KNN 底层 nearestKSearch 保证
+        // 契约"按距离升序"（api.h，tree 组共用）：KNN 底层 nearestKSearch 保证
         // 升序；但 radiusSearch 走 FLANN 半径搜索**不保证有序**（按树遍历序），
-        // 本层对半径模式按距离升序稳定排序（indices/dists 同步重排，保持对应）
-        if (mode == 1 && n > 1) {
-            std::vector<size_t> order(n);
-            for (size_t i = 0; i < n; ++i)
-                order[i] = i;
-            std::sort(order.begin(), order.end(),
-                      [&dist](size_t a, size_t b) { return dist[a] < dist[b]; });
-            std::vector<int> idxSorted(n);
-            std::vector<float> distSorted(n);
-            for (size_t i = 0; i < n; ++i) {
-                idxSorted[i] = idx[order[i]];
-                distSorted[i] = dist[order[i]];
-            }
-            idx.swap(idxSorted);
-            dist.swap(distSorted);
-        }
-        int* idxOut = nullptr;
-        float* distOut = nullptr;
-        if (out_indices && n > 0) {
-            idxOut = (int*)malloc(n * sizeof(int));
-            if (!idxOut)
-                return -4;
-        }
-        if (out_dists && n > 0) {
-            distOut = (float*)malloc(n * sizeof(float));
-            if (!distOut) {
-                free(idxOut);
-                return -4;
-            }
-        }
-        for (size_t i = 0; i < n; ++i) {
-            if (idxOut)
-                idxOut[i] = idx[i];
-            if (distOut)
-                distOut[i] = dist[i];
-        }
-        if (idxOut)
-            *out_indices = idxOut;
-        if (distOut)
-            *out_dists = distOut;
-        *out_count = (int)n;
-        return 0;
+        // 本层对半径模式按距离升序稳定排序
+        if (mode == 1)
+            SortResultByDist(idx, dist);
+        return EmitResult(idx, dist, out_indices, out_dists, out_count);
     } catch (const std::exception&) {
         return -99;
     } catch (...) {
@@ -1596,7 +1951,136 @@ int Point3DAlg_RadiusSearch(const Point3DAlg_PointCloud* in,
     return SearchCommon(in, query, 1, radius, out_indices, out_dists, out_count);
 }
 
-// 释放 KnnSearch/RadiusSearch 输出（NULL 安全；只用于本库分配的缓冲）
+// =====================================================================
+// 八叉树/体素空间检索（1.8.0；输出通道与 KdTree 组同口径，见 api.h §9.9）
+// =====================================================================
+
+// 体素检索：查询点所在体素（边长 resolution）内全部点。dist = 到查询点
+// 欧氏距离（本层计算），升序；resolution<=0 → -3（octree 非法分辨率
+// 内部挂死，入口即拒，与底层 treeOctreeVoxelSearch 的钳制双保险）
+int Point3DAlg_OctreeVoxelSearch(const Point3DAlg_PointCloud* in,
+                                 const double query[3], double resolution,
+                                 int** out_indices, float** out_dists, int* out_count)
+{
+    if (!out_count || !query)
+        return -1;
+    *out_count = 0;
+    if (out_indices)
+        *out_indices = nullptr;
+    if (out_dists)
+        *out_dists = nullptr;
+    const int rcIn = CheckInOnly(in);
+    if (rcIn != 0)
+        return rcIn;
+    if (!(resolution > 0.0))
+        return -3;
+    try {
+        CloudPtr src = ToPcl(in);
+        const float q[3] = { (float)query[0], (float)query[1], (float)query[2] };
+        std::vector<int> idx;
+        CP::treeOctreeVoxelSearch(src, q, idx, resolution);
+        // dists = 命中点到查询点欧氏距离（api.h §9.9 口径），升序
+        std::vector<float> dist(idx.size());
+        for (size_t i = 0; i < idx.size(); ++i) {
+            const pcl::PointXYZ& p = src->points[idx[i]];
+            const double dx = (double)p.x - query[0];
+            const double dy = (double)p.y - query[1];
+            const double dz = (double)p.z - query[2];
+            dist[i] = (float)std::sqrt(dx * dx + dy * dy + dz * dz);
+        }
+        SortResultByDist(idx, dist);
+        return EmitResult(idx, dist, out_indices, out_dists, out_count);
+    } catch (const std::exception&) {
+        return -99;
+    } catch (...) {
+        return -99;
+    }
+}
+
+// 盒检索：轴对齐盒 [box_min, box_max] 内全部点（含边界）。dist = 到盒中心
+// 欧氏距离（本层计算），升序；任一维 min >= max（含 NaN 比较 false）→ -3
+int Point3DAlg_OctreeBoxSearch(const Point3DAlg_PointCloud* in,
+                               const double box_min[3], const double box_max[3],
+                               int** out_indices, float** out_dists, int* out_count)
+{
+    if (!out_count || !box_min || !box_max)
+        return -1;
+    *out_count = 0;
+    if (out_indices)
+        *out_indices = nullptr;
+    if (out_dists)
+        *out_dists = nullptr;
+    const int rcIn = CheckInOnly(in);
+    if (rcIn != 0)
+        return rcIn;
+    for (int i = 0; i < 3; ++i) {
+        if (!(box_min[i] < box_max[i]))
+            return -3;
+    }
+    try {
+        CloudPtr src = ToPcl(in);
+        const float bmin[3] = { (float)box_min[0], (float)box_min[1], (float)box_min[2] };
+        const float bmax[3] = { (float)box_max[0], (float)box_max[1], (float)box_max[2] };
+        std::vector<int> idx;
+        CP::treeOctreeBoxSearch(src, bmin, bmax, idx);
+        // dists = 命中点到盒中心欧氏距离（api.h §9.9 口径），升序
+        const double c[3] = { (box_min[0] + box_max[0]) * 0.5,
+                              (box_min[1] + box_max[1]) * 0.5,
+                              (box_min[2] + box_max[2]) * 0.5 };
+        std::vector<float> dist(idx.size());
+        for (size_t i = 0; i < idx.size(); ++i) {
+            const pcl::PointXYZ& p = src->points[idx[i]];
+            const double dx = (double)p.x - c[0];
+            const double dy = (double)p.y - c[1];
+            const double dz = (double)p.z - c[2];
+            dist[i] = (float)std::sqrt(dx * dx + dy * dy + dz * dz);
+        }
+        SortResultByDist(idx, dist);
+        return EmitResult(idx, dist, out_indices, out_dists, out_count);
+    } catch (const std::exception&) {
+        return -99;
+    } catch (...) {
+        return -99;
+    }
+}
+
+// 变化检测：in_cmp 相对 in_base 新占体素的点索引，保持体素遍历序（不排序）。
+// dists 无距离语义恒填 0 占位（api.h 口径）。in_base 空云 {NULL,0} 合法
+//（"无历史基准，全部新增"），xyz 缺失但 count>0 → -1；in_cmp 空点云 → -1
+//（无可比对象）；min_resolution<=0 → -3
+int Point3DAlg_OctreeChangeDetection(const Point3DAlg_PointCloud* in_base,
+                                     const Point3DAlg_PointCloud* in_cmp,
+                                     double min_resolution,
+                                     int** out_indices, float** out_dists, int* out_count)
+{
+    if (!out_count)
+        return -1;
+    *out_count = 0;
+    if (out_indices)
+        *out_indices = nullptr;
+    if (out_dists)
+        *out_dists = nullptr;
+    if (!in_base || in_base->count < 0 || (in_base->count > 0 && !in_base->xyz))
+        return -1;
+    if (!in_cmp || !in_cmp->xyz || in_cmp->count <= 0)
+        return -1;
+    if (!(min_resolution > 0.0))
+        return -3;
+    try {
+        CloudPtr base = ToPcl(in_base);
+        CloudPtr cmp = ToPcl(in_cmp);
+        std::vector<int> idx;
+        CP::treeOctreeChangeDetection(base, cmp, min_resolution, idx);
+        std::vector<float> dist(idx.size(), 0.0f);
+        return EmitResult(idx, dist, out_indices, out_dists, out_count);
+    } catch (const std::exception&) {
+        return -99;
+    } catch (...) {
+        return -99;
+    }
+}
+
+// 释放 tree 组（Knn/Radius/Octree 三族）输出（NULL 安全；只用于本库分配的缓冲）
 void Point3DAlg_FreeSearchResult(int* indices, float* dists)
 {
     free(indices);

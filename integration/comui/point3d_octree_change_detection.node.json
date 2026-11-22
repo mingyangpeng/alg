@@ -1,0 +1,48 @@
+{
+  "node": {
+    "id": "alg.point3d.octree_change_detection",
+    "name": "变化检测",
+    "group": "3D 点云",
+    "category": "处理",
+    "description": "Octree 变化检测（基准云 vs 对比云，双点云输入）：返回对比云中相对基准云新占体素（min_resolution 体素粒度）的点索引（0 新增属正常成功）；基准云为空时对比云全部点视为新增；无输出端口，消息恒以 octree_change res/base/cmp/new 开头并列出前 30 个索引；定位：双帧比对 / 上料位检测 / 工件进出场判定"
+  },
+  "runtime": "native",
+  "assembly": "Point3DAlg.dll",
+  "method": "Point3DAlg_ComuiOctreeChangeDetection",
+  "inputs": [
+    {
+      "name": "基准云",
+      "type": "cloud"
+    },
+    {
+      "name": "对比云",
+      "type": "cloud"
+    }
+  ],
+  "params": [
+    {
+      "name": "min_resolution",
+      "label": "体素分辨率",
+      "type": "number",
+      "default": 1.0,
+      "min": 0.000001,
+      "description": "体素分辨率（>0，决定变化判定的空间粒度；<=0 报参数非法）"
+    }
+  ],
+  "outputs": [],
+  "source": {
+    "files": [
+      "integration/comui/Point3DAlg_comui.cpp",
+      "integration/comui/comui_native_abi.h",
+      "src/AlgExport.h",
+      "src/Point3DAlg/include/Point3DAlg_api.h",
+      "src/Point3DAlg/Point3DAlg_CloudOps.cpp",
+      "src/ShapelyAlg/CloudProcessor.h",
+      "src/ShapelyAlg/CloudProcessor.cpp"
+    ],
+    "includes": [
+      "src",
+      "src/ShapelyAlg"
+    ]
+  }
+}

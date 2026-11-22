@@ -76,6 +76,21 @@ extern "C" {
  *          dx,dy,dz]，SACMODEL_STICK 有限长线段，布局同 line3D）——仅
  *          RANSAC（fit 1/2 回退，PCL 1.9.1 stick 距离口径缺陷，见 9.7
  *          支持度表），RANSAC 直调 + 内点 PCA 精化 + 本层点到线重选内点。
+ *   1.8.0  八叉树/体素空间检索组（§9.9 扩展，3 新导出——复用既有
+ *          索引/距离输出通道与 FreeSearchResult）：OctreeVoxelSearch
+ *          体素检索（查询点所在体素内全部点，底层
+ *          CloudProcessor::treeOctreeVoxelSearch）/ OctreeBoxSearch 盒
+ *          检索（轴对齐盒内全部点，底层新增 treeOctreeBoxSearch）/
+ *          OctreeChangeDetection 双云变化检测（相对基准云新占体素的点，
+ *          底层 treeOctreeChangeDetection）。八叉树 KNN/半径与 KdTree
+ *          版结果全同，不重复封装。
+ *          FitModel method 10 = ellipsoid 椭球拟合（来源 批次 D 5.4：椭球
+ *          拟合（自研）——PCL 1.9 无椭球模型：out_coeffs 12 值 [cx,cy,cz,
+ *          a,b,c, rx,ry,rz, 保留×3]，半轴与主轴方向一一对应、不保证排序
+ *          （特征分解自然顺序，本实现降序 a>=b>=c），rx,ry,rz = 把 +Z 轴
+ *          转到第一半轴方向的 Rodrigues 旋转向量（右手系；仅 RANSAC，fit
+ *          1/2 回退，参数被忽略）；最小样本 9 点，剔除非有限点后 <9 → -2；
+ *          内点判定为 Sampson 一阶近似口径，见 9.7 支持度表）。
  *
  * 错误码全局约定（§8.3）：
  *   点云计算族（LoadCloud/SaveCloudEx/Filter/Extract/Transform 等）：
@@ -117,7 +132,7 @@ POINT3DALG_EXPORT void Point3DAlg_FreeBuffer(void* p);
  * 版本与生命周期（1.1.0 新增，对齐 Image2DAlg）
  * ===================================================================== */
 
-/* 返回 DLL 版本字符串（静态存储，调用方不得释放）。当前 "1.7.0"。 */
+/* 返回 DLL 版本字符串（静态存储，调用方不得释放）。当前 "1.8.0"。 */
 POINT3DALG_EXPORT const char* Point3DAlg_GetVersion(void);
 
 /* 初始化（占位实现：当前模块无全局状态，恒返回 0；为宿主统一生命周期而设）。
@@ -338,7 +353,9 @@ POINT3DALG_EXPORT int Point3DAlg_TransformCloud(const Point3DAlg_PointCloud* in,
  * 全部封装 ShapelyAlg::CloudProcessor（点型固定 pcl::PointXYZ），本层只做
  * 容器转换与参数/错误码翻译（例外：FitModel method 7/8/9 为 1.7.0 新增，
  * PCL SACSegmentation/RANSAC 直调不经 CloudProcessor——轴约束模型与 stick
- * 无底层包装，见 9.7 支持度表）。错误码为点云计算族口径（见文件头全局约定），
+ * 无底层包装，见 9.7 支持度表；FitModel method 10 = ellipsoid 为 1.8.0
+ * 新增，同为不经 CloudProcessor 的本层实现——全自研手写 RANSAC）。错误码
+ * 为点云计算族口径（见文件头全局约定），
  * 各接口注释写明本接口细化语义；依赖守卫同 1.1.0（无 PCL 不导出）。
  * 输出数组内存约定：一级指针输出缓冲（out_coeffs/out_values）由调用方
  * 预分配（capacity 不足 → -3 并经 out_*_count 回填所需长度，两段式调用）；
@@ -350,6 +367,7 @@ POINT3DALG_EXPORT int Point3DAlg_TransformCloud(const Point3DAlg_PointCloud* in,
  * 9.7 通用几何拟合（fit 组）
  * method：0=plane 1=sphere 2=cylinder 3=circle3D 4=cone 5=line3D 6=torus
  *         7=parallelPlane 8=perpendicularPlane 9=stick（7~9 为 1.7.0 新增）
+ *         10=ellipsoid（1.8.0 新增）
  * fit   ：0=RANSAC 1=MSAC 2=LMS(LMEDS)
  *         （映射 shapely::FitMethod RANSAC/LMEDS/MSAC——注意与底层枚举
  *          顺序不同，本接口以 0=RANSAC/1=MSAC/2=LMS 为准）
@@ -383,6 +401,13 @@ POINT3DALG_EXPORT int Point3DAlg_TransformCloud(const Point3DAlg_PointCloud* in,
  *   9  stick    6  [px,py,pz, dx,dy,dz]  线上一点 + 单位方向（1.7.0 新增，
  *              PCL SACMODEL_STICK 有限长线段；布局同 line3D——PCL 系数
  *              第 7 值 line_width 本接口不输出；内点 <3 → -2 退化）
+ *   10 ellipsoid 12 [cx,cy,cz, a,b,c, rx,ry,rz, 保留×3]（1.8.0 新增，全
+ *              自研——PCL 1.9 无椭球模型）：[0..2]=椭球中心；[3..5]=三条
+ *              半轴 a/b/c——不保证排序（特征分解自然顺序，本实现为降序
+ *              a>=b>=c），与 [6..8] 的主轴方向一一对应；[6..8]=rx,ry,rz
+ *              Rodrigues 旋转向量（右手系，把 +Z 轴转到第一半轴 a 的
+ *              方向；半轴方向为无向直线、特征向量符号任意 → 同一椭球的
+ *              rvec 不唯一）；[9..11]=保留位恒 0（缓冲按 12 值分配）
  * 模型支持度（PCL 1.9 限制，底层自动回退，不报错）：
  *   plane/line3D/torus 三种 fit 均支持（torus 的 fit 0/1 = 采样稳健层：
  *   RANSAC 内点计数最大 / MSAC 截断平方残差最小，fit 2 = 确定性多候选 LM
@@ -409,6 +434,18 @@ POINT3DALG_EXPORT int Point3DAlg_TransformCloud(const Point3DAlg_PointCloud* in,
  *     内点（不借 PCL selectWithinDistance——精化系数是"点+方向"布局，
  *     PCL 仍按两点解析会错）；距离口径为点到直线距离（端点截断不参与，
  *     PCL stick 实测）；内点 <3 或方向退化 → -2。
+ *   1.8.0 新增支持度表（method 10，全自研，实现见 Point3DAlg_CloudOps.cpp
+ *   FitEllipsoidRansac——PCL 1.9 无椭球模型）：
+ *     ellipsoid（10）：仅 RANSAC（fit 1/2 回退 RANSAC，参数被忽略）。
+ *     两阶段自研：固定种子随机采样 9 点最小样本 min(2000, C(n,9)) 组 →
+ *     每组解一般二次方程 10 系数齐次线性系统（Eigen JacobiSVD 零空间；
+ *     第二小奇异值比率塌陷 = 9 点共面/共线/重复 → 解不唯一 → 跳过）→
+ *     二次矩阵特征分解非正定（圆柱/抛物面/双曲面/平面等）→ 跳过 →
+ *     Sampson 一阶近似内点计数取最优 → 内点代数最小二乘精化两轮（每轮
+ *     退化则沿用上一轮）。点到椭球面的精确距离需解四次方程，**内点判定
+ *     为 Sampson 一阶近似口径**（delta ≈ |F|/||∇F||，F 为二次型值、
+ *     ∇F = 2(Aq+p)，threshold 与坐标同单位、近似几何距离口径）；半轴
+ *     任一 <= 0 或非有限、最优候选仍退化 → -2。
  *
  * distance_threshold：局内点判定距离阈值（与坐标同单位，>0）。
  * out_coeffs / coeffs_capacity：调用方预分配 double 缓冲与容量。
@@ -417,15 +454,15 @@ POINT3DALG_EXPORT int Point3DAlg_TransformCloud(const Point3DAlg_PointCloud* in,
  *   不需要内点（out_inlier_count 仍回填）。
  * out_inlier_count：必填（NULL → -1）；成功 = 内点数（out_inliers 数组长
  *   度——系数个数无需另查，由 method 唯一确定：plane/sphere=4、line3D=6、
- *   torus=8、parallel/perpendicular=4、stick=6、其余=7）；
+ *   torus=8、parallel/perpendicular=4、stick=6、ellipsoid=12、其余=7）；
  *   -3 时回填所需系数长度（两段式：先 capacity=0 查长度，再分配重调）。
  * 错误码（本接口口径）：
  *   0 成功；
  *   -1 in/out_inlier_count 为 NULL、in->xyz 为 NULL、in->count<=0；
  *   -2 拟合失败/无局内点/退化（点数不足、投影点共线、圆锥不收敛、
  *      环面剔除非有限点后 <8 点或精化后内点 <8、stick 内点 <3 或方向
- *      退化等）；
- *   -3 method/fit 不是 0~9、distance_threshold<=0、coeffs_capacity 不足
+ *      退化、椭球剔除非有限点后 <9 点/无正定候选/精化后仍退化等）；
+ *   -3 method/fit 不是 0~10、distance_threshold<=0、coeffs_capacity 不足
  *      （*out_inlier_count = 所需系数长度，两段式回填）；
  *   -4 内存分配失败（出参全部保持 NULL/0，不承载任何有效数据）；
  *   -99 PCL 异常。 */
@@ -506,18 +543,25 @@ POINT3DALG_EXPORT int Point3DAlg_SegmentCloud(const Point3DAlg_PointCloud* in, i
 POINT3DALG_EXPORT void Point3DAlg_FreeClouds(Point3DAlg_PointCloud* segments, int count);
 
 /* ---------------------------------------------------------------------
- * 9.9 空间索引与近邻搜索（tree 组）
- * query：查询点 [x,y,z]（double，本层转 float 进 KdTree）。
+ * 9.9 空间索引与近邻搜索（tree 组，KdTree + Octree/体素）
+ * query：查询点 [x,y,z]（double，本层转 float 进树索引）。
  * out_indices/out_dists：均为库 malloc，用 Point3DAlg_FreeSearchResult 释放
  *   （一次调用同时收两个缓冲，避免二次释放歧义——不复用 FreeBuffer，§9.9
- *   先例）；两者可传 NULL 表示不需要（count 仍回填）。
- * out_dists 布局：与 out_indices 一一对应的**欧氏距离**（底层 KdTree 返回
- *   平方距离，本层开方——注意不是 PCL 原始口径），按距离升序。
- * 错误码（两接口相同口径）：
- *   0 成功（含 0 命中：半径内无点 → 0 成功 + *out_count=0）；
- *   -1 in/out_count 为 NULL、in->xyz 为 NULL、in->count<=0；
+ *   先例）；两者可传 NULL 表示不需要（count 仍回填）。本组全部六接口共用
+ *   本通道与 FreeSearchResult。
+ * out_dists 布局：与 out_indices 一一对应的**欧氏距离**（KdTree 底层返回
+ *   平方距离，本层开方——注意不是 PCL 原始口径），按距离升序；距离参照
+ *   点见各接口声明（OctreeChangeDetection 无距离语义，恒填 0）。
+ * 错误码（六接口相同口径）：
+ *   0 成功（含 0 命中：邻域/体素/盒内无点或变化检测 0 新增 → 0 成功 +
+ *     *out_count=0）；
+ *   -1 in（OctreeChangeDetection 为 in_base/in_cmp）/out_count 为 NULL、
+ *      xyz 为 NULL、count<=0（ChangeDetection 的 in_base 空云例外——
+ *      "无历史基准，全部新增"合法，见其声明）；
  *   -2 不使用（无空结果语义——0 命中属正常成功）；
- *   -3 KnnSearch：k<=0；RadiusSearch：radius<=0；
+ *   -3 KnnSearch：k<=0；RadiusSearch：radius<=0；OctreeVoxelSearch：
+ *      resolution<=0；OctreeBoxSearch：box 逐维 min>=max；
+ *      OctreeChangeDetection：min_resolution<=0；
  *   -4 内存分配失败；
  *   -99 PCL 异常。 */
 POINT3DALG_EXPORT int Point3DAlg_KnnSearch(const Point3DAlg_PointCloud* in,
@@ -527,8 +571,39 @@ POINT3DALG_EXPORT int Point3DAlg_RadiusSearch(const Point3DAlg_PointCloud* in,
                                               const double query[3], double radius,
                                               int** out_indices, float** out_dists, int* out_count);
 
-/* 释放 KnnSearch/RadiusSearch 的输出（NULL 安全）：free indices + free dists。
- * 只用于本库分配的缓冲。 */
+/* Octree 体素检索（1.8.0）：查询点 query 所在体素（边长 resolution，与点云
+ * 同单位）内的全部点索引。底层 CloudProcessor::treeOctreeVoxelSearch
+ * （PCL OctreePointCloudSearch::voxelSearch，体素归属按 floor 划分）。
+ * out_dists：各命中点到 query 的欧氏距离（本层计算），升序。
+ * resolution<=0 → -3（octree 非法分辨率会内部挂死，入口即拒）。 */
+POINT3DALG_EXPORT int Point3DAlg_OctreeVoxelSearch(const Point3DAlg_PointCloud* in,
+                                                   const double query[3], double resolution,
+                                                   int** out_indices, float** out_dists, int* out_count);
+
+/* Octree 盒检索（1.8.0）：轴对齐盒 [box_min, box_max]（各分量 double[3]，
+ * 与点云同单位）内全部点索引，含边界点。底层 CloudProcessor::treeOctree
+ * BoxSearch（PCL boxSearch）——KdTree 无对应查询（半径球域 ≠ 轴对齐盒）。
+ * out_dists：各命中点到盒中心的欧氏距离（本层计算），升序。
+ * box_min/box_max 任一为 NULL → -1；任一维 min >= max（含 NaN）→ -3。 */
+POINT3DALG_EXPORT int Point3DAlg_OctreeBoxSearch(const Point3DAlg_PointCloud* in,
+                                                 const double box_min[3], const double box_max[3],
+                                                 int** out_indices, float** out_dists, int* out_count);
+
+/* Octree 变化检测（1.8.0）：in_cmp 相对 in_base 新占体素（分辨率
+ * min_resolution 粒度下的体素差集）的点索引，保持 PCL 变化检测输出序
+ * （体素遍历序，不排序）。底层 CloudProcessor::treeOctreeChangeDetection
+ * （PCL OctreePointCloudChangeDetector 双缓冲）。
+ * out_dists：无距离语义，恒填 0（占位以共用输出通道）。
+ * in_base->count==0 合法（无历史基准 → in_cmp 全部点为"新增"）；
+ * in_cmp->count<=0 → -1（无可比对象，参数无效）。min_resolution<=0 → -3。 */
+POINT3DALG_EXPORT int Point3DAlg_OctreeChangeDetection(const Point3DAlg_PointCloud* in_base,
+                                                       const Point3DAlg_PointCloud* in_cmp,
+                                                       double min_resolution,
+                                                       int** out_indices, float** out_dists,
+                                                       int* out_count);
+
+/* 释放本组（KnnSearch/RadiusSearch/Octree 三接口）的输出（NULL 安全）：
+ * free indices + free dists。只用于本库分配的缓冲。 */
 POINT3DALG_EXPORT void Point3DAlg_FreeSearchResult(int* indices, float* dists);
 
 /* ---------------------------------------------------------------------

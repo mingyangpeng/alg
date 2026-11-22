@@ -1319,9 +1319,9 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiFitModel(const AlgoCInput* in, 
     if (const AlgoCParam* p = FindParam(in, 1, 0)) method = p->i;
     if (const AlgoCParam* p = FindParam(in, 1, 1)) fit = p->i;
     if (const AlgoCParam* p = FindParam(in, 0, 0)) dist_thr = p->d;
-    if (method < 0 || method > 9) {
+    if (method < 0 || method > 10) {
         out->error = "method 仅支持 0=plane/1=sphere/2=cylinder/3=circle3D/4=cone/5=line3D/6=torus/"
-                     "7=parallelPlane/8=perpendicularPlane/9=stick"; return 3;
+                     "7=parallelPlane/8=perpendicularPlane/9=stick/10=ellipsoid"; return 3;
     }
     if (fit < 0 || fit > 2) { out->error = "fit 仅支持 0=RANSAC/1=MSAC/2=LMS"; return 3; }
     if (dist_thr <= 0.0) { out->error = "distance_threshold 须 > 0"; return 3; }
@@ -1398,6 +1398,13 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiFitModel(const AlgoCInput* in, 
             snprintf(msg, sizeof(msg),
                      "stick p=(%.6f, %.6f, %.6f) dir=(%.6f, %.6f, %.6f) | 内点 %d/%d",
                      coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5],
+                     inlier_count, src->count);
+            break;
+        case 10:
+            snprintf(msg, sizeof(msg),
+                     "ellipsoid c=(%.6f, %.6f, %.6f) axes=(%.6f, %.6f, %.6f) rv=(%.4f, %.4f, %.4f) | 内点 %d/%d",
+                     coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5],
+                     coeffs[6], coeffs[7], coeffs[8],
                      inlier_count, src->count);
             break;
     }
@@ -2428,6 +2435,142 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiRadiusSearch(const AlgoCInput* 
     return 0;
 }
 #endif   // POINT3DALG_HAS_PCL（RadiusSearch）
+
+// ---------------- 算子入口：Octree 体素检索（node.json: alg.point3d.octree_voxel_search） ----------------
+// Point3DAlg_OctreeVoxelSearch（1.8.0，api.h §9.9 tree 组）：查询点所在体素
+//（边长 resolution，与坐标同单位）内全部点（PCL voxelSearch，体素归属按
+// floor 划分）；dists = 到查询点欧氏距离，升序。
+// 参数（按 node.json params 声明顺序）：query_x query_y query_z resolution(number)。
+// 输入：一片点云；无输出端口，消息形态与 radius_search 同：
+//   "octree_voxel res=R hits=H query=(x,y,z) idx:dist ..."（前 30 组，900B 安全）。
+// 错误码：1 输入未连线；2 点云为空 / 内存不足或内部异常（-4/-99）；
+//         3 resolution<=0（-3 同口径）。
+// 内存契约：FreeSearchResult 成功/失败路径配对回收（knn_search 先例）。
+
+#ifdef POINT3DALG_HAS_PCL
+extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiOctreeVoxelSearch(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->cloudCount < 1 || !in->clouds) { out->error = "输入未连线"; return 1; }
+    const AlgoCCloud* src = &in->clouds[0];
+    if (src->count <= 0 || !src->xyz) { out->error = "输入点云为空"; return 2; }
+
+    double q[3] = { 0.0, 0.0, 0.0 };
+    for (int i = 0; i < 3; ++i)
+        if (const AlgoCParam* p = FindParam(in, 0, i)) q[i] = p->d;
+    double res = 1.0;
+    if (const AlgoCParam* p = FindParam(in, 0, 3)) res = p->d;
+    if (!(res > 0.0)) { out->error = "resolution 须 > 0（体素边长，与坐标同单位）"; return 3; }
+
+    Point3DAlg_PointCloud pin = CloudViewOf(src);
+    int* idxs = NULL;
+    float* dists = NULL;
+    int count = 0;
+    const int rc = Point3DAlg_OctreeVoxelSearch(&pin, q, res, &idxs, &dists, &count);
+    if (rc != 0)  { out->error = "体素检索失败（内存不足或内部异常）"; return 2; }
+
+    static char msg[900];
+    int pos = snprintf(msg, sizeof(msg), "octree_voxel res=%.4g hits=%d query=(%.4g,%.4g,%.4g) ",
+                       res, count, q[0], q[1], q[2]);
+    for (int i = 0; i < count && i < 30 && pos < (int)sizeof(msg) - 32; ++i)
+        pos += snprintf(msg + pos, sizeof(msg) - (size_t)pos, "%s%d:%.4g",
+                        i ? " " : "", idxs[i], (double)dists[i]);
+    Point3DAlg_FreeSearchResult(idxs, dists);   // 库 malloc，配对回收（NULL 安全）
+    out->error = msg;
+    return 0;
+}
+#endif   // POINT3DALG_HAS_PCL（OctreeVoxelSearch）
+
+// ---------------- 算子入口：Octree 盒检索（node.json: alg.point3d.octree_box_search） ----------------
+// Point3DAlg_OctreeBoxSearch（1.8.0）：轴对齐盒 [box_min, box_max] 内全部点
+//（PCL boxSearch，闭区间含边界点）；dists = 到盒中心欧氏距离，升序。
+// 参数（按 node.json params 声明顺序）：min_x min_y min_z max_x max_y max_z(number ×6)。
+// 输入：一片点云；无输出端口，消息：
+//   "octree_box hits=H box=[x0~x1,y0~y1,z0~z1] idx:dist ..."（前 30 组）。
+// 错误码：1 输入未连线；2 点云为空 / 内存不足或内部异常（-4/-99）；
+//         3 任一维 min>=max（-3 同口径）。
+// 内存契约：同体素检索——FreeSearchResult 配对回收。
+
+#ifdef POINT3DALG_HAS_PCL
+extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiOctreeBoxSearch(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->cloudCount < 1 || !in->clouds) { out->error = "输入未连线"; return 1; }
+    const AlgoCCloud* src = &in->clouds[0];
+    if (src->count <= 0 || !src->xyz) { out->error = "输入点云为空"; return 2; }
+
+    double bmin[3] = { 0.0, 0.0, 0.0 };
+    double bmax[3] = { 0.0, 0.0, 0.0 };
+    for (int i = 0; i < 3; ++i) {
+        if (const AlgoCParam* p = FindParam(in, 0, i)) bmin[i] = p->d;
+        if (const AlgoCParam* p = FindParam(in, 0, 3 + i)) bmax[i] = p->d;
+    }
+    for (int i = 0; i < 3; ++i) {
+        if (!(bmin[i] < bmax[i])) { out->error = "box 任一维须 min < max（轴对齐盒角点）"; return 3; }
+    }
+
+    Point3DAlg_PointCloud pin = CloudViewOf(src);
+    int* idxs = NULL;
+    float* dists = NULL;
+    int count = 0;
+    const int rc = Point3DAlg_OctreeBoxSearch(&pin, bmin, bmax, &idxs, &dists, &count);
+    if (rc != 0)  { out->error = "盒检索失败（内存不足或内部异常）"; return 2; }
+
+    static char msg[900];
+    int pos = snprintf(msg, sizeof(msg),
+                       "octree_box hits=%d box=[%.4g~%.4g,%.4g~%.4g,%.4g~%.4g] ",
+                       count, bmin[0], bmax[0], bmin[1], bmax[1], bmin[2], bmax[2]);
+    for (int i = 0; i < count && i < 30 && pos < (int)sizeof(msg) - 32; ++i)
+        pos += snprintf(msg + pos, sizeof(msg) - (size_t)pos, "%s%d:%.4g",
+                        i ? " " : "", idxs[i], (double)dists[i]);
+    Point3DAlg_FreeSearchResult(idxs, dists);   // 库 malloc，配对回收（NULL 安全）
+    out->error = msg;
+    return 0;
+}
+#endif   // POINT3DALG_HAS_PCL（OctreeBoxSearch）
+
+// ---------------- 算子入口：Octree 变化检测（node.json: alg.point3d.octree_change_detection） ----------------
+// Point3DAlg_OctreeChangeDetection（1.8.0）：对比云相对基准云新占体素的点索引
+//（PCL OctreePointCloudChangeDetector 双缓冲，min_resolution 决定变化粒度）；
+// dists 无距离语义（恒 0，api.h 口径），消息只列索引。
+// 参数（按 node.json params 声明顺序）：min_resolution(number)。
+// 输入：两片点云（clouds[0]=基准云，clouds[1]=对比云——cloud_diff 双云输入
+// 先例）；无输出端口，消息：
+//   "octree_change res=R base=B cmp=C new=N idx idx ..."（前 30 个索引）。
+// 基准云为空（已连线但 0 点）合法 → 对比云全部点新增（api.h 口径）。
+// 错误码：1 输入未连线（须两片）；2 对比云为空 / 内存不足或内部异常（-4/-99）；
+//         3 min_resolution<=0（-3 同口径）。
+// 内存契约：FreeSearchResult 配对回收（knn_search 先例）。
+
+#ifdef POINT3DALG_HAS_PCL
+extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiOctreeChangeDetection(const AlgoCInput* in, AlgoCOutput* out) {
+    memset(out, 0, sizeof(*out));
+    if (in->cloudCount < 2 || !in->clouds) { out->error = "需要两片输入点云（基准/对比）"; return 1; }
+    const AlgoCCloud* sbase = &in->clouds[0];
+    const AlgoCCloud* scmp = &in->clouds[1];
+    if (scmp->count <= 0 || !scmp->xyz) { out->error = "对比点云为空"; return 2; }
+
+    double res = 1.0;
+    if (const AlgoCParam* p = FindParam(in, 0, 0)) res = p->d;
+    if (!(res > 0.0)) { out->error = "min_resolution 须 > 0（体素分辨率，决定变化判定粒度）"; return 3; }
+
+    Point3DAlg_PointCloud pbase = CloudViewOf(sbase);
+    Point3DAlg_PointCloud pcmp = CloudViewOf(scmp);
+    int* idxs = NULL;
+    float* dists = NULL;
+    int count = 0;
+    const int rc = Point3DAlg_OctreeChangeDetection(&pbase, &pcmp, res, &idxs, &dists, &count);
+    if (rc != 0)  { out->error = "变化检测失败（内存不足或内部异常）"; return 2; }
+
+    static char msg[900];
+    int pos = snprintf(msg, sizeof(msg), "octree_change res=%.4g base=%d cmp=%d new=%d ",
+                       res, sbase->count, scmp->count, count);
+    for (int i = 0; i < count && i < 30 && pos < (int)sizeof(msg) - 32; ++i)
+        pos += snprintf(msg + pos, sizeof(msg) - (size_t)pos, "%s%d",
+                        i ? " " : "", idxs[i]);
+    Point3DAlg_FreeSearchResult(idxs, dists);   // 库 malloc，配对回收（NULL 安全）
+    out->error = msg;
+    return 0;
+}
+#endif   // POINT3DALG_HAS_PCL（OctreeChangeDetection）
 
 // ---------------- 算子入口：厚度图（node.json: alg.point3d.thickness_map） ----------------
 // Point3DAlg_ThicknessMap（api.h §9.13 heightmap 组）：同一工件上/下表面两点云

@@ -60,7 +60,7 @@ static void check(bool ok, const char* name)
 static void TestLifecycle()
 {
     std::printf("---- A1. 版本与生命周期 ----\n");
-    check(std::strcmp(Point3DAlg_GetVersion(), "1.7.0") == 0, "GetVersion 返回 1.7.0");
+    check(std::strcmp(Point3DAlg_GetVersion(), "1.8.0") == 0, "GetVersion 返回 1.8.0");
     check(Point3DAlg_Init() == 0, "Init 返回 0");
     Point3DAlg_Cleanup();   // 占位实现，可安全调用
     Point3DAlg_FreeCloud(nullptr);   // NULL 安全（不崩溃即通过）
@@ -1245,6 +1245,77 @@ static void TestFitModel()
         }
         Point3DAlg_FreeCloud(&in);
     }
+
+    // 10 ellipsoid（1.8.0）：中心 (10,20,30)、半轴 (8,5,3)、绕 Z 30°——
+    // 表面参数化 27×18 = 486 点 + 30 远端离群 → RANSAC 恢复。
+    // out_coeffs 12 值 [cx,cy,cz, a,b,c, rx,ry,rz, 保留×3]：
+    // 半轴降序（8,5,3）与主轴方向一一对应；rvec = 主轴系→世界系旋转。
+    {
+        const double c10 = std::cos(30.0 * kPi / 180.0);
+        const double s10 = std::sin(30.0 * kPi / 180.0);
+        std::vector<float> v;
+        const int kU = 27, kV = 18;
+        for (int iu = 0; iu < kU; ++iu)
+            for (int iv = 0; iv < kV; ++iv) {
+                const double u = 2.0 * kPi * iu / kU;
+                const double w = 2.0 * kPi * iv / kV;
+                // 主轴系下表面点：(a cosu cosw, b sinu cosw, c sinw)
+                const double lx = 8.0 * std::cos(u) * std::cos(w);
+                const double ly = 5.0 * std::sin(u) * std::cos(w);
+                const double lz = 3.0 * std::sin(w);
+                PushPt(v, (float)(10.0 + c10 * lx - s10 * ly),
+                       (float)(20.0 + s10 * lx + c10 * ly), (float)(30.0 + lz));
+            }
+        for (int k = 0; k < 30; ++k)
+            PushPt(v, 80.0f + 2.0f * k, -60.0f + (k % 7) * 5.0f, 40.0f + (k % 5) * 8.0f);
+        Point3DAlg_PointCloud in = MakeCloudFrom(v);   // 516 点
+        double c[16] = { 0 };
+        int nC = 0;
+        int* inl = nullptr;
+        const int rc = Point3DAlg_FitModel(&in, 10, 0, 0.5, c, 16, &inl, &nC);
+        bool ok = rc == 0 && nC >= 440 &&
+                  std::fabs(c[0] - 10.0) < 0.3 && std::fabs(c[1] - 20.0) < 0.3 &&
+                  std::fabs(c[2] - 30.0) < 0.3;
+        // 半轴降序 {8,5,3}（容忍 ±0.4）
+        if (ok)
+            ok = std::fabs(c[3] - 8.0) < 0.4 && std::fabs(c[4] - 5.0) < 0.4 &&
+                 std::fabs(c[5] - 3.0) < 0.4;
+        check(ok, "ellipsoid RANSAC 中心 ≈ (10,20,30) / 半轴 ≈ (8,5,3) 降序 / 内点 440+");
+        check(rc == 0 && inl != nullptr && nC >= 440 && nC <= 516,
+              "ellipsoid 内点索引非空（表面点集，离群被拒）");
+        // 保留位（coeffs[9..11]）= 0
+        check(rc == 0 && c[9] == 0.0 && c[10] == 0.0 && c[11] == 0.0,
+              "ellipsoid 保留位 coeffs[9..11] = 0");
+        // rvec 约定（实现口径）：+Z 轴转到第一半轴方向（最长半轴 8，位于
+        // 绕 Z 30° 的方向上——该方向 ⊥ Z → 轴角 = acos(ez·v) = 90°）
+        const double rn = std::sqrt(c[6] * c[6] + c[7] * c[7] + c[8] * c[8]);
+        check(rc == 0 && std::fabs(rn - kPi / 2.0) < 0.1,
+              "ellipsoid rvec |角度| ≈ 90°（+Z → 第一半轴方向 ⊥ Z）");
+        // 两段式：容量 11 → -3 回填 12
+        check(Point3DAlg_FitModel(&in, 10, 0, 0.5, c, 11, nullptr, &nC) == -3 && nC == 12,
+              "ellipsoid capacity=11 → -3 两段式回填 12");
+        // fit=1 回退 RANSAC 同收敛（仅 RANSAC 口径）
+        {
+            double c2[16] = { 0 };
+            int nC2 = 0;
+            const int rc2 = Point3DAlg_FitModel(&in, 10, 1, 0.5, c2, 16, nullptr, &nC2);
+            check(rc2 == 0 && std::fabs(c2[0] - 10.0) < 0.3 &&
+                      std::fabs(c2[3] - 8.0) < 0.4,
+                  "ellipsoid fit=1 回退 RANSAC 同收敛（仅 RANSAC 口径）");
+        }
+        // 错误路径：点数 < 9 → -2
+        {
+            std::vector<float> v2;
+            for (int k = 0; k < 8; ++k)
+                PushPt(v2, (float)k, 0.0f, 0.0f);
+            Point3DAlg_PointCloud in2 = MakeCloudFrom(v2);
+            check(Point3DAlg_FitModel(&in2, 10, 0, 0.5, c, 16, nullptr, &nC) == -2,
+                  "ellipsoid 点数 < 9 → -2");
+            Point3DAlg_FreeCloud(&in2);
+        }
+        Point3DAlg_FreeBuffer(inl);
+        Point3DAlg_FreeCloud(&in);
+    }
 }
 
 // ---------------- A8. SegmentCloud（5 method + FreeClouds） ----------------
@@ -1624,6 +1695,154 @@ static void TestSearch()
     Point3DAlg_FreeSearchResult(nullptr, nullptr);   // NULL 安全
     check(true, "FreeSearchResult(NULL,NULL) 安全");
     Point3DAlg_FreeCloud(&in);
+}
+
+// ---------------- A9b. Octree 空间检索（1.8.0：Voxel/Box/ChangeDetection） ----------------
+static void TestOctreeSearch()
+{
+    std::printf("---- A9b. Octree 空间检索（Voxel/Box/ChangeDetection）----\n");
+    int* idx = nullptr;
+    float* dist = nullptr;
+    int n = -1;
+
+    // 体素检索：2×2×2 单位立方角点（8 点），体素边长 2.0 → 全部同体素
+    // [0,2)³；query (0.5,0.5,0.5) 到 8 角点欧氏距离全等 √0.75
+    std::vector<float> vv;
+    for (int i = 0; i < 2; ++i)
+        for (int j = 0; j < 2; ++j)
+            for (int k = 0; k < 2; ++k)
+                PushPt(vv, (float)i, (float)j, (float)k);
+    Point3DAlg_PointCloud cube = MakeCloudFrom(vv);
+    const double vq[3] = { 0.5, 0.5, 0.5 };
+
+    check(Point3DAlg_OctreeVoxelSearch(nullptr, vq, 2.0, &idx, &dist, &n) == -1,
+          "OctreeVoxelSearch in=NULL → -1");
+    check(Point3DAlg_OctreeVoxelSearch(&cube, nullptr, 2.0, &idx, &dist, &n) == -1,
+          "OctreeVoxelSearch query=NULL → -1");
+    check(Point3DAlg_OctreeVoxelSearch(&cube, vq, 0.0, &idx, &dist, &n) == -3,
+          "OctreeVoxelSearch resolution=0 → -3");
+
+    const int rcV = Point3DAlg_OctreeVoxelSearch(&cube, vq, 2.0, &idx, &dist, &n);
+    bool okV = rcV == 0 && n == 8 && idx && dist;
+    if (okV) {
+        bool seen[8] = { false };
+        for (int t = 0; okV && t < n; ++t) {
+            if (idx[t] < 0 || idx[t] > 7 || seen[idx[t]])
+                okV = false;
+            else
+                seen[idx[t]] = true;
+            if (std::fabs((double)dist[t] - 0.8660254) > 1e-5)
+                okV = false;
+        }
+    }
+    check(okV, "VoxelSearch 同体素 8 点全命中，dist=到查询点欧氏距离");
+    Point3DAlg_FreeSearchResult(idx, dist);
+    idx = nullptr;
+    dist = nullptr;
+
+    // 空体素：resolution=0.4 → query 体素 [0.4,0.8)³ 无点 → 0 命中成功
+    const int rcV0 = Point3DAlg_OctreeVoxelSearch(&cube, vq, 0.4, &idx, &dist, &n);
+    check(rcV0 == 0 && n == 0 && idx == nullptr && dist == nullptr,
+          "VoxelSearch 空体素 → 0 命中成功");
+    Point3DAlg_FreeSearchResult(idx, dist);
+    idx = nullptr;
+    dist = nullptr;
+
+    // 盒检索：参数非法（box_min=NULL；min>=max 含相等与 NaN）
+    const double bminAll[3] = { -0.2, -0.2, -0.2 };
+    const double bmaxAll[3] = { 1.8, 1.8, 1.8 };
+    const float nanF = std::numeric_limits<float>::quiet_NaN();
+    check(Point3DAlg_OctreeBoxSearch(&cube, nullptr, bmaxAll, &idx, &dist, &n) == -1,
+          "OctreeBoxSearch box_min=NULL → -1");
+    check(Point3DAlg_OctreeBoxSearch(&cube, bminAll, bminAll, &idx, &dist, &n) == -3,
+          "OctreeBoxSearch min==max → -3");
+    const double bminNan[3] = { (double)nanF, 0.0, 0.0 };
+    check(Point3DAlg_OctreeBoxSearch(&cube, bminNan, bmaxAll, &idx, &dist, &n) == -3,
+          "OctreeBoxSearch min=NaN → -3");
+
+    // 全盒（闭区间内缩 0.2）：8 点全命中，dist=到盒中心 (0.8)³ 升序且对应
+    const int rcB = Point3DAlg_OctreeBoxSearch(&cube, bminAll, bmaxAll, &idx, &dist, &n);
+    bool okB = rcB == 0 && n == 8 && idx && dist;
+    if (okB) {
+        double prev = -1.0;
+        for (int t = 0; okB && t < n; ++t) {
+            const double dx = cube.xyz[(size_t)idx[t] * 3] - 0.8;
+            const double dy = cube.xyz[(size_t)idx[t] * 3 + 1] - 0.8;
+            const double dz = cube.xyz[(size_t)idx[t] * 3 + 2] - 0.8;
+            const double dd = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (dd < prev - 1e-6 || std::fabs(dd - (double)dist[t]) > 1e-5)
+                okB = false;
+            prev = dd;
+        }
+    }
+    check(okB, "BoxSearch 全盒 8 点命中，dist 到盒中心升序对应");
+    Point3DAlg_FreeSearchResult(idx, dist);
+    idx = nullptr;
+    dist = nullptr;
+
+    // 子盒 [-0.5,0.5]³ → 只含原点；边界闭区间：max=1.0 恰在点上 → 全命中
+    const double bminB[3] = { -0.5, -0.5, -0.5 };
+    const double bmaxB[3] = { 0.5, 0.5, 0.5 };
+    const int rcB2 = Point3DAlg_OctreeBoxSearch(&cube, bminB, bmaxB, &idx, &dist, &n);
+    check(rcB2 == 0 && n == 1 && idx && idx[0] == 0, "BoxSearch 子盒只含原点");
+    Point3DAlg_FreeSearchResult(idx, dist);
+    idx = nullptr;
+    dist = nullptr;
+
+    const double bmaxEdge[3] = { 1.0, 1.0, 1.0 };
+    const int rcB3 = Point3DAlg_OctreeBoxSearch(&cube, bminB, bmaxEdge, &idx, &dist, &n);
+    check(rcB3 == 0 && n == 8, "BoxSearch 边界闭区间含点（max=1.0 恰在点上）");
+    Point3DAlg_FreeSearchResult(idx, dist);
+    idx = nullptr;
+    dist = nullptr;
+
+    // 变化检测：基准=8 点立方，对比=基准 + 2 个远端新增点（分辨率 1.0 新体素）
+    std::vector<float> vc2 = vv;
+    PushPt(vc2, 10.0f, 0.0f, 0.0f);
+    PushPt(vc2, 0.0f, 10.0f, 0.0f);
+    Point3DAlg_PointCloud cmp = MakeCloudFrom(vc2);
+
+    check(Point3DAlg_OctreeChangeDetection(nullptr, &cmp, 1.0, &idx, &dist, &n) == -1,
+          "OctreeChangeDetection in_base=NULL → -1");
+    check(Point3DAlg_OctreeChangeDetection(&cube, nullptr, 1.0, &idx, &dist, &n) == -1,
+          "OctreeChangeDetection in_cmp=NULL → -1");
+    const Point3DAlg_PointCloud badCmp = { nullptr, 0 };
+    check(Point3DAlg_OctreeChangeDetection(&cube, &badCmp, 1.0, &idx, &dist, &n) == -1,
+          "OctreeChangeDetection in_cmp 空云 → -1");
+    check(Point3DAlg_OctreeChangeDetection(&cube, &cmp, 0.0, &idx, &dist, &n) == -3,
+          "OctreeChangeDetection min_resolution=0 → -3");
+
+    // 同一云 → 0 新增成功
+    const int rcC0 = Point3DAlg_OctreeChangeDetection(&cube, &cube, 1.0, &idx, &dist, &n);
+    check(rcC0 == 0 && n == 0, "ChangeDetection 同一云 → 0 新增成功");
+    Point3DAlg_FreeSearchResult(idx, dist);
+    idx = nullptr;
+    dist = nullptr;
+
+    // 命中 2 个新增点（索引 8/9，体素遍历序不保证先后），dist 占位 0
+    const int rcC = Point3DAlg_OctreeChangeDetection(&cube, &cmp, 1.0, &idx, &dist, &n);
+    bool okC = rcC == 0 && n == 2 && idx && dist && dist[0] == 0.0f && dist[1] == 0.0f;
+    if (okC) {
+        const bool has8 = (idx[0] == 8) || (idx[1] == 8);
+        const bool has9 = (idx[0] == 9) || (idx[1] == 9);
+        okC = has8 && has9 && idx[0] != idx[1];
+    }
+    check(okC, "ChangeDetection 命中 2 个新增点，dist 占位 0");
+    Point3DAlg_FreeSearchResult(idx, dist);
+    idx = nullptr;
+    dist = nullptr;
+
+    // in_base 空云 {NULL,0} 合法 → 对比云全部 10 点新增
+    const Point3DAlg_PointCloud emptyBase = { nullptr, 0 };
+    const int rcE = Point3DAlg_OctreeChangeDetection(&emptyBase, &cmp, 1.0, &idx, &dist, &n);
+    check(rcE == 0 && n == 10 && idx && dist,
+          "ChangeDetection in_base 空云 → 全部 10 点新增");
+    Point3DAlg_FreeSearchResult(idx, dist);
+    idx = nullptr;
+    dist = nullptr;
+
+    Point3DAlg_FreeCloud(&cube);
+    Point3DAlg_FreeCloud(&cmp);
 }
 
 // ---------------- A10. MeasureCloud（8 method 数值验证） ----------------
@@ -2416,6 +2635,7 @@ static void TestCloudOps()
     TestFitModel();
     TestSegmentCloud();
     TestSearch();
+    TestOctreeSearch();
     TestMeasureCloud();
     TestGdt();
     TestFeatureKeypoints();

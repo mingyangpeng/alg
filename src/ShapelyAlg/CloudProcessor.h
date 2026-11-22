@@ -631,6 +631,11 @@ public:
     static void treeOctreeChangeDetection(const CloudConstPtr& src1, const CloudConstPtr& src2,
                                           double min_resolution, std::vector<int>& out_new_indices);
 
+    /// Octree 盒检索：轴对齐盒 [box_min, box_max] 内全部点索引（含边界）。
+    /// 树分辨率仅影响树粒度、不影响结果，内部取盒对角线/64（下限 1e-6）。
+    static void treeOctreeBoxSearch(const CloudConstPtr& src, const float box_min[3],
+                                    const float box_max[3], std::vector<int>& out_indices);
+
     // ---------------- surface：表面重建 ----------------
 
     // 统一约定（适用于下方所有需要法线的重建接口）：

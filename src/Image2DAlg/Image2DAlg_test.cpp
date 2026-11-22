@@ -214,7 +214,7 @@ static void testVersionAndLifecycle()
 
     check(ver != NULL && ver[0] != '\0', "GetVersion 非空");
 
-    check(ver != NULL && std::strcmp(ver, "2.6.0") == 0, "GetVersion = 2.6.0（2.6.0 扩展：FourierSpectrum/PeriodicNotchFilter/MatchFeaturesFlann/MatchFeaturesSymmetric/EstimateAffineFull）");
+    check(ver != NULL && std::strcmp(ver, "2.7.0") == 0, "GetVersion = 2.7.0（2.7.0 扩展：HandEyeCalib/ProjectPoints/UndistortImagePoints/UndistortRectifyMap/CalibReprojectionStats）");
 
     bool hasDigit = false;
 
@@ -7236,6 +7236,577 @@ static void testFreqMatch2p6()
 
 
 
+// ---------------- 2.7.0 批次：手眼标定 / 投影 / 去畸变 / 重投影统计 ----------------
+
+// 标定域共用合成口径：K = [100,0,320; 0,100,240; 0,0,1]（3x3 行主序扁平 9 值）、
+// rvec=(0,0,0)、tvec=(0,0,5) → 针孔解析投影 pix = (320 + 20X, 240 + 20Y)
+//（fx/Z = 100/5 = 20 px/单位）；畸变只考察 k1 项（dist 5 项口径 [0.1,0,0,0,0]）。
+// 解析期望值全部手算（无噪声合成数据），不用随机数据——确定性回归
+static void testCalib2p7()
+
+{
+
+    const double kmat9[9] = { 100.0, 0.0, 320.0,
+
+                              0.0, 100.0, 240.0,
+
+                              0.0, 0.0, 1.0 };
+
+    const double rvec0[3] = { 0.0, 0.0, 0.0 };
+
+    const double tvecZ5[3] = { 0.0, 0.0, 5.0 };
+
+    std::printf("== ProjectPoints ==\n");
+
+    // 单点 (0,0,0)：世界原点 + tvec(0,0,5) → 相机系 (0,0,5)，落在光轴中心
+    {
+
+        const double obj[3] = { 0.0, 0.0, 0.0 };
+
+        double pix[2] = { 0.0, 0.0 };
+
+        int oc = 0;
+
+        check(Image2DAlg_ProjectPoints(obj, 1, rvec0, tvecZ5, kmat9, NULL, 0, pix, &oc) == 0 &&
+                  oc == 1 && std::fabs(pix[0] - 320.0) < 1e-6 && std::fabs(pix[1] - 240.0) < 1e-6,
+              "ProjectPoints 单点 (0,0,0) 返回 0、out_count=1 且投影 = 光轴中心 (320,240)（容差 1e-6）");
+
+    }
+
+    // 单点 (1,1,0)：相机系 (1,1,5) → x_pix = 320 + 100·(1/5) = 340、y_pix = 240 + 100·(1/5) = 260
+    {
+
+        const double obj[3] = { 1.0, 1.0, 0.0 };
+
+        double pix[2] = { 0.0, 0.0 };
+
+        int oc = 0;
+
+        check(Image2DAlg_ProjectPoints(obj, 1, rvec0, tvecZ5, kmat9, NULL, 0, pix, &oc) == 0 &&
+                  std::fabs(pix[0] - 340.0) < 1e-6 && std::fabs(pix[1] - 260.0) < 1e-6,
+              "obj (1,1,0) 投影 = (340,260)（针孔解析 320+100/5、240+100/5，容差 1e-6）");
+
+    }
+
+    // 5 点批量：解析真值 pix = (320 + 20X, 240 + 20Y)
+    {
+
+        const double obj5[15] = { 0.0, 0.0, 0.0,   1.0, 1.0, 0.0,   2.0, -1.0, 0.0,
+                                  -1.5, 2.0, 0.0,   0.5, 0.5, 0.0 };
+
+        const double exp5[10] = { 320.0, 240.0,   340.0, 260.0,   360.0, 220.0,
+                                  290.0, 280.0,   330.0, 250.0 };
+
+        double pix[10] = { 0.0 };
+
+        int oc = 0;
+
+        check(Image2DAlg_ProjectPoints(obj5, 5, rvec0, tvecZ5, kmat9, NULL, 0, pix, &oc) == 0 &&
+                  oc == 5,
+              "5 点批量返回 0 且 out_count=5");
+
+        bool ok = true;
+
+        for (int i = 0; i < 5 && ok; ++i)
+
+            if (std::fabs(pix[2 * i] - exp5[2 * i]) >= 1e-6 ||
+                std::fabs(pix[2 * i + 1] - exp5[2 * i + 1]) >= 1e-6) ok = false;
+
+        check(ok, "5 点批量投影与针孔解析真值逐点一致（容差 1e-6）");
+
+    }
+
+    // k1=0.1（5 项口径 [k1,k2,p1,p2,k3]）：畸变随 r² 增大，中心 r=0 恰无贡献
+    {
+
+        const double dist5[5] = { 0.1, 0.0, 0.0, 0.0, 0.0 };
+
+        const double objC[3] = { 0.0, 0.0, 0.0 };
+
+        const double objE[3] = { 3.0, 3.0, 0.0 };
+
+        double pc[2] = { 0.0, 0.0 };
+
+        double pu[2] = { 0.0, 0.0 };
+
+        double pe[2] = { 0.0, 0.0 };
+
+        int oc = 0;
+
+        check(Image2DAlg_ProjectPoints(objC, 1, rvec0, tvecZ5, kmat9, dist5, 5, pc, &oc) == 0 &&
+                  std::fabs(pc[0] - 320.0) < 1e-6 && std::fabs(pc[1] - 240.0) < 1e-6,
+              "k1=0.1：中心点 (0,0,0) 投影不变 (320,240)（r=0 畸变恰为 0）");
+
+        check(Image2DAlg_ProjectPoints(objE, 1, rvec0, tvecZ5, kmat9, NULL, 0, pu, &oc) == 0 &&
+                  Image2DAlg_ProjectPoints(objE, 1, rvec0, tvecZ5, kmat9, dist5, 5, pe, &oc) == 0 &&
+                  std::sqrt((pe[0] - pu[0]) * (pe[0] - pu[0]) +
+                            (pe[1] - pu[1]) * (pe[1] - pu[1])) > 0.5,
+              "k1=0.1：边缘点 (3,3,0) 与无畸变结果差异 > 0.5px（定性断言，方向不硬断言）");
+
+    }
+
+    // 错误路径（口径：NULL -> -1；count<=0 / dist_count 非 {0,4,5,8,12,14} -> -3）
+    {
+
+        const double obj[3] = { 0.0, 0.0, 0.0 };
+
+        double pix[2] = { 0.0, 0.0 };
+
+        int oc = 0;
+
+        check(Image2DAlg_ProjectPoints(NULL, 1, rvec0, tvecZ5, kmat9, NULL, 0, pix, &oc) == -1,
+              "ProjectPoints obj_pts=NULL -> -1");
+
+        check(Image2DAlg_ProjectPoints(obj, 1, NULL, tvecZ5, kmat9, NULL, 0, pix, &oc) == -1,
+              "ProjectPoints rvec=NULL -> -1");
+
+        check(Image2DAlg_ProjectPoints(obj, 1, rvec0, tvecZ5, kmat9, NULL, 0, NULL, &oc) == -1,
+              "ProjectPoints out_pts=NULL -> -1");
+
+        check(Image2DAlg_ProjectPoints(obj, 0, rvec0, tvecZ5, kmat9, NULL, 0, pix, &oc) == -3,
+              "ProjectPoints count=0 -> -3");
+
+        check(Image2DAlg_ProjectPoints(obj, 1, rvec0, tvecZ5, kmat9, NULL, 3, pix, &oc) == -3,
+              "ProjectPoints dist_count=3（非 {0,4,5,8,12,14}）-> -3");
+
+    }
+
+    std::printf("== UndistortImagePoints ==\n");
+
+    // 无畸变（dist_count=0）：P=kmat 保持像素口径 → 恒等（除法回乘的浮点误差 < 1e-9）
+    {
+
+        const double src[10] = { 320.0, 240.0,   340.0, 260.0,   360.0, 220.0,
+                                 290.0, 280.0,   330.0, 250.0 };
+
+        double dst[10] = { 0.0 };
+
+        check(Image2DAlg_UndistortImagePoints(src, 5, kmat9, NULL, 0, dst) == 0,
+              "UndistortImagePoints 无畸变返回 0（dist_count=0）");
+
+        bool ok = true;
+
+        for (int i = 0; i < 10 && ok; ++i)
+
+            if (std::fabs(dst[i] - src[i]) >= 1e-9) ok = false;
+
+        check(ok, "无畸变输出 == 输入（恒等，5 点 10 值，容差 1e-9）");
+
+    }
+
+    // k1=0.1：与 ProjectPoints 正向畸变互逆的定性口径——cv::undistortPoints 迭代法
+    //（默认 5 次迭代）收敛精度不做精确对齐，断言中心不动 + 边缘变化且有限
+    {
+
+        const double dist5[5] = { 0.1, 0.0, 0.0, 0.0, 0.0 };
+
+        const double srcC[2] = { 320.0, 240.0 };
+
+        const double srcE[2] = { 384.32, 304.32 };   // (3,3,0) 经 k1=0.1 正向投影的落点
+
+        double dstC[2] = { 0.0, 0.0 };
+
+        double dstE[2] = { 0.0, 0.0 };
+
+        check(Image2DAlg_UndistortImagePoints(srcC, 1, kmat9, dist5, 5, dstC) == 0 &&
+                  std::fabs(dstC[0] - 320.0) < 1e-9 && std::fabs(dstC[1] - 240.0) < 1e-9,
+              "k1=0.1：中心 (320,240) 去畸变不动（r=0，容差 1e-9）");
+
+        check(Image2DAlg_UndistortImagePoints(srcE, 1, kmat9, dist5, 5, dstE) == 0 &&
+                  std::isfinite(dstE[0]) && std::isfinite(dstE[1]) &&
+                  (std::fabs(dstE[0] - srcE[0]) > 1e-9 || std::fabs(dstE[1] - srcE[1]) > 1e-9),
+              "k1=0.1：边缘点输出 ≠ 输入且有限（拉回理想点方向的定性断言）");
+
+    }
+
+    // 错误路径
+    {
+
+        const double src[2] = { 320.0, 240.0 };
+
+        double dst[2] = { 0.0, 0.0 };
+
+        check(Image2DAlg_UndistortImagePoints(NULL, 1, kmat9, NULL, 0, dst) == -1,
+              "UndistortImagePoints src_pts=NULL -> -1");
+
+        check(Image2DAlg_UndistortImagePoints(src, 0, kmat9, NULL, 0, dst) == -3,
+              "UndistortImagePoints count=0 -> -3");
+
+    }
+
+    std::printf("== UndistortRectifyMap ==\n");
+
+    // 无畸变 + new_kmat=NULL（NULL = 用 kmat，纯去畸变不重投影）→ 恒等映射：
+    // map1(y,x) ≈ x、map2(y,x) ≈ y。32F 位流契约：channels=1、data 为 w*h 个
+    // float（96*96*4 字节，按 (h, w, CV_32F) 解读），与 Remap map 输入同构
+    {
+
+        Image2DAlg_Image mx;
+
+        Image2DAlg_Image my;
+
+        std::memset(&mx, 0, sizeof(mx));
+
+        std::memset(&my, 0, sizeof(my));
+
+        check(Image2DAlg_UndistortRectifyMap(kmat9, NULL, 0, NULL, 96, 96, &mx, &my) == 0 &&
+                  mx.width == 96 && mx.height == 96 && mx.channels == 1 && mx.data != NULL &&
+                  my.width == 96 && my.height == 96 && my.channels == 1 && my.data != NULL,
+              "UndistortRectifyMap 返回 0 且 map1/map2 均 96x96 1 通道（32F 位流 w*h*4 字节）");
+
+        // 恒等抽查：四角 + 中心 5 点（float 按 (y*w + x) 解读）
+        {
+
+            const int pts[5][2] = { { 0, 0 }, { 95, 0 }, { 0, 95 }, { 95, 95 }, { 48, 48 } };
+
+            const float* fx = (const float*)mx.data;
+
+            const float* fy = (const float*)my.data;
+
+            bool okx = true;
+
+            bool oky = true;
+
+            for (int i = 0; i < 5; ++i) {
+
+                const int x = pts[i][0];
+
+                const int y = pts[i][1];
+
+                if (std::fabs((double)fx[y * 96 + x] - (double)x) >= 1e-3) okx = false;
+
+                if (std::fabs((double)fy[y * 96 + x] - (double)y) >= 1e-3) oky = false;
+
+            }
+
+            check(okx, "map1(y,x) ≈ 列坐标 x（恒等映射，四角+中心 5 点，容差 1e-3）");
+
+            check(oky, "map2(y,x) ≈ 行坐标 y（恒等映射，四角+中心 5 点，容差 1e-3）");
+
+        }
+
+        Image2DAlg_FreeImage(&mx);
+
+        Image2DAlg_FreeImage(&my);
+
+    }
+
+    // new_kmat = 2× fx：map 为 remap「目标像素 → 源坐标」口径（map1 按目标像素
+    // 索引）——源 u = fx·(x−new_cx)/new_fx + cx = 320 + 0.5·(x−320)：fx 翻倍，
+    // 步长 0.5（任务稿的 2× 手算方向反了；96 宽内抽样 x∈{0,48,95} → 160/184/207.5）
+    {
+
+        const double nk9[9] = { 200.0, 0.0, 320.0,
+
+                                0.0, 200.0, 240.0,
+
+                                0.0, 0.0, 1.0 };
+
+        Image2DAlg_Image mx;
+
+        Image2DAlg_Image my;
+
+        std::memset(&mx, 0, sizeof(mx));
+
+        std::memset(&my, 0, sizeof(my));
+
+        check(Image2DAlg_UndistortRectifyMap(kmat9, NULL, 0, nk9, 96, 96, &mx, &my) == 0,
+              "UndistortRectifyMap new_kmat=2×fx 返回 0");
+
+        {
+
+            const int xs[3] = { 0, 48, 95 };
+
+            const double expv[3] = { 160.0, 184.0, 207.5 };
+
+            const float* fx = (const float*)mx.data;
+
+            bool ok = true;
+
+            for (int i = 0; i < 3; ++i)
+
+                if (std::fabs((double)fx[48 * 96 + xs[i]] - expv[i]) >= 1e-3) ok = false;
+
+            check(ok, "2×fx：map1(x,48) = 320 + 0.5·(x−320)（160/184/207.5 三点，容差 1e-3）");
+
+        }
+
+        Image2DAlg_FreeImage(&mx);
+
+        Image2DAlg_FreeImage(&my);
+
+    }
+
+    // 错误路径（out_map2 必填——cv::remap 断言 map1+map2 成对，缺一不可驱动 Remap）
+    {
+
+        Image2DAlg_Image mx;
+
+        Image2DAlg_Image my;
+
+        std::memset(&mx, 0, sizeof(mx));
+
+        std::memset(&my, 0, sizeof(my));
+
+        check(Image2DAlg_UndistortRectifyMap(kmat9, NULL, 0, NULL, 96, 96, &mx, NULL) == -1,
+              "UndistortRectifyMap out_map2=NULL -> -1（map2 必填契约）");
+
+        check(Image2DAlg_UndistortRectifyMap(kmat9, NULL, 0, NULL, 96, 96, NULL, &my) == -1,
+              "UndistortRectifyMap out_map1=NULL -> -1");
+
+        check(Image2DAlg_UndistortRectifyMap(kmat9, NULL, 0, NULL, 0, 96, &mx, &my) == -3,
+              "UndistortRectifyMap new_w=0 -> -3");
+
+        check(Image2DAlg_UndistortRectifyMap(kmat9, NULL, 3, NULL, 96, 96, &mx, &my) == -3,
+              "UndistortRectifyMap dist_count=3 -> -3");
+
+    }
+
+    std::printf("== HandEyeCalib ==\n");
+
+    // AX=XB 精确自洽构造（选精确恢复口径，不用降级保守口径）：
+    // X_true = cam2gripper = [R=I, t=(0.1,0.2,0.3)]。链式恒等式
+    // base_T_target = A_i·X·B_i = 常量 G（取 G=I）→ B_i = X⁻¹·A_i⁻¹·G；
+    // 由 A_i=[R_i,t_i]、X⁻¹=[I,−t_x] 得：B_i 旋转 = R_iᵀ（旋转向量取反）、
+    // B_i 平移 = −R_iᵀ·t_i − t_x。5 组位姿旋转轴覆盖 x/y/z/混合（无共线退化），
+    // 数据无噪声 → 各方法应精确恢复 X_true（容差放宽到 0.05 抗数值抖动）
+    {
+
+        const double g2b[30] = { 0.5, 0.0, 0.0,    2.0, 0.00, 0.50,
+
+                                 0.0, 0.2, 0.0,    0.42, 0.05, 0.12,
+
+                                 0.0, 0.0, 0.3,    0.38, -0.05, 0.15,
+
+                                 0.15, 0.1, 0.05,  0.35, 0.10, 0.20,
+
+                                 0.2, -0.15, 0.1,  0.30, -0.10, 0.25 };
+
+        const cv::Mat tx = (cv::Mat_<double>(3, 1) << 0.1, 0.2, 0.3);
+
+        // X_true 旋转 = 绕 Z 20°（**非单位阵**——恒等旋转会使 TSAI 类方法
+        // 退化为零解，实测 5 位姿全零输出；20° 旋转下各方法正常收敛）
+        const cv::Mat rvecX = (cv::Mat_<double>(3, 1) << 0.0, 0.0, 20.0 * 3.14159265358979323846 / 180.0);
+
+        cv::Mat RX;
+
+        cv::Rodrigues(rvecX, RX);              // X_true 旋转（绕 Z 20°）
+
+        double t2c[30] = { 0.0 };
+
+        for (int i = 0; i < 5; ++i) {
+
+            const cv::Mat rv =
+                (cv::Mat_<double>(3, 1) << g2b[6 * i], g2b[6 * i + 1], g2b[6 * i + 2]);
+
+            const cv::Mat tv =
+                (cv::Mat_<double>(3, 1) << g2b[6 * i + 3], g2b[6 * i + 4], g2b[6 * i + 5]);
+
+            cv::Mat R;
+
+            cv::Rodrigues(rv, R);                  // R_i
+
+            // B_i = X⁻¹·A_i⁻¹·G（G=I）：X⁻¹ = [R_xᵀ, −R_xᵀ·t_x]
+            // → R_B = R_xᵀ·R_iᵀ、t_B = −R_xᵀ·(R_iᵀ·t_i + t_x)
+            const cv::Mat RB = RX.t() * R.t();
+
+            cv::Mat rb;
+
+            cv::Rodrigues(RB, rb);                 // B_i 旋转向量
+
+            const cv::Mat tb = -RX.t() * (R.t() * tv + tx);   // B_i 平移
+
+            for (int k = 0; k < 3; ++k) {
+
+                t2c[6 * i + k] = rb.at<double>(k, 0);
+
+                t2c[6 * i + 3 + k] = tb.at<double>(k, 0);
+
+            }
+
+        }
+
+        double out6[6] = { 0.0 };
+
+        const int herc = Image2DAlg_HandEyeCalib(g2b, t2c, 5, 0, out6);
+
+        check(herc == 0,
+              "HandEyeCalib 精确自洽数据（5 位姿）TSAI 返回 0");
+
+        
+        {
+
+            cv::Mat Rout;
+
+            const cv::Mat rvecM = (cv::Mat_<double>(3, 1) << out6[0], out6[1], out6[2]);
+
+            cv::Rodrigues(rvecM, Rout);
+
+            bool okR = true;
+
+            for (int r = 0; r < 3 && okR; ++r)
+
+                for (int c = 0; c < 3 && okR; ++c)
+
+                    if (std::fabs(Rout.at<double>(r, c) - RX.at<double>(r, c)) >= 0.05) okR = false;
+
+            check(okR, "TSAI 输出旋转 ≈ X_true 旋转（绕 Z 20°，R 元素差 < 0.05）");
+
+        }
+
+        check(std::fabs(out6[3] - 0.1) < 0.05 && std::fabs(out6[4] - 0.2) < 0.05 &&
+                  std::fabs(out6[5] - 0.3) < 0.05,
+              "TSAI 输出平移 ≈ (0.1,0.2,0.3)（容差 0.05）");
+
+        // 其余 4 方法（PARK/HORAUD/ANDREFF/DANIILIDIS）：精确数据下同样恢复真值
+        {
+
+            bool ok = true;
+
+            for (int method = 1; method <= 4 && ok; ++method) {
+
+                double o4[6] = { 0.0 };
+
+                if (Image2DAlg_HandEyeCalib(g2b, t2c, 5, method, o4) != 0) { ok = false; break; }
+
+                if (std::fabs(o4[3] - 0.1) >= 0.05 || std::fabs(o4[4] - 0.2) >= 0.05 ||
+                    std::fabs(o4[5] - 0.3) >= 0.05) ok = false;
+
+            }
+
+            check(ok, "PARK/HORAUD/ANDREFF/DANIILIDIS 全部 rc==0 且平移 ≈ (0.1,0.2,0.3)（容差 0.05）");
+
+        }
+
+    }
+
+    // 错误路径（口径：NULL -> -1；pose_count<3 -> -2；method 0~4 外 -> -3；
+    // 实现先 NULL 再位姿数再 method——校验全部在读数据前完成，占位数据不参与求解）
+    {
+
+        const double g2b[30] = { 0.1, 0.0, 0.0,    0.40, 0.00, 0.10,
+
+                                 0.0, 0.2, 0.0,    0.42, 0.05, 0.12,
+
+                                 0.0, 0.0, 0.3,    0.38, -0.05, 0.15,
+
+                                 0.15, 0.1, 0.05,  0.35, 0.10, 0.20,
+
+                                 0.2, -0.15, 0.1,  0.30, -0.10, 0.25 };
+
+        const double t2c[30] = { 0.0 };
+
+        double out6[6] = { 0.0 };
+
+        check(Image2DAlg_HandEyeCalib(g2b, t2c, 2, 0, out6) == -2,
+              "HandEyeCalib pose_count=2 (<3) -> -2");
+
+        check(Image2DAlg_HandEyeCalib(g2b, t2c, 5, 5, out6) == -3,
+              "HandEyeCalib method=5（0~4 外）-> -3");
+
+        check(Image2DAlg_HandEyeCalib(NULL, t2c, 5, 0, out6) == -1,
+              "HandEyeCalib gripper2base_rt=NULL -> -1");
+
+        check(Image2DAlg_HandEyeCalib(g2b, t2c, 5, 0, NULL) == -1,
+              "HandEyeCalib out_cam2gripper_rt=NULL -> -1");
+
+    }
+
+    std::printf("== CalibReprojectionStats ==\n");
+
+    // 5 点解析真值：img_pts 取针孔投影精确值 → 逐点误差与 mean/rms/max 全部 ≈ 0
+    {
+
+        const double obj[15] = { 0.0, 0.0, 0.0,   1.0, 1.0, 0.0,   2.0, -1.0, 0.0,
+                                 -1.5, 2.0, 0.0,   0.5, 0.5, 0.0 };
+
+        const double img[10] = { 320.0, 240.0,   340.0, 260.0,   360.0, 220.0,
+                                 290.0, 280.0,   330.0, 250.0 };
+
+        double err[5] = { 0.0 };
+
+        double mean = -1.0;
+
+        double rms = -1.0;
+
+        double mx = -1.0;
+
+        check(Image2DAlg_CalibReprojectionStats(obj, img, 5, rvec0, tvecZ5, kmat9, NULL, 0,
+                                                err, &mean, &rms, &mx) == 0,
+              "CalibReprojectionStats 精确 img_pts 返回 0");
+
+        bool ok = true;
+
+        for (int i = 0; i < 5 && ok; ++i)
+
+            if (err[i] >= 1e-6) ok = false;
+
+        check(ok && mean < 1e-6 && rms < 1e-6 && mx < 1e-6,
+              "逐点误差与 mean/rms/max 全部 ≈ 0（< 1e-6）");
+
+        // 人为偏移 1 点 (+1,0)：该点 error=1、其余 ≈ 0；mean=1/5、rms=√(1/5)、max=1
+        const double imgOff[10] = { 320.0, 240.0,   340.0, 260.0,   360.0, 220.0,
+                                    290.0, 280.0,   331.0, 250.0 };
+
+        double err2[5] = { 0.0 };
+
+        double mean2 = 0.0;
+
+        double rms2 = 0.0;
+
+        double mx2 = 0.0;
+
+        check(Image2DAlg_CalibReprojectionStats(obj, imgOff, 5, rvec0, tvecZ5, kmat9, NULL, 0,
+                                                err2, &mean2, &rms2, &mx2) == 0 &&
+                  std::fabs(err2[4] - 1.0) < 1e-6 && err2[0] < 1e-6 && err2[3] < 1e-6,
+              "偏移 1 点 (+1,0)：该点 error ≈ 1、其余点 ≈ 0（out_errors 逐点抽查）");
+
+        check(mean2 > 0.0 && std::fabs(mean2 - 0.2) < 1e-6 &&
+                  std::fabs(rms2 - std::sqrt(0.2)) < 1e-6 && std::fabs(mx2 - 1.0) < 1e-6,
+              "mean/rms/max 联动：mean=0.2、rms=√0.2、max=1（解析联动，容差 1e-6）");
+
+    }
+
+    // 错误路径
+    {
+
+        const double obj[3] = { 0.0, 0.0, 0.0 };
+
+        const double img[2] = { 320.0, 240.0 };
+
+        double err[1] = { 0.0 };
+
+        double mean = 0.0;
+
+        double rms = 0.0;
+
+        double mx = 0.0;
+
+        check(Image2DAlg_CalibReprojectionStats(obj, img, 0, rvec0, tvecZ5, kmat9, NULL, 0,
+                                                err, &mean, &rms, &mx) == -3,
+              "CalibReprojectionStats count=0 -> -3");
+
+        check(Image2DAlg_CalibReprojectionStats(NULL, img, 1, rvec0, tvecZ5, kmat9, NULL, 0,
+                                                err, &mean, &rms, &mx) == -1,
+              "CalibReprojectionStats img_pts=NULL -> -1");
+
+        check(Image2DAlg_CalibReprojectionStats(obj, img, 1, rvec0, tvecZ5, kmat9, NULL, 0,
+                                                err, &mean, NULL, &mx) == -1,
+              "CalibReprojectionStats out_rms=NULL -> -1");
+
+        check(Image2DAlg_CalibReprojectionStats(obj, img, 1, rvec0, tvecZ5, kmat9, NULL, 3,
+                                                err, &mean, &rms, &mx) == -3,
+              "CalibReprojectionStats dist_count=3 -> -3");
+
+    }
+
+    check(true, "2.7.0 批次完成（标定域 5 接口：HandEyeCalib/ProjectPoints/"
+                "UndistortImagePoints/UndistortRectifyMap/CalibReprojectionStats）");
+
+}
+
+
+
 int main()
 
 {
@@ -7295,6 +7866,8 @@ int main()
     testAlignStitch2p5();
 
     testFreqMatch2p6();
+
+    testCalib2p7();
 
     testRoiFamily();
 

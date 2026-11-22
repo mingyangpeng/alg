@@ -66,6 +66,14 @@
 //            （交叉校验压误匹配）/ EstimateAffineFull 全仿射估计（6 DOF，
 //            含剪切/各向异性缩放）——批次 C：频域缺陷检测 + 匹配链路强化
 //
+//   2.7.0  + 标定域扩展 5 算子（全部 C API only——多位姿/多维数组输入 ABI v1
+//            节点无法承载，节点化需 ABI v2）：HandEyeCalib 手眼标定 AX=XB
+//            （5 方法直传 cv 枚举）/ ProjectPoints 3D→2D 投影 /
+//            UndistortImagePoints 图像点去畸变（迭代法）/ UndistortRectifyMap
+//            去畸变映射表（X 坐标图 CV_32F 位流，同 Remap map 输入口径）/
+//            CalibReprojectionStats 重投影误差统计
+//            ——来源：批次 C 4.3/4.4：手眼标定与标定增强
+//
 // 【通道语义】Image2DAlg_Image.channels 支持 1（灰度）/ 3（BGR）/ 4（BGRA），
 //   data 为紧排像素（行步长 = width * channels，无对齐填充）：
 //   * 通用算子保持输入真实通道数（1→1、3→3、4→4，alpha 随通道参与运算）；
@@ -1650,6 +1658,109 @@ IMAGE2DALG_EXPORT int Image2DAlg_EstimateAffineFull(const Image2DAlg_OrbMatch* m
                                                     int count,
                                                     double ransac_reproj_threshold,
                                                     double m[6], int* out_inliers);
+
+// ---------------- 2.7.0 批次：手眼标定 / 投影 / 去畸变 / 重投影统计 ----------------
+// （来源：批次 C 4.3/4.4 手眼标定与标定增强；本批全部为标定域 C API only——
+//  多位姿/多维数组输入 ABI v1 节点无法承载，节点化需 ABI v2。kmat 均为 3x3
+//  行主序 9 值扁平数组；dist_coeffs 均为 cv 口径 (4/5/8/12/14) 项，
+//  dist_count == 0 表示无畸变（可传 NULL）。）
+
+/// 手眼标定 AX=XB（cv::calibrateHandEye 透传）：由机械手位姿链求解相机→机械手
+/// 固定变换。AX=XB 中 A = gripper2base（机械手控制器读取的位姿），B = target2cam
+/// （标定板位姿求解，如 SolvePnP）；X = cam2gripper。每位姿来源：gripper2base
+/// 来自机械手控制器，target2cam 来自标定板位姿求解（如 PnP）。
+/// [in]  gripper2base_rt  pose_count×6 扁平数组，每位姿 [rvec3, tvec3]
+///                        （旋转向量——cv 的 R 输入接受旋转向量，内部 Rodrigues
+///                        转矩阵；平移长度单位与控制器一致）
+/// [in]  target2cam_rt    pose_count×6 扁平数组，同上口径
+/// [in]  pose_count       位姿组数（最少 3 组不同位姿，>= 10 组更稳；< 3 → -2）
+/// [in]  method           0=TSAI 1=PARK 2=HORAUD 3=ANDREFF 4=DANIILIDIS
+///                        （直传 cv::HandEyeCalibrationMethod，已核对
+///                        opencv2/calib3d.hpp 枚举数值恰好同值；其他 → -3）
+/// [out] out_cam2gripper_rt  6 值 [rvec3, tvec3]：相机→机械手（cv 输出 3x3
+///                        旋转矩阵经 Rodrigues 转回旋转向量）
+/// 标定域 C API only，节点化需 ABI v2。
+/// 返回：0 成功；-1 空指针；-2 位姿组数不足；-3 method 越界；-99 OpenCV 异常
+/// （位姿共线/退化时 cv 内部求解抛异常）。
+IMAGE2DALG_EXPORT int Image2DAlg_HandEyeCalib(const double* gripper2base_rt,
+                                              const double* target2cam_rt, int pose_count,
+                                              int method, double* out_cam2gripper_rt);
+
+/// 3D→2D 投影（cv::projectPoints 透传）：世界点经 [R(rvec)|tvec] 变换、针孔
+/// 投影、畸变模型加畸变后落到像素坐标——靶标理论点 → 图像期望点（标定复核、
+/// 重投影误差统计的投影侧）。
+/// [in]  obj_pts      count×3 扁平点数组（X,Y,Z 逐点紧排，世界坐标系）
+/// [in]  count        点数（<= 0 → -3）
+/// [in]  rvec/tvec    3 值旋转向量 / 3 值平移
+/// [in]  kmat         3x3 内参（行主序 9 值）
+/// [in]  dist_coeffs  畸变系数（cv 口径 4/5/8/12/14 项）；dist_count == 0 =
+///                    无畸变（可传 NULL）
+/// [in]  dist_count   畸变系数个数（非 {0,4,5,8,12,14} → -3）
+/// [out] out_pts      count×2 扁平像素点（调用方预分配）
+/// [out] out_count    成功时回写 count
+/// 标定域 C API only，节点化需 ABI v2。
+/// 返回：0 成功；-1 空指针；-3 count/dist_count 非法；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_ProjectPoints(const double* obj_pts, int count,
+                                               const double* rvec, const double* tvec,
+                                               const double* kmat, const double* dist_coeffs,
+                                               int dist_count, double* out_pts, int* out_count);
+
+/// 图像点去畸变（单点/多点）：畸变像素坐标 → 理想（无畸变）像素坐标——
+/// 标定后的点级复核（如角点回验）。内部为 cv::undistortPoints 迭代法去畸变
+/// （默认 5 次迭代收敛阈值 0.01；OpenCV 4.4.0 无 undistortImagePoints 入口，
+/// 此即等价实现），P 传 kmat 使输出保持像素坐标口径（P 空则输出归一化坐标）。
+/// [in]  src_pts      count×2 扁平像素点（u,v 逐点紧排）
+/// [in]  count        点数（<= 0 → -3）
+/// [in]  kmat         3x3 内参（行主序 9 值）
+/// [in]  dist_coeffs/dist_count  同 ProjectPoints 口径
+/// [out] out_pts      count×2 扁平去畸变像素点（调用方预分配）
+/// 标定域 C API only，节点化需 ABI v2。
+/// 返回：0 成功；-1 空指针；-3 count/dist_count 非法；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_UndistortImagePoints(const double* src_pts, int count,
+                                                      const double* kmat, const double* dist_coeffs,
+                                                      int dist_count, double* out_pts);
+
+/// 去畸变映射表（cv::initUndistortRectifyMap 透传）：生成 new_w×new_h 网格的
+/// 畸变校正查表——R = 单位阵；new_kmat 为 NULL 时用 kmat（纯去畸变、不重投影）。
+/// [in]  kmat         3x3 内参（行主序 9 值）
+/// [in]  dist_coeffs/dist_count  同 ProjectPoints 口径
+/// [in]  new_kmat     重投影新内参（NULL = 用 kmat）
+/// [in]  new_w/new_h  输出映射表尺寸（<= 0 → -3）
+/// [out] out_map1     X（水平）坐标图：width=new_w、height=new_h、channels=1、
+///                    data 为 new_w*new_h 个 float 的 CV_32F 位流（w*h*4 字节，
+///                    按 (h, w, CV_32F) 解读）——与 Remap map 输入同构的 32F
+///                    位流口径；用 Image2DAlg_FreeImage 释放
+/// [out] out_map2     Y（垂直）坐标图（同口径；**必填**——cv::remap 断言
+///                    map1+map2 成对，缺一不可驱动 Remap）
+/// 注意：cv::initUndistortRectifyMap 的 CV_32FC1 模式同时产出 X/Y 两张坐标图
+/// （map2 为空仅发生在 CV_32FC2 打包模式，已核对 OpenCV 4.4.0 源码）。
+/// 链路：UndistortRectifyMap → (map1+map2) → Image2DAlg_Remap 畸变校正查表，
+/// 完全对称直接来源。
+/// 标定域 C API only，节点化需 ABI v2。
+/// 返回：0 成功；-1 空指针；-3 new_w/h、dist_count 非法；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_UndistortRectifyMap(const double* kmat, const double* dist_coeffs,
+                                                     int dist_count, const double* new_kmat,
+                                                     int new_w, int new_h,
+                                                     Image2DAlg_Image* out_map1, Image2DAlg_Image* out_map2);
+
+/// 重投影误差统计：obj_pts 经 [R|t]+K+畸变投影（内部直接调 cv::projectPoints）
+/// 后与实测 img_pts 逐点欧氏距离 = 重投影误差——标定质量闭环（mean 观察系统
+/// 偏差，rms/max 定位粗差点）。
+/// [in]  obj_pts      count×3 扁平点数组（同 ProjectPoints）
+/// [in]  img_pts      count×2 扁平实测像素点
+/// [in]  count        点数（<= 0 → -3）
+/// [in]  rvec/tvec/kmat/dist_coeffs/dist_count  同 ProjectPoints 口径
+/// [out] out_errors   count 个逐点误差（调用方预分配）
+/// [out] out_mean     误差均值（= sum/count）
+/// [out] out_rms      均方根误差（= sqrt(sum(e^2)/count)）
+/// [out] out_max      最大误差
+/// 标定域 C API only，节点化需 ABI v2。
+/// 返回：0 成功；-1 空指针；-3 count/dist_count 非法；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_CalibReprojectionStats(const double* obj_pts, const double* img_pts,
+                                                        int count, const double* rvec, const double* tvec,
+                                                        const double* kmat, const double* dist_coeffs,
+                                                        int dist_count, double* out_errors,
+                                                        double* out_mean, double* out_rms, double* out_max);
 
 #ifdef __cplusplus
 }

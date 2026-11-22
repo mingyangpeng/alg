@@ -1,6 +1,6 @@
 ﻿# Image2DAlg —— 通用 2D 模块
 
-`src/Image2DAlg` 是面向 ComUI 宿主的通用 2D 算法库：图像读取、通用处理、测量/缺陷检测，以及标定接口类（`Image2DAlg_Calib`）。当前版本 **2.6.0**（92 个通用算子：处理 29 + 特征 17 + 测量 41 + 跟踪配准立体 5；另有 Init / ReadImage / GetVersion / Free* 等生命周期与释放接口）。2.5.0 新增对位/拼接流水线：批量相位配准 / 偏移重采样 / 掩膜复核 / 拼接融合 / 模板复合对位。2.6.0 新增频域缺陷检测与匹配链路强化：幅度谱显示 / 陷波滤波去周期纹理（频域 2 个，入处理组——同 WarpPolar/OffsetRemap 归属先例，不另设频域分组）；FLANN 大集合匹配 / 双向互为最近匹配 / 全仿射估计（匹配 3 个，入特征组——Descriptors/OrbMatch 容器接口，v1 节点无法持有，C API only）。
+`src/Image2DAlg` 是面向 ComUI 宿主的通用 2D 算法库：图像读取、通用处理、测量/缺陷检测，以及标定接口类（`Image2DAlg_Calib`）。当前版本 **2.7.0**（97 个通用算子：处理 29 + 特征 17 + 测量 41 + 跟踪配准立体 5 + 标定 5——2.7.0 新增标定域分组，全部 C API only；另有 Init / ReadImage / GetVersion / Free* 等生命周期与释放接口）。2.5.0 新增对位/拼接流水线：批量相位配准 / 偏移重采样 / 掩膜复核 / 拼接融合 / 模板复合对位。2.6.0 新增频域缺陷检测与匹配链路强化：幅度谱显示 / 陷波滤波去周期纹理（频域 2 个，入处理组——同 WarpPolar/OffsetRemap 归属先例，不另设频域分组）；FLANN 大集合匹配 / 双向互为最近匹配 / 全仿射估计（匹配 3 个，入特征组——Descriptors/OrbMatch 容器接口，v1 节点无法持有，C API only）。2.7.0 新增标定域 5 算子：手眼标定 HandEyeCalib（AX=XB，5 方法直传 cv 枚举）/ 3D→2D 投影 ProjectPoints / 图像点去畸变 UndistortImagePoints / 去畸变映射表 UndistortRectifyMap（out_map1+out_map2 双必填，对接 Remap）/ 重投影误差统计 CalibReprojectionStats——多位姿/多维数组输入 ABI v1 节点无法承载，全部 C API only，节点化需 ABI v2。
 
 ## 定位与依赖
 
@@ -172,13 +172,25 @@ ComUI 适配层在 `integration/comui/Image2DAlg_comui.cpp`，节点声明在 `i
 | `Image2DAlg_StereoMatch(left, right, min_disparity, num_disparities, block_size, out_disparity)` | SGBM 双目视差：num_disparities 须为 16 倍数（否则 -3）；**`out_disparity` 一级指针契约——调用方预分配**（width/height/channels 与左图一致、1 通道）；输出 8U = CV_16S 定点值/16 四舍五入，无效视差 → 0；左图 x < min_disparity+num_disparities 条带视差不可靠（SGBM 特性） |
 | `Image2DAlg_SolvePnP(object_points, image_points, count, camera_matrix, dist_coeffs, dist_count, rvec, tvec)` | 2D-3D 位姿（默认迭代法 SOLVEPNP_ITERATIVE）：count >= 4（否则 -2）；`dist_coeffs` 可 NULL（dist_count<=0 无畸变）；object_points 3N 扁平 double |
 
+## 标定域（2.7.0，C API only）
+
+2.7.0 新增标定域 5 算子（来源：批次 C 4.3/4.4 手眼标定与标定增强）：多位姿/多维数组输入 ABI v1 节点无法承载，全部 C API only，节点化需 ABI v2。kmat 均为 3x3 内参行主序 9 值扁平数组；dist_coeffs 均为 cv 口径 4/5/8/12/14 项，dist_count == 0 表示无畸变（可传 NULL）。
+
+| 函数 | 说明 |
+|------|------|
+| `Image2DAlg_HandEyeCalib(gripper2base_rt, target2cam_rt, pose_count, method, &out_cam2gripper_rt)` | 手眼标定 AX=XB（2.7.0，cv::calibrateHandEye 透传）：gripper2base/target2cam 各为 pose_count×6 扁平 [rvec3, tvec3]（旋转向量入，内部 Rodrigues 转矩阵）；method 0=TSAI / 1=PARK / 2=HORAUD / 3=ANDREFF / 4=DANIILIDIS（直传 cv 枚举）；位姿 <3 组 → -2；输出 cam2gripper 6 值 [rvec, tvec]；位姿共线/退化时 cv 抛异常 → -99——C API only |
+| `Image2DAlg_ProjectPoints(obj_pts, count, rvec, tvec, kmat, dist_coeffs, dist_count, out_pts, &out_count)` | 3D→2D 投影（2.7.0，cv::projectPoints 透传）：世界点经 [R(rvec)\|tvec] 变换、针孔投影、畸变模型落到像素坐标；obj_pts count×3 扁平入、out_pts count×2 调用方预分配——标定复核 / 重投影统计的投影侧——C API only |
+| `Image2DAlg_UndistortImagePoints(src_pts, count, kmat, dist_coeffs, dist_count, out_pts)` | 图像点去畸变（2.7.0）：畸变像素坐标 → 理想像素坐标（cv::undistortPoints 迭代法，默认 5 次迭代收敛阈值 0.01）；count×2 扁平入出、调用方预分配；标定后点级复核（角点回验）——C API only |
+| `Image2DAlg_UndistortRectifyMap(kmat, dist_coeffs, dist_count, new_kmat, new_w, new_h, &out_map1, &out_map2)` | 去畸变映射表（2.7.0，cv::initUndistortRectifyMap 透传，R = 单位阵；new_kmat NULL = 用 kmat 纯去畸变不重投影）：**out_map1（X 坐标图）+ out_map2（Y 坐标图）双必填**——CV_32F 位流（new_w×new_h 个 float），与 Remap 的 map1/map2 输入口径同构，`UndistortRectifyMap → (map1+map2) → Remap` 为完全对称的畸变校正查表链路；两 map 均 `FreeImage` 释放——C API only |
+| `Image2DAlg_CalibReprojectionStats(obj_pts, img_pts, count, rvec, tvec, kmat, dist_coeffs, dist_count, out_errors, &mean, &rms, &max)` | 重投影误差统计（2.7.0）：内部直接调 cv::projectPoints 后与实测 img_pts 逐点欧氏距离 = 重投影误差，输出逐点误差 + mean/rms/max（mean 观察系统偏差、rms/max 定位粗差点，标定质量闭环）——C API only |
+
 ## 错误码
 
 | 码 | 含义 |
 |----|------|
 | 0 | 成功 |
 | -1 | 空指针 / 空图 |
-| -2 | 特征/匹配/估计不足（特征族与 ORBAlign：无关键点、匹配对数过少、几何估计退化——含 EstimateAffineFull 点数不足/无法求解（2.6.0）；跟踪配准族：ECC 不收敛或相关性不足、PnP 求解失败；ReadImage 例外——-2 为打开失败；FloodFill 例外——-2 为填充失败，底层返回 -1；TemplateAffineAlign——粗对位失败（模板全尺度越界/得分无效）或精修匹配不足（2.5.0）；MatchFeaturesFlann/Symmetric 不使用 -2——比率过滤后 0 命中返回 0 + NULL + 0（2.6.0）） |
+| -2 | 特征/匹配/估计不足（特征族与 ORBAlign：无关键点、匹配对数过少、几何估计退化——含 EstimateAffineFull 点数不足/无法求解（2.6.0）；跟踪配准族：ECC 不收敛或相关性不足、PnP 求解失败；ReadImage 例外——-2 为打开失败；FloodFill 例外——-2 为填充失败，底层返回 -1；TemplateAffineAlign——粗对位失败（模板全尺度越界/得分无效）或精修匹配不足（2.5.0）；MatchFeaturesFlann/Symmetric 不使用 -2——比率过滤后 0 命中返回 0 + NULL + 0（2.6.0）；HandEyeCalib——位姿组数不足（< 3 组，2.7.0）） |
 | -3 | 通道数、模式或参数不支持 |
 | -4 | 内存不足 |
 | -99 | OpenCV 异常（在 C 边界统一捕获，异常不跨 DLL） |

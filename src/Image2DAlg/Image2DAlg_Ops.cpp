@@ -3715,4 +3715,201 @@ int Image2DAlg_EstimateAffineFull(const Image2DAlg_OrbMatch* matches,
     }
 }
 
+
+// ---------------- 标定域扩展（2.7.0 新增） ----------------
+
+// dist_count 口径校验（ProjectPoints / UndistortImagePoints / UndistortRectifyMap /
+// CalibReprojectionStats 共用）：0 = 无畸变；cv 支持的畸变模型 4/5/8/12/14 项；
+// 其余（含负值）显式拦截 -3——超长 count 会先对调用方短缓冲构造超长零拷贝视图
+// 造成越界读（同 SolvePnP 的拦截理由）
+static bool DistCountValid(int dist_count) {
+    return dist_count == 0 || dist_count == 4 || dist_count == 5 ||
+           dist_count == 8 || dist_count == 12 || dist_count == 14;
+}
+
+// 手眼标定 AX=XB（cv::calibrateHandEye 透传）：A = gripper2base（机械手控制器
+// 读取的位姿），B = target2cam（标定板位姿求解，如 SolvePnP），X = cam2gripper。
+// 输入按位姿 6 double = [rvec3, tvec3] 紧排，每位姿以 3x1 CV_64F 零拷贝视图喂
+// cv（R 输入接受旋转向量，内部 Rodrigues 转矩阵），最少 3 组位姿
+int Image2DAlg_HandEyeCalib(const double* gripper2base_rt,
+                            const double* target2cam_rt, int pose_count,
+                            int method, double* out_cam2gripper_rt) {
+    if (!gripper2base_rt || !target2cam_rt || !out_cam2gripper_rt) return -1;
+    if (pose_count < 3) return -2;   // 手眼标定最少 3 组位姿（cv 文档口径）
+    // method 直传 cv::HandEyeCalibrationMethod——已核对 opencv2/calib3d.hpp：
+    // 0=TSAI 1=PARK 2=HORAUD 3=ANDREFF 4=DANIILIDIS（双四元数法），数值恰好同值
+    if (method < 0 || method > 4) return -3;
+    try {
+        std::vector<cv::Mat> R_g2b, t_g2b, R_t2c, t_t2c;
+        R_g2b.reserve((size_t)pose_count);
+        t_g2b.reserve((size_t)pose_count);
+        R_t2c.reserve((size_t)pose_count);
+        t_t2c.reserve((size_t)pose_count);
+        for (int i = 0; i < pose_count; ++i) {
+            // 旋转统一转 3x3 矩阵再喂 cv——4.4.0 的 calibrateHandEye 对 3x1
+            // 旋转向量输入存在返回恒等解的兼容缺陷（实测恒 I/0，矩阵输入正常）
+            cv::Mat rv(3, 1, CV_64F, (void*)(gripper2base_rt + 6 * i));
+            cv::Mat rm;
+            cv::Rodrigues(rv, rm);
+            R_g2b.push_back(rm);
+            t_g2b.push_back(cv::Mat(3, 1, CV_64F, (void*)(gripper2base_rt + 6 * i + 3)));
+            cv::Mat rv2(3, 1, CV_64F, (void*)(target2cam_rt + 6 * i));
+            cv::Mat rm2;
+            cv::Rodrigues(rv2, rm2);
+            R_t2c.push_back(rm2);
+            t_t2c.push_back(cv::Mat(3, 1, CV_64F, (void*)(target2cam_rt + 6 * i + 3)));
+        }
+        cv::Mat R_c2g, t_c2g;
+        cv::calibrateHandEye(R_g2b, t_g2b, R_t2c, t_t2c, R_c2g, t_c2g,
+                             (cv::HandEyeCalibrationMethod)method);
+        // cv 输出 3x3 旋转矩阵 -> Rodrigues 转回旋转向量，输出 6 值 [rvec3, tvec3]
+        cv::Mat rvec;
+        cv::Rodrigues(R_c2g, rvec);
+        for (int i = 0; i < 3; ++i) {
+            out_cam2gripper_rt[i] = rvec.at<double>(i, 0);
+            out_cam2gripper_rt[3 + i] = t_c2g.at<double>(i, 0);
+        }
+        return 0;
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+// 3D→2D 投影（cv::projectPoints 透传）：世界点经 [R(rvec)|tvec] + 针孔投影 +
+// 畸变模型落到像素坐标；kmat 3x3 行主序 9 值零拷贝视图（cv Mat 即行主序语义）
+int Image2DAlg_ProjectPoints(const double* obj_pts, int count,
+                             const double* rvec, const double* tvec,
+                             const double* kmat, const double* dist_coeffs,
+                             int dist_count, double* out_pts, int* out_count) {
+    if (!obj_pts || !rvec || !tvec || !kmat || !out_pts || !out_count) return -1;
+    if (count <= 0) return -3;
+    if (!DistCountValid(dist_count)) return -3;
+    try {
+        cv::Mat obj(count, 1, CV_64FC3, (void*)obj_pts);   // 3N double 紧排 = Nx1 CV_64FC3（零拷贝视图）
+        cv::Mat rv(3, 1, CV_64F, (void*)rvec);
+        cv::Mat tv(3, 1, CV_64F, (void*)tvec);
+        cv::Mat cam(3, 3, CV_64F, (void*)kmat);
+        // dist_coeffs 为 NULL 或 dist_count == 0 视为无畸变
+        cv::Mat dist = (dist_coeffs && dist_count > 0)
+                           ? cv::Mat(dist_count, 1, CV_64F, (void*)dist_coeffs)
+                           : cv::Mat();
+        cv::Mat proj;
+        // 输出深度随 obj（CV_64F -> CV_64FC2 count×1），逐点回写 double 扁平数组
+        cv::projectPoints(obj, rv, tv, cam, dist, proj);
+        for (int i = 0; i < count; ++i) {
+            const cv::Point2d p = proj.at<cv::Point2d>(i, 0);
+            out_pts[2 * i] = p.x;
+            out_pts[2 * i + 1] = p.y;
+        }
+        *out_count = count;
+        return 0;
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+// 图像点去畸变（单点/多点）：畸变像素坐标 -> 理想（无畸变）像素坐标。OpenCV
+// 4.4.0 无 undistortImagePoints 入口，等价实现 = cv::undistortPoints 迭代法
+// （默认 5 次迭代、收敛阈值 0.01）；P 传 kmat 使输出保持像素坐标（P 空则输出
+// 归一化坐标），R 传空 = 单位阵
+int Image2DAlg_UndistortImagePoints(const double* src_pts, int count,
+                                    const double* kmat, const double* dist_coeffs,
+                                    int dist_count, double* out_pts) {
+    if (!src_pts || !kmat || !out_pts) return -1;
+    if (count <= 0) return -3;
+    if (!DistCountValid(dist_count)) return -3;
+    try {
+        cv::Mat src(count, 1, CV_64FC2, (void*)src_pts);   // 2N double 紧排 = Nx1 CV_64FC2（零拷贝视图）
+        cv::Mat cam(3, 3, CV_64F, (void*)kmat);
+        cv::Mat dist = (dist_coeffs && dist_count > 0)
+                           ? cv::Mat(dist_count, 1, CV_64F, (void*)dist_coeffs)
+                           : cv::Mat();
+        cv::Mat dst;
+        cv::undistortPoints(src, dst, cam, dist, cv::noArray(), cam);
+        for (int i = 0; i < count; ++i) {
+            const cv::Point2d p = dst.at<cv::Point2d>(i, 0);
+            out_pts[2 * i] = p.x;
+            out_pts[2 * i + 1] = p.y;
+        }
+        return 0;
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+// 去畸变映射表（cv::initUndistortRectifyMap 透传）：R 传空 Mat（cv 内部取单位
+// 阵），new_kmat 空 -> 用 kmat（纯去畸变、不重投影）。m1type = CV_32FC1：cv 同
+// 时产出 map1 = X（水平）坐标图与 map2 = Y（垂直）坐标图——map2 为空仅发生在
+// CV_32FC2 打包模式（已核对 OpenCV 4.4.0 源码）；本签名单输出容器，仅回传 X 图
+// （Y 图丢弃，现有 Remap 需 map1+map2 成对，单 X 图暂不能独立驱动 Remap）
+int Image2DAlg_UndistortRectifyMap(const double* kmat, const double* dist_coeffs,
+                                   int dist_count, const double* new_kmat,
+                                   int new_w, int new_h,
+                                   Image2DAlg_Image* out_map1, Image2DAlg_Image* out_map2) {
+    if (!kmat || !out_map1 || !out_map2) return -1;   // map2 必填（remap 断言成对）
+    if (new_w <= 0 || new_h <= 0) return -3;
+    if (!DistCountValid(dist_count)) return -3;
+    try {
+        cv::Mat cam(3, 3, CV_64F, (void*)kmat);
+        cv::Mat dist = (dist_coeffs && dist_count > 0)
+                           ? cv::Mat(dist_count, 1, CV_64F, (void*)dist_coeffs)
+                           : cv::Mat();
+        cv::Mat newCam = new_kmat ? cv::Mat(3, 3, CV_64F, (void*)new_kmat) : cam;
+        cv::Mat map1, map2;
+        cv::initUndistortRectifyMap(cam, dist, cv::Mat(), newCam,
+                                    cv::Size(new_w, new_h), CV_32FC1, map1, map2);
+        // out_map1 = X 图、out_map2 = Y 图：32F 位流契约，同 Remap map 输入口径
+        // ——channels=1、data 为 new_w*new_h 个 float（w*h*4 字节）。CopyOut 按
+        // total*elemSize 拷贝、非 8U Mat 直接可用（width/height/channels=1 照实回填）
+        const int rc1 = CopyOut(map1, out_map1);
+        if (rc1 != 0) return rc1;
+        return CopyOut(map2, out_map2);
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+// 重投影误差统计：obj_pts 经 projectPoints 投影后与实测 img_pts 逐点欧氏距离
+// sqrt((px-ix)^2 + (py-iy)^2)；mean = sum/count、rms = sqrt(sum(e^2)/count)、
+// max 为逐点最大值——标定质量闭环（mean 观察系统偏差，rms/max 定位粗差点）
+int Image2DAlg_CalibReprojectionStats(const double* obj_pts, const double* img_pts,
+                                      int count, const double* rvec, const double* tvec,
+                                      const double* kmat, const double* dist_coeffs,
+                                      int dist_count, double* out_errors,
+                                      double* out_mean, double* out_rms, double* out_max) {
+    if (!obj_pts || !img_pts || !rvec || !tvec || !kmat ||
+        !out_errors || !out_mean || !out_rms || !out_max) return -1;
+    if (count <= 0) return -3;
+    if (!DistCountValid(dist_count)) return -3;
+    try {
+        cv::Mat obj(count, 1, CV_64FC3, (void*)obj_pts);
+        cv::Mat img(count, 1, CV_64FC2, (void*)img_pts);
+        cv::Mat rv(3, 1, CV_64F, (void*)rvec);
+        cv::Mat tv(3, 1, CV_64F, (void*)tvec);
+        cv::Mat cam(3, 3, CV_64F, (void*)kmat);
+        cv::Mat dist = (dist_coeffs && dist_count > 0)
+                           ? cv::Mat(dist_count, 1, CV_64F, (void*)dist_coeffs)
+                           : cv::Mat();
+        cv::Mat proj;
+        cv::projectPoints(obj, rv, tv, cam, dist, proj);
+        double sum = 0.0, sum_sq = 0.0, max_err = 0.0;
+        for (int i = 0; i < count; ++i) {
+            const cv::Point2d pp = proj.at<cv::Point2d>(i, 0);
+            const cv::Point2d ip = img.at<cv::Point2d>(i, 0);
+            const double dx = pp.x - ip.x, dy = pp.y - ip.y;
+            const double e = std::sqrt(dx * dx + dy * dy);
+            out_errors[i] = e;
+            sum += e;
+            sum_sq += e * e;
+            if (e > max_err) max_err = e;
+        }
+        *out_mean = sum / count;
+        *out_rms = std::sqrt(sum_sq / count);
+        *out_max = max_err;
+        return 0;
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
 } // extern "C"

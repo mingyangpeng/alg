@@ -1,6 +1,6 @@
 ﻿# Point3DAlg —— 通用 3D 模块
 
-`src/Point3DAlg` 是面向 ComUI 宿主的通用 3D 算法库：**SICK Ranger3 扫描数据读取（拼接/交织）**、**点云配准（手动粗调 + 6 策略精配准）**、**量测四件套**（bump 高度 / 平面度 / 共面性 / 金标准 NG 对比）、**通用点云算子 C API**（1.1.0 起：文件读写/滤波/裁剪/变换；1.2.0 起：拟合/分割/搜索/度量/法线/特征/关键点/表面重建/HeightMap 桥接；1.3.0 起：FitModel 增空间直线拟合、FilterCloud 增近似体素降采样；1.4.0 起：FitModel 增圆环面拟合，拟合族工业模型齐备；1.5.0 起：GD&T 几何公差组——圆度/圆柱度/位置度/平面残差/网格带符号距离；1.6.0 起：SegmentCloud 聚类/分割扩展——条件欧氏聚类（高度差约束）/地面分割 PMF/minCut 图割）。算法与 UI 物理隔离，ComUI 适配层与节点声明全在 `integration/comui/`。
+`src/Point3DAlg` 是面向 ComUI 宿主的通用 3D 算法库：**SICK Ranger3 扫描数据读取（拼接/交织）**、**点云配准（手动粗调 + 6 策略精配准）**、**量测四件套**（bump 高度 / 平面度 / 共面性 / 金标准 NG 对比）、**通用点云算子 C API**（1.1.0 起：文件读写/滤波/裁剪/变换；1.2.0 起：拟合/分割/搜索/度量/法线/特征/关键点/表面重建/HeightMap 桥接；1.3.0 起：FitModel 增空间直线拟合、FilterCloud 增近似体素降采样；1.4.0 起：FitModel 增圆环面拟合，拟合族工业模型齐备；1.5.0 起：GD&T 几何公差组——圆度/圆柱度/位置度/平面残差/网格带符号距离；1.6.0 起：SegmentCloud 聚类/分割扩展——条件欧氏聚类（高度差约束）/地面分割 PMF/minCut 图割；1.7.0 起：FilterCloud 增复合条件去除/中值滤波/格网最低点，FitModel 增平行/垂直平面（轴约束 +Z）与线段拟合）。算法与 UI 物理隔离，ComUI 适配层与节点声明全在 `integration/comui/`。
 
 ## 定位与依赖
 
@@ -19,7 +19,7 @@ Point3DAlg.dll
 | 文件 | 说明 |
 |------|------|
 | `Point3DAlg_SickReader.h/.cpp` | **SICK 扫描读取核心**：.dat 平面布局 → FOV 结构（阶段1编码器）→ 多线程读图（阶段2）→ 单机拼接 → 多相机交织 → 深度图/点云；含 json 配置读取与 PNG/PLY 保存套件 |
-| `Point3DAlg_SickIO.cpp` | 一步式 C 接口（ReadSickCloud：folder → 点云，错误码 0/-1/-2/-3/-4）+ 版本/生命周期（当前 1.6.0）+ 通用点云容器 + SICK 深层句柄族实现（不依赖 PCL） |
+| `Point3DAlg_SickIO.cpp` | 一步式 C 接口（ReadSickCloud：folder → 点云，错误码 0/-1/-2/-3/-4）+ 版本/生命周期（当前 1.7.0）+ 通用点云容器 + SICK 深层句柄族实现（不依赖 PCL） |
 | `include/Point3DAlg_api.h` | C API 主头：错误码全局约定、`Point3DAlg_PointCloud`/`Point3DAlg_Mesh`/`Point3DAlg_HeightMap` 容器、全部点云算子声明（各接口 params/输出布局表以本头注释为权威） |
 | `include/Point3DAlg_SickApi.h` | SICK 深层 C 接口声明（句柄族；C++ 宿主头，含输出缓冲布局与错误码口径） |
 | `Point3DAlg_CloudOps.cpp` | 点云算子 C 封装（1.1.0 LoadCloud/SaveCloudEx/Filter/Extract/Transform + 1.2.0 FitModel/SegmentCloud/Search/Measure/Normals/Feature/Keypoints/Surface/MeshOp/HeightMap 族；封装 ShapelyAlg::CloudIO/CloudProcessor，点型 PointXYZ，**PCL_FOUND 守卫编译**） |
@@ -45,7 +45,7 @@ ComUI 适配层：`integration/comui/Point3DAlg_comui.cpp`；节点声明：`int
 
 ## 接口速查
 
-### C ABI（1.2.0 起共导出 47 个：25（1.1.0）+ 17（1.2.0 P1/P2）+ 5（1.5.0 GD&T）；1.3.0/1.4.0 无新导出，FitModel/FilterCloud 扩展取值域）
+### C ABI（1.2.0 起共导出 47 个：25（1.1.0）+ 17（1.2.0 P1/P2）+ 5（1.5.0 GD&T）；1.3.0/1.4.0/1.6.0/1.7.0 无新导出，FilterCloud/FitModel/SegmentCloud 扩展取值域）
 
 | 函数 | 用途 |
 |---|---|
@@ -53,14 +53,14 @@ ComUI 适配层：`integration/comui/Point3DAlg_comui.cpp`；节点声明：`int
 | `Point3DAlg_FreeBuffer` | 释放 ReadSickCloud / SICK 深层接口 / FitModel 内点 / Normals·Feature·MeshOp 数组输出 |
 | `Point3DAlg_LoadSickConfig(recipe, common, &cfg, err, len)` | 读配方/通用参数 json → SickConfig（错误码 1~6 + err_msg） |
 | `Point3DAlg_SaveCloud / SaveDepth / SaveDepthView / DrawFovBoxes` | PLY 点云 / 16 位深度 PNG / 8 位可视 PNG / FOV 框标注 |
-| `Point3DAlg_GetVersion / Init / Cleanup` | 版本（"1.5.0"）/ 初始化（占位）/ 清理（占位） |
+| `Point3DAlg_GetVersion / Init / Cleanup` | 版本（"1.7.0"）/ 初始化（占位）/ 清理（占位） |
 | `Point3DAlg_FreeCloud(&cloud)` / `FreeClouds(segments, count)` | 释放 `Point3DAlg_PointCloud` / `SegmentCloud` 段数组（均 NULL 安全） |
 | `Point3DAlg_LoadCloud(path, type, delimiter, &out)` | 读点云文件（0=PCD 1=PLY 2=TXT；TXT 分隔符 NULL=空白切分） |
 | `Point3DAlg_SaveCloudEx(path, type, &cloud, binary)` | 写点云文件（binary 仅 PLY 生效；PCD 恒二进制、TXT 恒文本） |
-| `Point3DAlg_FilterCloud(&in, method, params, n, &out)` | 滤波/降采样 11 method（0=voxel … 9=conditionalXYZ、10=approxVoxel 近似体素（1.3.0），params 布局见 api.h 表） |
+| `Point3DAlg_FilterCloud(&in, method, params, n, &out)` | 滤波/降采样 14 method（0=voxel … 9=conditionalXYZ、10=approxVoxel 近似体素（1.3.0）、11=conditionalRemoval 复合条件去除 12=medianFilter 中值滤波 13=gridMinimum 格网最低点（均 1.7.0），params 布局见 api.h 表） |
 | `Point3DAlg_ExtractCloud(&in, method, indices, n, params, m, &out)` | 提取/裁剪 5 method（0=byIndices … 4=cropPolygonROI） |
 | `Point3DAlg_TransformCloud(&in, method, params, n, &out)` | 空间变换 7 method（0=applyMatrix(4x4 行主序) … 6=project） |
-| `Point3DAlg_FitModel(&in, method, fit, threshold, coeffs, cap, &inliers, &n)` | 通用拟合 7 model（0=plane[4] 1=sphere[4] 2=cylinder[7] 3=circle3D[7] 4=cone[7] 5=line3D[6] 空间直线（1.3.0） 6=torus[8] 圆环面（1.4.0，全自研——PCL 1.9 无环面模型））× 3 fit（0=RANSAC 1=MSAC 2=LMS）；capacity 不足 → -3 回填所需长度 |
+| `Point3DAlg_FitModel(&in, method, fit, threshold, coeffs, cap, &inliers, &n)` | 通用拟合 10 model（0=plane[4] 1=sphere[4] 2=cylinder[7] 3=circle3D[7] 4=cone[7] 5=line3D[6] 空间直线（1.3.0） 6=torus[8] 圆环面（1.4.0，全自研——PCL 1.9 无环面模型） 7=parallelPlane[4] 8=perpendicularPlane[4] 平行/垂直平面（1.7.0，轴约束 +Z——PCL SACSegmentation 直调，三种 fit 均支持） 9=stick[6] 线段（1.7.0，仅 RANSAC——PCL 1.9.1 stick 距离口径缺陷，内点 PCA 精化 + 本层点到线重选内点））× 3 fit（0=RANSAC 1=MSAC 2=LMS）；capacity 不足 → -3 回填所需长度 |
 | `Point3DAlg_SegmentCloud(&in, method, params, n, &segs, &count)` | 分割 8 method（0=planeRANSAC 1=euclideanCluster 2=dbscan 3=regionGrowing 4=planesMulti 5=conditionalEuclidean 条件欧氏·高度差约束（1.6.0，KdTree+条件洪泛手工实现） 6=groundPlane 地面分割 PMF（1.6.0，恒 2 段） 7=minCut 图割前景（1.6.0，需前景种子））→ 段数组（FreeClouds 释放） |
 | `Point3DAlg_KnnSearch(&in, query[3], k, &idx, &dist, &n)` | KdTree KNN（dist = 欧氏距离升序；k<=0 → -3） |
 | `Point3DAlg_RadiusSearch(&in, query[3], r, &idx, &dist, &n)` | KdTree 半径搜索（dist = 欧氏距离**升序**，封装层排序——FLANN 半径搜索原生无序；r<=0 → -3；0 命中属成功） |
@@ -94,7 +94,7 @@ ComUI 适配层：`integration/comui/Point3DAlg_comui.cpp`；节点声明：`int
 
 无 PCL 构建时点云计算族整组符号不导出（CMake `PCL_FOUND` 守卫，与 tools/ 配准层同策略，1.2.0 新接口同守卫）；SICK 族与版本/生命周期接口任何构建下都存在。FilterCloud(voxel) 与 ComUI 适配层内联的 `ComuiVoxel` 语义一致（体素质心），可择一使用——一致性已由 `Point3DAlg_test` A6 段（PCL 版 ↔ 测试内参考实现 floor(p/leaf) 分格质心）回归守卫。
 
-### 1.2.0~1.6.0 输出布局速查（权威口径 = api.h 注释）
+### 1.2.0~1.7.0 输出布局速查（权威口径 = api.h 注释）
 
 | 接口 / method | 输出 |
 |---|---|
@@ -105,6 +105,9 @@ ComUI 适配层：`integration/comui/Point3DAlg_comui.cpp`；节点声明：`int
 | `FitModel(cone)` | `[ax,ay,az 顶点, dx,dy,dz 单位轴, 半开角弧度]` |
 | `FitModel(line3D)` | `[px,py,pz 线上一点, dx,dy,dz 单位方向]`（1.3.0 新增，6 值；三种 fit 均支持） |
 | `FitModel(torus)` | `[cx,cy,cz 中心, dx,dy,dz 单位轴(符号不定), R 主半径, r 管半径]`（1.4.0 新增，8 值；三种 fit 均支持——0/1 采样稳健层、2 确定性多候选 LM；剔除非有限点后 <8 点 → -2） |
+| `FitModel(parallelPlane)` | `[a,b,c,d]`（ax+by+cz+d=0；1.7.0 新增，4 值——轴固定 +Z：法向 ⊥ Z 的竖直平面/墙面，eps 固定 5°；三种 fit 均支持） |
+| `FitModel(perpendicularPlane)` | `[a,b,c,d]`（1.7.0 新增，4 值——轴固定 +Z：法向 ∥ Z 的水平面/台面，eps 固定 5°；三种 fit 均支持） |
+| `FitModel(stick)` | `[px,py,pz 线上一点, dx,dy,dz 单位方向]`（1.7.0 新增，6 值，布局同 line3D——SACMODEL_STICK 有限长线段；仅 RANSAC（fit 1/2 回退），内点 <3 或方向退化 → -2） |
 | `SegmentCloud(0 planeRANSAC)` | 恒 2 段：[局内点（恒非空）, 其余点（可为空段 count=0，如全部点在平面上）]（平面方程用 FitModel 另取） |
 | `MeasureCloud(AABB)` | `[minx,miny,minz,maxx,maxy,maxz]` |
 | `MeasureCloud(OBB)` | `[cx,cy,cz, ex,ey,ez 半长, R9 行主序(行=主轴)]` |

@@ -207,12 +207,39 @@
     },
     {
       "name": "z_max",
-      "label": "Z上限(method 9)",
+      "label": "Z上限(method 9/11)",
       "type": "number",
       "default": 1000000,
       "min": -1000000,
       "max": 1000000,
-      "description": "method 9：z 上限"
+      "description": "method 9/11：z 轴区间上界（含；大于该值的点被剔除）"
+    },
+    {
+      "name": "cond_op",
+      "label": "条件组合(方法11)",
+      "type": "number",
+      "default": 0,
+      "min": 0,
+      "max": 1,
+      "description": "method 11：0=AND 三轴全部满足才保留 1=OR 任一轴满足即保留（复用方法 9 的六值区间参数，闭区间，±inf 无界）"
+    },
+    {
+      "name": "median_window",
+      "label": "中值窗口(方法12)",
+      "type": "number",
+      "default": 5,
+      "min": 3,
+      "max": 1000,
+      "description": "method 12：中值滤波窗口（>=3，偶数自动 +1；椒盐噪声/有序点云平滑）"
+    },
+    {
+      "name": "grid_cell",
+      "label": "格网边长(方法13)",
+      "type": "number",
+      "default": 1.0,
+      "min": 0.0001,
+      "max": 1000000,
+      "description": "method 13：格网边长（>0，与坐标同单位；每格保留 z 最低点——地面提取）"
     }
   ],
   "outputs": [

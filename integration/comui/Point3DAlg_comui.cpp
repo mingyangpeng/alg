@@ -774,8 +774,8 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiLoadCloud(const AlgoCInput* in,
 #endif   // POINT3DALG_HAS_PCL（LoadCloud）
 
 // ---------------- 算子入口：点云滤波/降采样（node.json: alg.point3d.filter_cloud） ----------------
-// method 与 params 布局以 Point3DAlg_api.h 注释表为权威口径（method 0~10 全量开放）。
-// 固定参数集：node.json 声明 1 个 method(int) + 1 个 field(int) + 20 个 number，
+// method 与 params 布局以 Point3DAlg_api.h 注释表为权威口径（method 0~13 全量开放）。
+// 固定参数集：node.json 声明 1 个 method(int) + 1 个 field(int) + 23 个 number，
 // 适配层按 method 分支组装该布局的 params 数组：
 //   0 voxel              [leaf_size, min_points_per_voxel]
 //   1 random             [sample_size, seed]
@@ -790,6 +790,10 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiLoadCloud(const AlgoCInput* in,
 //   10 approxVoxel       [leaf]（1.3.0 新增；leaf 复用 node.json 的 leaf_size
 //                        参数——语义同为体素边长，格点质心与 method 0 可有
 //                        微小偏差，PCL ApproximateVoxelGrid 大点云快速版）
+//   11 conditionalRemoval [cond_op(0=AND 1=OR), x_min..z_max（复用方法 9 的六值
+//                        区间参数；闭区间，±inf 无界）]（1.7.0 新增）
+//   12 medianFilter      [median_window(>=3，奇数；偶数自动 +1)]（1.7.0 新增）
+//   13 gridMinimum       [grid_cell(>0)]（1.7.0 新增——每格保留 z 最低点，地面提取）
 // 消息通道："filter in=N out=M method=K"。
 // 错误码：1 输入未连线；2 点云为空/核心层内存不足（-4/-99）；3 参数非法（-3）/输出组装内存不足；
 //         4 滤波后无点（-2）。（接口文档口径：输出组装 OOM 归 3，MoveCloudOut 先例）
@@ -804,11 +808,11 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiFilterCloud(const AlgoCInput* i
     int method = 0, field = 2;
     if (const AlgoCParam* p = FindParam(in, 1, 0)) method = p->i;
     if (const AlgoCParam* p = FindParam(in, 1, 1)) field = p->i;
-    if (method < 0 || method > 10) { out->error = "method 仅支持 0~10（见节点参数说明）"; return 3; }
+    if (method < 0 || method > 13) { out->error = "method 仅支持 0~13（见节点参数说明）"; return 3; }
     if (field < 0 || field > 2) { out->error = "field 仅支持 0=x/1=y/2=z"; return 3; }
 
-    double v[20] = { 0 };
-    for (int i = 0; i < 20; ++i)
+    double v[23] = { 0 };
+    for (int i = 0; i < 23; ++i)
         if (const AlgoCParam* p = FindParam(in, 0, i)) v[i] = p->d;
     // v 声明序（= node.json params 中 number 的声明序）：
     //   0 leaf_size  1 min_points_per_voxel  2 sample_size  3 seed
@@ -816,7 +820,9 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiFilterCloud(const AlgoCInput* i
     //   8 limit_min  9 limit_max             10 mean_k      11 std_dev_mul
     //   12 radius    13 min_neighbors        14 x_min 15 x_max
     //   16 y_min 17 y_max  18 z_min 19 z_max
-    double params[6];
+    //  20 cond_op(0=AND 1=OR，method 11)  21 median_window(方法 12)
+    //  22 grid_cell(方法 13)
+    double params[7];
     int pc = 0;
     switch (method) {
         case 0:  params[0] = v[0];  params[1] = v[1];  pc = 2; break;   // voxel
@@ -830,6 +836,13 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiFilterCloud(const AlgoCInput* i
         case 7:  params[0] = v[10]; params[1] = v[11]; pc = 2; break;   // statisticalOutlier
         case 8:  params[0] = v[12]; params[1] = v[13]; pc = 2; break;   // radiusOutlier
         case 10: params[0] = v[0];                     pc = 1; break;   // approxVoxel（leaf 复用 leaf_size）
+        case 11: params[0] = v[20];                    // conditionalRemoval（1.7.0——
+                 params[1] = v[14]; params[2] = v[15]; //  复用 method 9 的六值区间参数
+                 params[3] = v[16]; params[4] = v[17]; //  + op 组合方式；闭区间 ±inf 无界）
+                 params[5] = v[18]; params[6] = v[19];
+                 pc = 7; break;
+        case 12: params[0] = v[21];                    pc = 1; break;   // medianFilter（1.7.0）
+        case 13: params[0] = v[22];                    pc = 1; break;   // gridMinimum（1.7.0）
         default: params[0] = v[14]; params[1] = v[15]; params[2] = v[16];
                  params[3] = v[17]; params[4] = v[18]; params[5] = v[19];
                  pc = 6; break;                                         // conditionalXYZ
@@ -1306,8 +1319,9 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiFitModel(const AlgoCInput* in, 
     if (const AlgoCParam* p = FindParam(in, 1, 0)) method = p->i;
     if (const AlgoCParam* p = FindParam(in, 1, 1)) fit = p->i;
     if (const AlgoCParam* p = FindParam(in, 0, 0)) dist_thr = p->d;
-    if (method < 0 || method > 6) {
-        out->error = "method 仅支持 0=plane/1=sphere/2=cylinder/3=circle3D/4=cone/5=line3D/6=torus"; return 3;
+    if (method < 0 || method > 9) {
+        out->error = "method 仅支持 0=plane/1=sphere/2=cylinder/3=circle3D/4=cone/5=line3D/6=torus/"
+                     "7=parallelPlane/8=perpendicularPlane/9=stick"; return 3;
     }
     if (fit < 0 || fit > 2) { out->error = "fit 仅支持 0=RANSAC/1=MSAC/2=LMS"; return 3; }
     if (dist_thr <= 0.0) { out->error = "distance_threshold 须 > 0"; return 3; }
@@ -1320,7 +1334,7 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiFitModel(const AlgoCInput* in, 
     const int rc = Point3DAlg_FitModel(&pin, method, fit, dist_thr, coeffs, 8,
                                        &inliers, &inlier_count);
     if (rc == -3) { out->error = "拟合失败（method/fit 越界或 distance_threshold<=0）"; return 3; }
-    if (rc == -2) { out->error = "拟合失败：无局内点/退化（点数不足、投影共线、圆锥不收敛、环面内点<8）"; return 4; }
+    if (rc == -2) { out->error = "拟合失败：无局内点/退化（点数不足、投影共线、圆锥不收敛、环面内点<8、并行/垂直平面轴约束下无平面）"; return 4; }
     if (rc != 0)  { out->error = "拟合失败（内存不足或内部异常）"; return 2; }
 
     static char msg[512];
@@ -1366,6 +1380,24 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiFitModel(const AlgoCInput* in, 
                      "torus c=(%.6f, %.6f, %.6f) axis=(%.6f, %.6f, %.6f) R=%.6f r=%.6f | 内点 %d/%d",
                      coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5],
                      coeffs[6], coeffs[7],
+                     inlier_count, src->count);
+            break;
+        case 7:
+            snprintf(msg, sizeof(msg),
+                     "parallel_plane a=%.6f b=%.6f c=%.6f d=%.6f | 内点 %d/%d fit=%d（轴约束 +Z）",
+                     coeffs[0], coeffs[1], coeffs[2], coeffs[3],
+                     inlier_count, src->count, fit);
+            break;
+        case 8:
+            snprintf(msg, sizeof(msg),
+                     "perpendicular_plane a=%.6f b=%.6f c=%.6f d=%.6f | 内点 %d/%d fit=%d（轴约束 +Z）",
+                     coeffs[0], coeffs[1], coeffs[2], coeffs[3],
+                     inlier_count, src->count, fit);
+            break;
+        case 9:
+            snprintf(msg, sizeof(msg),
+                     "stick p=(%.6f, %.6f, %.6f) dir=(%.6f, %.6f, %.6f) | 内点 %d/%d",
+                     coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4], coeffs[5],
                      inlier_count, src->count);
             break;
     }

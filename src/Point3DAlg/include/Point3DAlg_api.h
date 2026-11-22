@@ -56,6 +56,26 @@ extern "C" {
  *          MinCutSegmentation extract，本层组合管线直调）。
  *          regionGrowingRGB（需 rgb 容器扩展）与 supervoxel（标签载荷
  *          需 ABI v2）暂缓，见待开发清单。
+ *   1.7.0  滤波/拟合扩展 II（无新导出，既有签名扩展取值域）：
+ *          FilterCloud method 11 = conditionalRemoval 复合条件去除
+ *          （params [op,x_min,x_max,y_min,y_max,z_min,z_max]——op 0=AND
+ *          三轴全满足才保留/1=OR 任一轴满足即保留，逐轴闭区间，±INFINITY
+ *          = 该侧无界，非有限点恒剔除，底层 PCL ConditionalRemoval 组合
+ *          管线直调）；method 12 = medianFilter 中值滤波（params [window]，
+ *          PCL MedianFilter——1.9 硬性要求有序点云，本层按"1 列 × N 行"
+ *          伪有序化呈递，窗口沿输入点序滑动、仅平滑 z）；method 13 =
+ *          gridMinimum 格网最低点（params [cell]，PCL GridMinimum，每
+ *          XY 格保留 z 最低点——地面提取）。
+ *          FitModel method 7 = parallelPlane 平行平面（out_coeffs 4 值
+ *          [a,b,c,d]，PCL SACMODEL_PARALLEL_PLANE——轴固定 +Z：法向 ⊥ Z
+ *          的竖直平面/墙面，eps 固定 5°，任意轴待后续扩展）；method 8 =
+ *          perpendicularPlane 垂直平面（[a,b,c,d]，SACMODEL_PERPENDICULAR_
+ *          PLANE——法向 ∥ Z 的水平面/台面）。两者 PCL SACSegmentation
+ *          组合管线直调（本层实现，不经 CloudProcessor fit*），三种 fit
+ *          均支持；method 9 = stick 线段（out_coeffs 6 值 [px,py,pz,
+ *          dx,dy,dz]，SACMODEL_STICK 有限长线段，布局同 line3D）——仅
+ *          RANSAC（fit 1/2 回退，PCL 1.9.1 stick 距离口径缺陷，见 9.7
+ *          支持度表），RANSAC 直调 + 内点 PCA 精化 + 本层点到线重选内点。
  *
  * 错误码全局约定（§8.3）：
  *   点云计算族（LoadCloud/SaveCloudEx/Filter/Extract/Transform 等）：
@@ -97,7 +117,7 @@ POINT3DALG_EXPORT void Point3DAlg_FreeBuffer(void* p);
  * 版本与生命周期（1.1.0 新增，对齐 Image2DAlg）
  * ===================================================================== */
 
-/* 返回 DLL 版本字符串（静态存储，调用方不得释放）。当前 "1.6.0"。 */
+/* 返回 DLL 版本字符串（静态存储，调用方不得释放）。当前 "1.7.0"。 */
 POINT3DALG_EXPORT const char* Point3DAlg_GetVersion(void);
 
 /* 初始化（占位实现：当前模块无全局状态，恒返回 0；为宿主统一生命周期而设）。
@@ -165,7 +185,9 @@ POINT3DALG_EXPORT int Point3DAlg_SaveCloudEx(const char* path, int type,
                                              int binary /*0=ASCII 1=二进制（仅 PLY 生效）*/);
 
 /* =====================================================================
- * 点云滤波与降采样（1.1.0 新增；封装 CloudProcessor::filter*，点型 PointXYZ）
+ * 点云滤波与降采样（1.1.0 新增；封装 CloudProcessor::filter*，点型 PointXYZ；
+ * method 11/12/13 为 1.7.0 新增，PCL 组合管线直调不经 CloudProcessor——
+ * ConditionalRemoval/MedianFilter/GridMinimum 无底层包装，见逐 method 注）
  * method 与 params 布局表（params 为 double 数组，param_count = 有效个数；
  * param_count 少于"必填"数或超出"必填+可选"数 → -3）：
  *   method  语义                params 布局
@@ -198,6 +220,31 @@ POINT3DALG_EXPORT int Point3DAlg_SaveCloudEx(const char* path, int type,
  *   10 approxVoxel  近似体素降采样（1.3.0 新增；PCL ApproximateVoxelGrid，
  *                              大点云快速，格点质心与 method 0 可有微小偏差）
  *                              [0]=leaf 体素边长（>0）            必填 1 个
+ *   11 conditionalRemoval  [0]=op 复合方式（0=AND 三轴全满足才保留，
+ *      复合条件去除        1=OR 任一轴满足即保留；其余 → -3）
+ *      （1.7.0 新增）      [1..6]=x_min,x_max,y_min,y_max,z_min,z_max
+ *                              逐轴闭区间保留条件。±INFINITY = 该侧无界：
+ *                              min 侧仅接受有限值或 -INFINITY、max 侧仅
+ *                              接受有限值或 +INFINITY（NaN/方向错误的
+ *                              INFINITY → -3）；每轴有限值时 min>max → -3。
+ *                              非有限点（NaN/Inf）恒剔除。闭区间实现：PCL 比较
+ *                              子（GT/LT）为严格大于/小于，以 ε=1e-6 补偿
+ *                              （min 侧 GT(min−ε)、max 侧 LT(max+ε)——
+ *                              恰好等于 min/max 的点保留，min/max 界外
+ *                              ε 内的边缘带也保留）
+ *                              必填 7 个
+ *   12 medianFilter 中值滤波 [0]=window 窗口（>=3，奇数；偶数自动 +1，
+ *      （1.7.0 新增）      <3 → -3）                            必填 1 个
+ *                              PCL MedianFilter——1.9 硬性要求有序点云
+ *                              （无序输入报错空出），本层按"1 列 × N 行"
+ *                              伪有序化呈递：窗口沿输入点序滑动、仅平滑
+ *                              z（x/y 保持不变）；非有限中心点原样保留，
+ *                              非有限邻点不参与取中值。椒盐噪声/平滑
+ *   13 gridMinimum 格网最低点 [0]=cell 格网边长（>0，<=0 → -3）
+ *      （1.7.0 新增）      必填 1 个
+ *                              PCL GridMinimum——XY 平面分格，每格保留
+ *                              z 最低点（地面提取/粗下采样）；非有限点由
+ *                              PCL 按 is_dense=false 自行剔除
  *
  * 与既有 ComuiVoxel（ComUI 适配层内联体素）的关系：本接口 method=0 是 PCL
  * VoxelGrid 版（CloudProcessor::filterVoxelGrid，体素内质心），ComuiVoxel 是
@@ -210,7 +257,7 @@ POINT3DALG_EXPORT int Point3DAlg_SaveCloudEx(const char* path, int type,
  *   0 成功；
  *   -1 in/out 为 NULL、in->xyz 为 NULL、in->count<=0；
  *   -2 method 越界之外的空结果（滤波后 0 点，如全部被剔除）；
- *   -3 method 不是 0~10、param_count 与布局表不符、参数值非法（见上表逐项）；
+ *   -3 method 不是 0~13、param_count 与布局表不符、参数值非法（见上表逐项）；
  *   -4 内存分配失败；
  *   -99 PCL 异常。 */
 POINT3DALG_EXPORT int Point3DAlg_FilterCloud(const Point3DAlg_PointCloud* in, int method,
@@ -289,7 +336,9 @@ POINT3DALG_EXPORT int Point3DAlg_TransformCloud(const Point3DAlg_PointCloud* in,
  * P1 批次（1.2.0 新增）：拟合 / 分割 / 空间索引 / 通用度量
  * ---------------------------------------------------------------------
  * 全部封装 ShapelyAlg::CloudProcessor（点型固定 pcl::PointXYZ），本层只做
- * 容器转换与参数/错误码翻译。错误码为点云计算族口径（见文件头全局约定），
+ * 容器转换与参数/错误码翻译（例外：FitModel method 7/8/9 为 1.7.0 新增，
+ * PCL SACSegmentation/RANSAC 直调不经 CloudProcessor——轴约束模型与 stick
+ * 无底层包装，见 9.7 支持度表）。错误码为点云计算族口径（见文件头全局约定），
  * 各接口注释写明本接口细化语义；依赖守卫同 1.1.0（无 PCL 不导出）。
  * 输出数组内存约定：一级指针输出缓冲（out_coeffs/out_values）由调用方
  * 预分配（capacity 不足 → -3 并经 out_*_count 回填所需长度，两段式调用）；
@@ -300,6 +349,7 @@ POINT3DALG_EXPORT int Point3DAlg_TransformCloud(const Point3DAlg_PointCloud* in,
 /* ---------------------------------------------------------------------
  * 9.7 通用几何拟合（fit 组）
  * method：0=plane 1=sphere 2=cylinder 3=circle3D 4=cone 5=line3D 6=torus
+ *         7=parallelPlane 8=perpendicularPlane 9=stick（7~9 为 1.7.0 新增）
  * fit   ：0=RANSAC 1=MSAC 2=LMS(LMEDS)
  *         （映射 shapely::FitMethod RANSAC/LMEDS/MSAC——注意与底层枚举
  *          顺序不同，本接口以 0=RANSAC/1=MSAC/2=LMS 为准）
@@ -323,12 +373,42 @@ POINT3DALG_EXPORT int Point3DAlg_TransformCloud(const Point3DAlg_PointCloud* in,
  *              管半径 r（1.4.0 新增，底层 CloudProcessor::fitTorus 全自研——
  *              PCL 1.9 无 SACMODEL_TORUS；残差为点到环面面的精确距离，
  *              不需要法线；三种 fit 均支持）
+ *   7  parallelPlane 4  [a,b,c,d]  平面 ax+by+cz+d=0（1.7.0 新增；
+ *              PCL SACMODEL_PARALLEL_PLANE——轴固定 +Z（1.7.0 简化契约，
+ *              任意轴待后续扩展）：找法向 ⊥ Z 的竖直平面（墙面/立面），
+ *              eps 固定 5°）
+ *   8  perpendicularPlane 4  [a,b,c,d]（1.7.0 新增；PCL
+ *              SACMODEL_PERPENDICULAR_PLANE——轴固定 +Z、eps 5°：找法向
+ *              ∥ Z 的水平面（台面/端面））
+ *   9  stick    6  [px,py,pz, dx,dy,dz]  线上一点 + 单位方向（1.7.0 新增，
+ *              PCL SACMODEL_STICK 有限长线段；布局同 line3D——PCL 系数
+ *              第 7 值 line_width 本接口不输出；内点 <3 → -2 退化）
  * 模型支持度（PCL 1.9 限制，底层自动回退，不报错）：
  *   plane/line3D/torus 三种 fit 均支持（torus 的 fit 0/1 = 采样稳健层：
  *   RANSAC 内点计数最大 / MSAC 截断平方残差最小，fit 2 = 确定性多候选 LM
  *   残差中值择优——高外点比例建议 0/1）；sphere 支持 RANSAC/LMEDS
  *   （MSAC 回退 RANSAC）；cylinder/cone 仅 RANSAC（fit 参数被忽略）；
  *   circle3D 的 fit/threshold 复用其内部平面拟合口径。
+ *   1.7.0 新增支持度表（method 7/8/9，本层 PCL 直调，实现见
+ *   Point3DAlg_CloudOps.cpp SacSegmentAxisZ / FitStickRansac——轴固定 +Z、
+ *   eps 固定 5°）：
+ *     parallelPlane（7） / perpendicularPlane（8）：三种 fit 均支持——轴
+ *     约束经 PCL isModelValid 在各 fit 的逐候选校验中生效（头文件实测：
+ *     RANSAC 走 countWithinDistance、MSAC/LMEDS 走 getDistancesToModel，
+ *     两模型的这三个函数都先做 isModelValid，违约束候选按 0 内点/空距离
+ *     跳过）；setEpsAngle 口径为**弧度角阈值而非余弦**（ParallelPlane 内部
+ *     sin_angle_=fabs(sin(ea))、PerpendicularPlane 直接 angle_diff>eps_angle_
+ *     比较，本层传 5° 对应弧度）。系数精化沿用 PCL 无约束平面 PCA，若精化
+ *     后法向超出 5° 容差（极端倾斜内点集）→ 精化内点清空 → -2。
+ *     stick（9）：仅 RANSAC（fit 1/2 回退 RANSAC，参数被忽略）——PCL 1.9.1
+ *     SampleConsensusModelStick 系数口径缺陷实测：getDistancesToModel 把
+ *     [3..5] 当"自原点方向"、countWithinDistance/selectWithinDistance 按
+ *     "两点差向"解析，MSAC/LMEDS 逐候选评分基于前者 → 不可信；RANSAC 的
+ *     评分与内点同走两点口径自洽。本层实现：RANSAC 直调 → 内点（>=3）
+ *     PCA 精化（质心 + 主特征向量）→ 按精化线以标准点到线正交距离重选
+ *     内点（不借 PCL selectWithinDistance——精化系数是"点+方向"布局，
+ *     PCL 仍按两点解析会错）；距离口径为点到直线距离（端点截断不参与，
+ *     PCL stick 实测）；内点 <3 或方向退化 → -2。
  *
  * distance_threshold：局内点判定距离阈值（与坐标同单位，>0）。
  * out_coeffs / coeffs_capacity：调用方预分配 double 缓冲与容量。
@@ -337,14 +417,15 @@ POINT3DALG_EXPORT int Point3DAlg_TransformCloud(const Point3DAlg_PointCloud* in,
  *   不需要内点（out_inlier_count 仍回填）。
  * out_inlier_count：必填（NULL → -1）；成功 = 内点数（out_inliers 数组长
  *   度——系数个数无需另查，由 method 唯一确定：plane/sphere=4、line3D=6、
- *   torus=8、其余=7）；
+ *   torus=8、parallel/perpendicular=4、stick=6、其余=7）；
  *   -3 时回填所需系数长度（两段式：先 capacity=0 查长度，再分配重调）。
  * 错误码（本接口口径）：
  *   0 成功；
  *   -1 in/out_inlier_count 为 NULL、in->xyz 为 NULL、in->count<=0；
  *   -2 拟合失败/无局内点/退化（点数不足、投影点共线、圆锥不收敛、
- *      环面剔除非有限点后 <8 点或精化后内点 <8 等）；
- *   -3 method/fit 不是 0~6、distance_threshold<=0、coeffs_capacity 不足
+ *      环面剔除非有限点后 <8 点或精化后内点 <8、stick 内点 <3 或方向
+ *      退化等）；
+ *   -3 method/fit 不是 0~9、distance_threshold<=0、coeffs_capacity 不足
  *      （*out_inlier_count = 所需系数长度，两段式回填）；
  *   -4 内存分配失败（出参全部保持 NULL/0，不承载任何有效数据）；
  *   -99 PCL 异常。 */

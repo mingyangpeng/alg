@@ -60,7 +60,7 @@ static void check(bool ok, const char* name)
 static void TestLifecycle()
 {
     std::printf("---- A1. 版本与生命周期 ----\n");
-    check(std::strcmp(Point3DAlg_GetVersion(), "1.6.0") == 0, "GetVersion 返回 1.6.0");
+    check(std::strcmp(Point3DAlg_GetVersion(), "1.7.0") == 0, "GetVersion 返回 1.7.0");
     check(Point3DAlg_Init() == 0, "Init 返回 0");
     Point3DAlg_Cleanup();   // 占位实现，可安全调用
     Point3DAlg_FreeCloud(nullptr);   // NULL 安全（不崩溃即通过）
@@ -120,10 +120,10 @@ static bool PtClose(const Point3DAlg_PointCloud& c, int i, double x, double y, d
            std::fabs((double)c.xyz[i * 3 + 2] - z) <= tol;
 }
 
-// ---------------- 滤波（9 个 method） ----------------
+// ---------------- 滤波（14 个 method；1.7.0 增 11~13） ----------------
 static void TestFilter()
 {
-    std::printf("---- A2. FilterCloud（9 method）----\n");
+    std::printf("---- A2. FilterCloud（14 method）----\n");
     Point3DAlg_PointCloud in = MakeCloud();
 
     // 参数/入参校验
@@ -135,7 +135,8 @@ static void TestFilter()
         empty.xyz = nullptr;
         empty.count = 0;
         check(Point3DAlg_FilterCloud(&empty, 0, nullptr, 0, &out) == -1, "FilterCloud 空点云 → -1");
-        check(Point3DAlg_FilterCloud(&in, 11, nullptr, 0, &out) == -3, "method 越界(11) → -3");
+        check(Point3DAlg_FilterCloud(&in, 14, nullptr, 0, &out) == -3,
+              "method 越界(14) → -3（1.7.0 上限 13）");
         check(Point3DAlg_FilterCloud(&in, 10, nullptr, 0, &out) == -3,
               "method=10 无 params → -3（approxVoxel 需 leaf）");
         const double leafBad[1] = { 0.0 };
@@ -246,6 +247,191 @@ static void TestFilter()
         const double p[6] = { -0.1, 10.0, -100.0, 100.0, -100.0, 100.0 };
         const int rc = Point3DAlg_FilterCloud(&in, 9, p, 6, &out.c);
         check(rc == 0 && out.c.count == kGridN * kGridN, "conditionalXYZ x 范围 → 400 点");
+    }
+
+    // 11 conditionalRemoval（1.7.0）：复合条件去除——op AND/OR、逐轴闭区间
+    //（PCL GT/LT 严格比较以 ε=1e-6 补偿）、±INFINITY 无界（min 侧 -inf /
+    // max 侧 +inf 合法，NaN/方向错误的 INFINITY → -3）；错误码同点云滤波族
+    {
+        // 6×6×3 网格：x/y∈{0..5}、z∈{0,1,2}，共 108 点（全有限）
+        std::vector<float> v;
+        for (int i = 0; i < 6; ++i)
+            for (int j = 0; j < 6; ++j)
+                for (int k = 0; k < 3; ++k)
+                    PushPt(v, (float)i, (float)j, (float)k);
+        Point3DAlg_PointCloud inC;
+        inC.xyz = (float*)malloc(v.size() * sizeof(float));
+        memcpy(inC.xyz, v.data(), v.size() * sizeof(float));
+        inC.count = (int)(v.size() / 3);
+        const double inf = std::numeric_limits<double>::infinity();
+
+        // AND：[0,inf]×[0,inf]×[2,inf] → 只剩 z=2 上层 36 点
+        {
+            CloudGuard out;
+            const double p[7] = { 0.0, 0.0, inf, 0.0, inf, 2.0, inf };
+            const int rc = Point3DAlg_FilterCloud(&inC, 11, p, 7, &out.c);
+            bool ok = rc == 0 && out.c.count == 36;
+            for (int i = 0; ok && i < out.c.count; ++i)
+                ok = std::fabs((double)out.c.xyz[i * 3 + 2] - 2.0) < 1e-6;
+            check(ok, "conditionalRemoval AND [0,inf]x[0,inf]x[2,inf] → 上层 36 点");
+        }
+        // OR：x∈[-inf,1] 或 y∈[-inf,1]（任一轴满足即保留）→ 并集 60
+        //（|x<=1| = 2×6×3 = 36，|y<=1| = 36，交集 2×2×3 = 12 → 36+36−12；
+        //  x>=2 且 y>=2 的 4×4×3 = 48 点剔除）
+        {
+            CloudGuard out;
+            const double p[7] = { 1.0, -inf, 1.0, -inf, 1.0, -inf, inf };
+            const int rc = Point3DAlg_FilterCloud(&inC, 11, p, 7, &out.c);
+            check(rc == 0 && out.c.count == 60,
+                  "conditionalRemoval OR x<=1 ∪ y<=1 → 60 点（手算并集）");
+        }
+        // 闭区间边界：x∈[1,4] → x=1 与 x=4 的点都保留（ε 补偿口径）→ 4×6×3 = 72
+        {
+            CloudGuard out;
+            const double p[7] = { 0.0, 1.0, 4.0, -inf, inf, -inf, inf };
+            const int rc = Point3DAlg_FilterCloud(&inC, 11, p, 7, &out.c);
+            double minX = 1e30, maxX = -1e30;
+            const bool okCnt = rc == 0 && out.c.count == 72;
+            for (int i = 0; okCnt && i < out.c.count; ++i) {
+                const double x = out.c.xyz[i * 3];
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+            }
+            check(okCnt && std::fabs(minX - 1.0) < 1e-6 && std::fabs(maxX - 4.0) < 1e-6,
+                  "conditionalRemoval 闭区间 x∈[1,4] → 72 点（边界 1/4 保留）");
+        }
+        // ±INFINITY 无界：x/y 双侧无界 → 等价 z>=2 → 36 点
+        {
+            CloudGuard out;
+            const double p[7] = { 0.0, -inf, inf, -inf, inf, 2.0, inf };
+            const int rc = Point3DAlg_FilterCloud(&inC, 11, p, 7, &out.c);
+            check(rc == 0 && out.c.count == 36,
+                  "conditionalRemoval x/y ±inf 无界 → 等价 z>=2（36 点）");
+        }
+        // 错误路径（点云滤波族口径：-3 参数越界 / -2 空结果）
+        {
+            CloudGuard out;
+            const double pOp[7] = { 2.0, 0.0, inf, 0.0, inf, -inf, inf };
+            check(Point3DAlg_FilterCloud(&inC, 11, pOp, 7, &out.c) == -3,
+                  "conditionalRemoval op=2 → -3");
+            const double pRev[7] = { 0.0, -inf, inf, -inf, inf, 5.0, 2.0 };
+            check(Point3DAlg_FilterCloud(&inC, 11, pRev, 7, &out.c) == -3,
+                  "conditionalRemoval zmin>zmax → -3");
+            const double pShort[6] = { 0.0, -inf, inf, -inf, inf, -inf };
+            check(Point3DAlg_FilterCloud(&inC, 11, pShort, 6, &out.c) == -3,
+                  "conditionalRemoval params=6 个（数量不符）→ -3");
+            const double nanD = std::numeric_limits<double>::quiet_NaN();
+            const double pNan[7] = { 0.0, nanD, inf, -inf, inf, -inf, inf };
+            check(Point3DAlg_FilterCloud(&inC, 11, pNan, 7, &out.c) == -3,
+                  "conditionalRemoval NaN 区间 → -3");
+            const double pDir[7] = { 0.0, 0.0, inf, 0.0, inf, 2.0, -inf };
+            check(Point3DAlg_FilterCloud(&inC, 11, pDir, 7, &out.c) == -3,
+                  "conditionalRemoval max 侧 -inf（方向错误的 INFINITY）→ -3");
+            const double pEmpty[7] = { 0.0, 100.0, 200.0, -inf, inf, -inf, inf };
+            check(Point3DAlg_FilterCloud(&inC, 11, pEmpty, 7, &out.c) == -2,
+                  "conditionalRemoval AND x∈[100,200] 无点 → 全滤除 -2");
+        }
+        Point3DAlg_FreeCloud(&inC);
+    }
+
+    // 12 medianFilter（1.7.0）：伪有序化口径——PCL 1.9 硬性要求有序点云，
+    // 本层按"1 列 × N 行"呈递：窗口沿**点序**滑动、仅平滑 z（x/y 不变）；
+    // window >=3 奇数（偶数自动 +1）
+    {
+        // 一行 9 点 (i,0,0)：z 全 0，第 5 点（i=4）椒盐尖峰 z=100
+        std::vector<float> v;
+        for (int i = 0; i < 9; ++i)
+            PushPt(v, (float)i, 0.0f, (i == 4) ? 100.0f : 0.0f);
+        Point3DAlg_PointCloud inM;
+        inM.xyz = (float*)malloc(v.size() * sizeof(float));
+        memcpy(inM.xyz, v.data(), v.size() * sizeof(float));
+        inM.count = (int)(v.size() / 3);
+
+        CloudGuard out;
+        const double pw[1] = { 3.0 };
+        const int rc = Point3DAlg_FilterCloud(&inM, 12, pw, 1, &out.c);
+        check(rc == 0 && out.c.count == 9, "medianFilter window=3 点数不变（9 点）");
+        // 尖峰被邻域中值替代（{0,100,0} 中值 0 < 50），非尖峰点 z 不变
+        bool okZ = rc == 0 && out.c.count == 9 && out.c.xyz[4 * 3 + 2] < 50.0f;
+        for (int i = 0; okZ && i < 9; ++i)
+            if (i != 4)
+                okZ = std::fabs((double)out.c.xyz[i * 3 + 2]) < 1e-6;
+        check(okZ, "medianFilter 尖峰点 z 被窗口中值替代（<50），非尖峰 z 不变");
+        // 伪有序化口径：x/y 保持不变
+        bool okXY = rc == 0 && out.c.count == 9;
+        for (int i = 0; okXY && i < 9; ++i)
+            okXY = std::fabs((double)out.c.xyz[i * 3] - (double)i) < 1e-6 &&
+                   std::fabs((double)out.c.xyz[i * 3 + 1]) < 1e-6;
+        check(okXY, "medianFilter x/y 保持不变（仅平滑 z）");
+        // window 偶数自动 +1：window=4 与 window=5 输出一致
+        {
+            CloudGuard out4, out5;
+            const double pw4[1] = { 4.0 }, pw5[1] = { 5.0 };
+            const int rc4 = Point3DAlg_FilterCloud(&inM, 12, pw4, 1, &out4.c);
+            const int rc5 = Point3DAlg_FilterCloud(&inM, 12, pw5, 1, &out5.c);
+            bool okW = rc4 == 0 && rc5 == 0 && out4.c.count == 9 && out5.c.count == 9;
+            for (int i = 0; okW && i < 9; ++i)
+                for (int k = 0; k < 3; ++k)
+                    okW = std::fabs((double)out4.c.xyz[i * 3 + k] -
+                                    (double)out5.c.xyz[i * 3 + k]) < 1e-6;
+            check(okW, "medianFilter window=4 与 window=5 结果一致（偶数自动 +1）");
+        }
+        // 错误路径：window<3 → -3；params 缺失（需 1 个）→ -3
+        {
+            CloudGuard outE;
+            const double pwBad[1] = { 2.0 };
+            check(Point3DAlg_FilterCloud(&inM, 12, pwBad, 1, &outE.c) == -3,
+                  "medianFilter window=2 → -3");
+            check(Point3DAlg_FilterCloud(&inM, 12, nullptr, 0, &outE.c) == -3,
+                  "medianFilter params 缺失 → -3（需 1 个）");
+        }
+        Point3DAlg_FreeCloud(&inM);
+    }
+
+    // 13 gridMinimum（1.7.0）：PCL GridMinimum——XY 格网分格、每格保留
+    // z 最低点（地面提取）
+    {
+        // 4×4 地面网格（间距 1，z=0）+ 每格正上方 (同 xy, z=5) 悬空点 → 32 点
+        std::vector<float> v;
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 4; ++j) {
+                PushPt(v, (float)i, (float)j, 0.0f);
+                PushPt(v, (float)i, (float)j, 5.0f);
+            }
+        Point3DAlg_PointCloud inG;
+        inG.xyz = (float*)malloc(v.size() * sizeof(float));
+        memcpy(inG.xyz, v.data(), v.size() * sizeof(float));
+        inG.count = (int)(v.size() / 3);
+
+        CloudGuard out;
+        const double pg[1] = { 1.0 };
+        const int rc = Point3DAlg_FilterCloud(&inG, 13, pg, 1, &out.c);
+        check(rc == 0 && out.c.count == 16,
+              "gridMinimum cell=1 → 16 点（每格保留 z 最低者=地面点）");
+        bool okZ = rc == 0 && out.c.count == 16;
+        for (int i = 0; okZ && i < out.c.count; ++i)
+            okZ = std::fabs((double)out.c.xyz[i * 3 + 2]) < 1.0;
+        check(okZ, "gridMinimum 输出 z 全 ≈ 0（max z < 1，悬空 z=5 点剔除）");
+        // cell=10 → 32 点全并入 1 格 → 1 点（格网边长生效）
+        {
+            CloudGuard out2;
+            const double pBig[1] = { 10.0 };
+            const int rc2 = Point3DAlg_FilterCloud(&inG, 13, pBig, 1, &out2.c);
+            check(rc2 == 0 && out2.c.count == 1, "gridMinimum cell=10 → 全并 1 格 1 点");
+        }
+        // 错误路径：cell<=0 → -3；params 数量不符 → -3
+        {
+            CloudGuard outE;
+            const double pZero[1] = { 0.0 };
+            check(Point3DAlg_FilterCloud(&inG, 13, pZero, 1, &outE.c) == -3,
+                  "gridMinimum cell=0 → -3");
+            check(Point3DAlg_FilterCloud(&inG, 13, nullptr, 0, &outE.c) == -3,
+                  "gridMinimum params 缺失 → -3");
+            const double pTwo[2] = { 1.0, 2.0 };
+            check(Point3DAlg_FilterCloud(&inG, 13, pTwo, 2, &outE.c) == -3,
+                  "gridMinimum params=2 个（数量不符）→ -3");
+        }
+        Point3DAlg_FreeCloud(&inG);
     }
     Point3DAlg_FreeCloud(&in);
 }
@@ -685,10 +871,12 @@ static void TestVoxelConsistency()
     Point3DAlg_FreeCloud(&in);
 }
 
-// ---------------- A7. FitModel（6 model + 内点 + 容量两段式；1.4.0 增 torus） ----------------
+// ---------------- A7. FitModel（10 model + 内点 + 容量两段式；1.4.0 增 torus，
+// 1.7.0 增 7=parallelPlane 8=perpendicularPlane 9=stick） ----------------
 static void TestFitModel()
 {
-    std::printf("---- A7. FitModel（plane/sphere/cylinder/circle3D/cone/torus）----\n");
+    std::printf("---- A7. FitModel（plane/sphere/cylinder/circle3D/cone/line3D/"
+                "torus/parallelPlane/perpendicularPlane/stick）----\n");
     struct CloudGuard {
         Point3DAlg_PointCloud c;
         ~CloudGuard() { Point3DAlg_FreeCloud(&c); }
@@ -703,8 +891,8 @@ static void TestFitModel()
         const Point3DAlg_PointCloud* nullIn = nullptr;
         check(Point3DAlg_FitModel(nullIn, 0, 0, 0.01, c, 8, &inl, &nC) == -1,
               "FitModel in=NULL → -1");
-        check(Point3DAlg_FitModel(&in, 7, 0, 0.01, c, 8, &inl, &nC) == -3,
-              "method 越界(7) → -3");
+        check(Point3DAlg_FitModel(&in, 10, 0, 0.01, c, 8, &inl, &nC) == -3,
+              "method 越界(10) → -3（1.7.0 上限 9）");
         check(Point3DAlg_FitModel(&in, 0, 3, 0.01, c, 8, &inl, &nC) == -3,
               "fit 越界 → -3");
         check(Point3DAlg_FitModel(&in, 0, 0, 0.0, c, 8, &inl, &nC) == -3,
@@ -935,6 +1123,126 @@ static void TestFitModel()
         const int rc = Point3DAlg_FitModel(&in, 6, 0, 0.02, c, 8, nullptr, &nC);
         check(rc == 0 && nC > 0 && nC < in.count,
               "torus 平面点云 → 巨环局部最优（内点为部分而非全点）");
+        Point3DAlg_FreeCloud(&in);
+    }
+
+    // 7 parallelPlane（1.7.0）：SACMODEL_PARALLEL_PLANE 直调——轴固定 +Z，
+    // 找法向 ⊥ Z 的竖直面（eps 固定 5°；支持度表：三种 fit 均支持）
+    {
+        // 竖直墙面 x=5（y/z 平面内 10×10 = 100 点，法向 ±x ⊥ Z ✓）+
+        // 水平干扰面 z=0（4×10 = 40 点，法向 ∥ Z 被轴约束排除）
+        std::vector<float> v;
+        for (int j = 0; j < 10; ++j)
+            for (int k = 0; k < 10; ++k)
+                PushPt(v, 5.0f, (float)j, (float)k);
+        for (int i = 0; i < 4; ++i)
+            for (int j = 0; j < 10; ++j)
+                PushPt(v, (float)i, (float)j, 0.0f);
+        Point3DAlg_PointCloud in = MakeCloudFrom(v);   // 140 点
+        double c[8] = { 0 };
+        int nC = 0;
+        int* inl = nullptr;
+        const int rc = Point3DAlg_FitModel(&in, 7, 0, 0.05, c, 8, &inl, &nC);
+        check(rc == 0 && nC == 100 &&
+                  std::fabs(std::fabs(c[0]) - 1.0) < 0.1 &&
+                  std::fabs(c[1]) < 0.1 && std::fabs(c[2]) < 0.1 &&
+                  std::fabs(std::fabs(c[3]) - 5.0) < 0.15,
+              "parallelPlane RANSAC 竖直墙面 x=5（|a|≈1 / |c|<0.1 / |d|≈5）/ 内点 100");
+        check(rc == 0 && inl != nullptr && nC == 100,
+              "parallelPlane 内点索引非空且 = 墙面 100（干扰面被轴约束排除）");
+        Point3DAlg_FreeBuffer(inl);
+        // 三种 fit 均支持：MSAC / LMEDS 同收敛到竖直面
+        const int rc1 = Point3DAlg_FitModel(&in, 7, 1, 0.05, c, 8, nullptr, &nC);
+        check(rc1 == 0 && nC == 100 && std::fabs(std::fabs(c[0]) - 1.0) < 0.1 &&
+                  std::fabs(c[2]) < 0.1,
+              "parallelPlane MSAC 收敛（内点 100）");
+        const int rc2 = Point3DAlg_FitModel(&in, 7, 2, 0.05, c, 8, nullptr, &nC);
+        check(rc2 == 0 && nC == 100 && std::fabs(std::fabs(c[0]) - 1.0) < 0.1 &&
+                  std::fabs(c[2]) < 0.1,
+              "parallelPlane LMEDS 收敛（内点 100）");
+        check(Point3DAlg_FitModel(&in, 7, 0, 0.05, c, 3, nullptr, &nC) == -3 && nC == 4,
+              "parallelPlane capacity=3 → -3 两段式回填 4");
+        Point3DAlg_FreeCloud(&in);
+    }
+
+    // 8 perpendicularPlane（1.7.0）：SACMODEL_PERPENDICULAR_PLANE 直调——
+    // 找法向 ∥ Z 的水平面（RANSAC 一条）
+    {
+        // 水平面 z=3（10×10 = 100 点）+ 竖直墙 x=10（4×10 = 40 点，z∈[6,9]
+        // 避开 z=3，法向 ⊥ Z 被轴约束排除）
+        std::vector<float> v;
+        for (int i = 0; i < 10; ++i)
+            for (int j = 0; j < 10; ++j)
+                PushPt(v, (float)i, (float)j, 3.0f);
+        for (int k = 6; k < 10; ++k)
+            for (int j = 0; j < 10; ++j)
+                PushPt(v, 10.0f, (float)j, (float)k);
+        Point3DAlg_PointCloud in = MakeCloudFrom(v);   // 140 点
+        double c[8] = { 0 };
+        int nC = 0;
+        const int rc = Point3DAlg_FitModel(&in, 8, 0, 0.05, c, 8, nullptr, &nC);
+        check(rc == 0 && std::fabs(c[0]) < 0.1 && std::fabs(c[1]) < 0.1 &&
+                  std::fabs(std::fabs(c[2]) - 1.0) < 0.1 &&
+                  std::fabs(std::fabs(c[3]) - 3.0) < 0.15,
+              "perpendicularPlane RANSAC 水平面 z=3（|c|≈1 / |d|≈3）");
+        check(rc == 0 && nC == 100,
+              "perpendicularPlane 内点数 = 水平面 100（竖直墙被轴约束排除）");
+        check(Point3DAlg_FitModel(&in, 8, 0, 0.05, c, 3, nullptr, &nC) == -3 && nC == 4,
+              "perpendicularPlane capacity=3 → -3 两段式回填 4");
+        Point3DAlg_FreeCloud(&in);
+    }
+
+    // 9 stick（1.7.0）：SACMODEL_STICK 有限长线段——仅 RANSAC（fit 1/2 回退，
+    // 参数被忽略）+ 内点 PCA 精化 + 本层点到线正交距离重选内点；内点 <3 → -2
+    {
+        // 沿 (1,0,0) 从 (0,0,0) 到 (10,0,0) 采 30 点（确定性步进）+ 20 个远离点
+        std::vector<float> v;
+        for (int i = 0; i < 30; ++i)
+            PushPt(v, (float)(i * 10.0 / 29.0), 0.0f, 0.0f);
+        for (int k = 0; k < 20; ++k)
+            PushPt(v, 30.0f + k * 3.0f, 20.0f + (k % 5) * 7.0f,
+                   -10.0f + (k % 3) * 9.0f);
+        Point3DAlg_PointCloud in = MakeCloudFrom(v);   // 50 点
+        double c[8] = { 0 };
+        int nC = 0;
+        int* inl = nullptr;
+        const int rc = Point3DAlg_FitModel(&in, 9, 0, 0.5, c, 8, &inl, &nC);
+        const double offLine = std::sqrt(c[1] * c[1] + c[2] * c[2]);   // 线上点距原线
+        check(rc == 0 && nC == 30 &&
+                  std::fabs(std::fabs(c[3]) - 1.0) < 0.05 &&
+                  std::fabs(c[4]) < 0.05 && std::fabs(c[5]) < 0.05 && offLine < 1.0,
+              "stick RANSAC 方向 ≈ ±X / 线上点距原线 < 1 / 内点 30");
+        check(rc == 0 && inl != nullptr && nC == 30,
+              "stick 内点索引非空且 = 线段 30 点");
+        Point3DAlg_FreeBuffer(inl);
+        // fit=1（MSAC）回退 RANSAC 不崩：rc==0 同参数（支持度表：仅 RANSAC）
+        const int rc1 = Point3DAlg_FitModel(&in, 9, 1, 0.5, c, 8, nullptr, &nC);
+        check(rc1 == 0 && nC == 30 && std::fabs(std::fabs(c[3]) - 1.0) < 0.05,
+              "stick fit=1（MSAC）回退 RANSAC 收敛同参数");
+        // 两段式：coeffs 容量 5 → -3 回填 6
+        check(Point3DAlg_FitModel(&in, 9, 0, 0.5, c, 5, nullptr, &nC) == -3 && nC == 6,
+              "stick capacity=5 → -3 两段式回填 6");
+        // 错误路径：2 点 < 最小内点 3 → -2（stick 最小样本 2 点 + 内点下限）
+        {
+            std::vector<float> v2;
+            PushPt(v2, 0.0f, 0.0f, 0.0f);
+            PushPt(v2, 1.0f, 0.0f, 0.0f);
+            Point3DAlg_PointCloud in2 = MakeCloudFrom(v2);
+            check(Point3DAlg_FitModel(&in2, 9, 0, 0.5, c, 8, nullptr, &nC) == -2,
+                  "stick 点数 < 3 → -2（最小内点 3）");
+            Point3DAlg_FreeCloud(&in2);
+        }
+        // 全共线远点集：方向不退化——rc 0（正常拟合）/ -2（退化拒判）双口径放行
+        {
+            std::vector<float> v3;
+            for (int k = 0; k < 10; ++k)
+                PushPt(v3, 100.0f + 2.0f * k, -40.0f + 3.0f * k, 55.0f + (float)k);
+            Point3DAlg_PointCloud in3 = MakeCloudFrom(v3);
+            const int rc3 = Point3DAlg_FitModel(&in3, 9, 0, 0.5, c, 8, nullptr, &nC);
+            check(rc3 == 0 || rc3 == -2,
+                  "stick 全共线远点集 → rc 0 或 -2 双口径放行（视实现）");
+            Point3DAlg_FreeCloud(&in3);
+        }
         Point3DAlg_FreeCloud(&in);
     }
 }

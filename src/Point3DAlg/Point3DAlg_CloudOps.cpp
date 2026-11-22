@@ -32,14 +32,22 @@
 #include <pcl/point_cloud.h>
 #include <pcl/surface/convex_hull.h>
 #include <pcl/surface/concave_hull.h>
+#include <pcl/filters/conditional_removal.h>
+#include <pcl/filters/median_filter.h>
+#include <pcl/filters/grid_minimum.h>
 #include <pcl/segmentation/progressive_morphological_filter.h>
 #include <pcl/segmentation/min_cut_segmentation.h>
+// 1.7.0 缺陷修复：FitModel method 7/8/9 不再经 PCL SAC 直调（sac_segmentation/
+// ransac/sac_model_stick 头已摘除），改为手写确定性搜索——PCA 精化需特征分解
+#include <Eigen/Dense>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <random>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -321,6 +329,283 @@ int CheckInOnly(const Point3DAlg_PointCloud* in)
     return 0;
 }
 
+// ---------------- 1.7.0 轴约束平面/线段拟合公共段（FitModel method 7/8/9） ----------------
+//
+// 1.7.0 缺陷修复（测试实测暴露，原 PCL 直调路径整体重写为手写确定性搜索）：
+//   * method 7/8 原实现经 pcl::SACSegmentation（setAxis(+Z)+setEpsAngle(5°)）
+//     直调，在含共线点对的云上产生**零法向退化模型**：网格采样抽到 3 个共线
+//     点 → 法向候选 (0,0,0)；ParallelPlane 的 isModelValid 只校验 |axis·n|
+//     （0 < sin(5°) 判"合法"，零法向不被拒绝），点到模型距离 |0·p+d|/0 → 0
+//     → 全点命中 → 零候选内点计数必胜真解（实测混合云 140/140 全内点、
+//     coeffs=[0,0,0,−0]），optimize 对全点 PCA 亦无法挽回 → FitPlaneConstrained。
+//   * method 9 原实现经 SampleConsensusModelStick + RandomSampleConsensus
+//     直调，其 isSampleGood 要求两采样点三坐标全不等——纯线段点云（全部
+//     线内点）没有任何合法样本对，RANSAC 只能产出"线点×远点"垃圾段（实测
+//     ~10 内点垃圾方向，真解 = 30 点 ±X 线）→ FitStickRansac 重写（函数名
+//     保留 RANSAC 字样仅为 api.h 注释引用兼容，实现已非随机共识）。
+// 两函数均沿用原非有限点剔除与原始行号映射口径（clean 行 j = 原始行
+// global[j]，inlierIdx 相对 in->xyz）。轴固定 +Z、eps 固定 5°（1.7.0 简化
+// 契约，任意轴待后续扩展）。
+
+// method 7/8 公共段：轴向约束平面拟合（手写约束搜索，替代 PCL SAC 直调）。
+//   1. 固定种子随机采样 3 点三元组 min(2000, C(n,3)) 次（穷举 C(n,3) 在中等
+//      规模即爆量（n=200 已 ~1.3e6）——统一随机采样，三元组重复无害）；
+//   2. 法向 n = (p2−p1)×(p3−p1) 归一；|n| < 1e-6 跳过（共线/重合——零法向
+//      候选在此被天然拒绝，不复现 PCL 的退化路径）；
+//   3. 约束校验（eps = 5°，弧度角口径同原 setEpsAngle）：
+//        PARALLEL（法向 ⊥ 轴）     ：|n·axis| <= sin(5°)
+//        PERPENDICULAR（法向 ∥ 轴）：|n·axis| >= cos(5°)
+//   4. 评分：内点 = |n·p + d| <= threshold（d = −n·p1）的计数——RANSAC/MSAC/
+//      LMEDS 三种 fit 统一内点计数评分（api.h 注明"手写搜索对三 fit 统一
+//      计数评分"：精确数据下三者同解，fit 取值不影响结果）；
+//   5. 最优候选 → 内点 PCA 精化（质心 + 协方差最小特征向量，Eigen 已有）→
+//      按 d = −n·c 重算内点；法向符号任意（平面二义性）；精化后法向若越出
+//      5° 容差（极端倾斜内点集）→ -2（同原 PCL 精化口径）。
+// 复杂度 O(采样数·n)（≤2000·n 次点积，n=5000 时 ~1e7 量级），内存 O(n)。
+// 返回 0 成功：coeffs = [nx,ny,nz,d]（与 PCL 平面系数同布局），inlierIdx =
+// 局内点相对 in->xyz 的原始行号；-2 = 剔除后无点/点数 <3/无满足约束的候选/
+// 精化退化/精化后无局内点。
+int FitPlaneConstrained(const CloudPtr& src, bool perpendicular, double threshold,
+                        std::vector<float>& coeffs, std::vector<int>& inlierIdx)
+{
+    CloudPtr clean(new CloudXYZ);
+    std::vector<int> global;
+    clean->reserve(src->size());
+    global.reserve(src->size());
+    for (size_t i = 0; i < src->size(); ++i) {
+        const pcl::PointXYZ& pt = (*src)[i];
+        if (std::isfinite(pt.x) && std::isfinite(pt.y) && std::isfinite(pt.z)) {
+            clean->push_back(pt);
+            global.push_back((int)i);
+        }
+    }
+    if (clean->size() < 3)
+        return -2;   // 剔除非有限点后不足三点（无法定面）
+    const int n = (int)clean->size();
+
+    // 采样次数 = min(2000, C(n,3))：n 较小时按组合数封顶（等效穷举）；n >= 48
+    // 时 C(n,3) 必然 > 2000（C(47,3)=16215），无需精确计算也避免溢出
+    long long trials = 2000;
+    if (n < 48) {
+        const long long cn3 = (long long)n * (n - 1) * (n - 2) / 6;
+        if (cn3 < trials)
+            trials = cn3;
+    }
+
+    const Eigen::Vector3f axis(0.f, 0.f, 1.f);
+    const double sinEps = std::sin(5.0 * M_PI / 180.0);   // PARALLEL：|n·axis| <= sin(5°)
+    const double cosEps = std::cos(5.0 * M_PI / 180.0);   // PERPENDICULAR：|n·axis| >= cos(5°)
+
+    std::mt19937 rng(20261122u);   // 固定种子：结果确定、可复现
+    std::uniform_int_distribution<int> pick(0, n - 1);
+
+    int bestCnt = 0;
+    Eigen::Vector3f bestN(Eigen::Vector3f::Zero());
+    double bestD = 0.0;
+    for (long long t = 0; t < trials; ++t) {
+        const int i = pick(rng);
+        const int j = pick(rng);
+        const int k = pick(rng);
+        if (i == j || i == k || j == k)
+            continue;
+        const Eigen::Vector3f p1((*clean)[i].x, (*clean)[i].y, (*clean)[i].z);
+        const Eigen::Vector3f p2((*clean)[j].x, (*clean)[j].y, (*clean)[j].z);
+        const Eigen::Vector3f p3((*clean)[k].x, (*clean)[k].y, (*clean)[k].z);
+        const Eigen::Vector3f nv = (p2 - p1).cross(p3 - p1);
+        const float nn = nv.norm();
+        if (!(nn > 1e-6f))
+            continue;   // 共线/重合：零法向候选直接拒绝
+        const Eigen::Vector3f nrm = nv / nn;
+        const double dot = (double)std::fabs(nrm.dot(axis));
+        if (perpendicular ? (dot < cosEps) : (dot > sinEps))
+            continue;   // 违反轴约束
+        const double d = -(double)nrm.dot(p1);
+        int cnt = 0;
+        for (int q = 0; q < n; ++q) {
+            const Eigen::Vector3f pq((*clean)[q].x, (*clean)[q].y, (*clean)[q].z);
+            if (std::fabs((double)nrm.dot(pq) + d) <= threshold)
+                ++cnt;
+        }
+        if (cnt > bestCnt) {   // 平局保持先到候选（确定序）
+            bestCnt = cnt;
+            bestN = nrm;
+            bestD = d;
+        }
+    }
+    if (bestCnt < 3)
+        return -2;   // 无满足约束的候选（或内点不足三点）
+
+    // 最优候选内点 → PCA 精化：质心 + 协方差最小特征向量（特征值升序 → col(0)）
+    std::vector<int> inl;
+    inl.reserve((size_t)bestCnt);
+    for (int q = 0; q < n; ++q) {
+        const Eigen::Vector3f pq((*clean)[q].x, (*clean)[q].y, (*clean)[q].z);
+        if (std::fabs((double)bestN.dot(pq) + bestD) <= threshold)
+            inl.push_back(q);
+    }
+    Eigen::Vector3f ctr(Eigen::Vector3f::Zero());
+    for (int q : inl)
+        ctr += Eigen::Vector3f((*clean)[q].x, (*clean)[q].y, (*clean)[q].z);
+    ctr /= (float)inl.size();
+    Eigen::Matrix3f cov(Eigen::Matrix3f::Zero());
+    for (int q : inl) {
+        const Eigen::Vector3f dv =
+            Eigen::Vector3f((*clean)[q].x, (*clean)[q].y, (*clean)[q].z) - ctr;
+        cov += dv * dv.transpose();
+    }
+    cov /= (float)inl.size();
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> es(cov);
+    const Eigen::Vector3f nrm = es.eigenvectors().col(0);   // 最小特征向量 = 平面法向
+    if (!(nrm.allFinite() && nrm.norm() > 1e-8f))
+        return -2;   // 协方差退化（防御）
+    const double dot = (double)std::fabs(nrm.dot(axis));
+    if (perpendicular ? (dot < cosEps) : (dot > sinEps))
+        return -2;   // 精化后法向越出 5° 容差（极端倾斜内点集，同原口径）
+    const double dRef = -(double)nrm.dot(ctr);
+    inlierIdx.clear();
+    inlierIdx.reserve(inl.size());
+    for (int q = 0; q < n; ++q) {
+        const Eigen::Vector3f pq((*clean)[q].x, (*clean)[q].y, (*clean)[q].z);
+        if (std::fabs((double)nrm.dot(pq) + dRef) <= threshold)
+            inlierIdx.push_back(global[(size_t)q]);
+    }
+    if (inlierIdx.empty())
+        return -2;   // 精化后无局内点（防御）
+    coeffs.assign(4, 0.0f);
+    coeffs[0] = nrm[0];
+    coeffs[1] = nrm[1];
+    coeffs[2] = nrm[2];
+    coeffs[3] = (float)dRef;
+    return 0;
+}
+
+// method 9 公共段：线段拟合（手写点对枚举/采样搜索；函数名保留 RANSAC 字样
+// 仅为 api.h 注释引用兼容，实现已非随机共识，原 PCL 路径缺陷见本段头部注）。
+//   1. 非有限点剔除（同 FitPlaneConstrained 口径）；
+//   2. n <= 400：穷举全部 C(n,2) 点对；n > 400：固定种子随机采样 40000 对
+//      （复杂度上限策略：穷举 O(n²) 随规模平方膨胀，400 点 ~8 万对封顶后转
+//      固定对数采样——评分 O(对数·n) 有界，n=5000 时 ~2e8 次距离计算封顶）；
+//   3. 每对：方向 = (p2−p1) 归一（重合点对跳过）；评分 = 到直线正交距离
+//      <= threshold 的点数（点到线正交距离 |(p−p1)×dir|，端点截断不参与——
+//      与原本层口径一致，见 api.h 支持度表；平方距离比较免 sqrt）；
+//   4. 最优对 → 内点 PCA 精化（质心 + 协方差主特征向量）→ 按精化线以同一
+//      正交距离口径重选内点 → 输出 [px,py,pz(质心), dx,dy,dz(单位方向)]
+//      （布局同 line3D；PCL stick 系数第 7 值 line_width 本接口不输出）；
+//   5. 内点 < 3 → -2（调用方转 -2）；方向退化（内点共点/PCA 退化）→ -2。
+// 注：本搜索与 fit 取值无关（api.h 口径：仅 RANSAC，fit 1/2 回退且参数被
+// 忽略——三种 fit 同结果，调用点无需传 fit）。
+int FitStickRansac(const CloudPtr& src, double threshold,
+                   std::vector<float>& coeffs, std::vector<int>& inlierIdx)
+{
+    CloudPtr clean(new CloudXYZ);
+    std::vector<int> global;
+    clean->reserve(src->size());
+    global.reserve(src->size());
+    for (size_t i = 0; i < src->size(); ++i) {
+        const pcl::PointXYZ& pt = (*src)[i];
+        if (std::isfinite(pt.x) && std::isfinite(pt.y) && std::isfinite(pt.z)) {
+            clean->push_back(pt);
+            global.push_back((int)i);
+        }
+    }
+    if (clean->size() < 2)
+        return -2;   // 不足两点（内点 <3 的退化口径由下方统一拒绝）
+    const int n = (int)clean->size();
+
+    // 候选点对生成：n <= 400 穷举 C(n,2)；否则固定种子随机采 40000 对
+    // （i==j 跳过；重复对无害——仅多花一次评分）
+    std::vector<std::pair<int, int>> pairs;
+    if (n <= 400) {
+        pairs.reserve((size_t)((long long)n * (n - 1) / 2));
+        for (int i = 0; i < n; ++i)
+            for (int j = i + 1; j < n; ++j)
+                pairs.emplace_back(i, j);
+    } else {
+        pairs.reserve(40000);
+        std::mt19937 rng(20261122u);   // 固定种子：结果确定、可复现
+        std::uniform_int_distribution<int> pick(0, n - 1);
+        for (int t = 0; t < 40000; ++t) {
+            const int i = pick(rng);
+            const int j = pick(rng);
+            if (i != j)
+                pairs.emplace_back(i, j);
+        }
+    }
+
+    const double thr2 = threshold * threshold;   // 平方距离比较（免 sqrt）
+    int bestCnt = 0;
+    int bi = -1, bj = -1;
+    for (const std::pair<int, int>& pr : pairs) {
+        const Eigen::Vector3f p1((*clean)[pr.first].x, (*clean)[pr.first].y,
+                                 (*clean)[pr.first].z);
+        const Eigen::Vector3f p2((*clean)[pr.second].x, (*clean)[pr.second].y,
+                                 (*clean)[pr.second].z);
+        const Eigen::Vector3f dv = p2 - p1;
+        if (!(dv.norm() > 1e-6f))
+            continue;   // 两点重合
+        const Eigen::Vector3f dir = dv.normalized();
+        int cnt = 0;
+        for (int q = 0; q < n; ++q) {
+            const Eigen::Vector3f pq((*clean)[q].x, (*clean)[q].y, (*clean)[q].z);
+            if ((double)(pq - p1).cross(dir).squaredNorm() <= thr2)
+                ++cnt;
+        }
+        if (cnt > bestCnt) {   // 平局保持先到候选（确定序）
+            bestCnt = cnt;
+            bi = pr.first;
+            bj = pr.second;
+        }
+    }
+    if (bestCnt < 3)
+        return -2;   // 无有效候选（全重合点云）/内点 <3（调用方转 -2）
+
+    // 最优点对内点 → PCA 精化：质心 + 协方差主特征向量（特征值升序 → col(2)）
+    const Eigen::Vector3f p1((*clean)[bi].x, (*clean)[bi].y, (*clean)[bi].z);
+    const Eigen::Vector3f p2((*clean)[bj].x, (*clean)[bj].y, (*clean)[bj].z);
+    const Eigen::Vector3f dir0 = (p2 - p1).normalized();
+    std::vector<int> inl;
+    inl.reserve((size_t)bestCnt);
+    for (int q = 0; q < n; ++q) {
+        const Eigen::Vector3f pq((*clean)[q].x, (*clean)[q].y, (*clean)[q].z);
+        if ((double)(pq - p1).cross(dir0).squaredNorm() <= thr2)
+            inl.push_back(q);
+    }
+    Eigen::Vector3f ctr(Eigen::Vector3f::Zero());
+    for (int q : inl)
+        ctr += Eigen::Vector3f((*clean)[q].x, (*clean)[q].y, (*clean)[q].z);
+    ctr /= (float)inl.size();
+    Eigen::Matrix3f cov(Eigen::Matrix3f::Zero());
+    for (int q : inl) {
+        const Eigen::Vector3f dvq =
+            Eigen::Vector3f((*clean)[q].x, (*clean)[q].y, (*clean)[q].z) - ctr;
+        cov += dvq * dvq.transpose();
+    }
+    cov /= (float)inl.size();
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> es(cov);
+    Eigen::Vector3f dir = es.eigenvectors().col(2);   // 主特征向量 = 线方向
+    if (!(dir.allFinite() && dir.norm() > 1e-8f))
+        return -2;   // 方向退化（内点共点/PCA 退化，同原口径）
+    dir.normalize();
+    // 按精化后直线以同一正交距离口径重选内点
+    inlierIdx.clear();
+    inlierIdx.reserve(inl.size());
+    for (int q = 0; q < n; ++q) {
+        const Eigen::Vector3f pq((*clean)[q].x, (*clean)[q].y, (*clean)[q].z);
+        if ((double)(pq - ctr).cross(dir).squaredNorm() <= thr2)
+            inlierIdx.push_back(global[(size_t)q]);
+    }
+    if ((int)inlierIdx.size() < 3)
+        return -2;   // 精化后内点 <3（原口径）
+    coeffs.assign(6, 0.0f);
+    coeffs[0] = ctr[0];
+    coeffs[1] = ctr[1];
+    coeffs[2] = ctr[2];
+    coeffs[3] = dir[0];
+    coeffs[4] = dir[1];
+    coeffs[5] = dir[2];
+    return 0;
+}
+
 } // namespace
 
 // =====================================================================
@@ -483,6 +768,89 @@ int Point3DAlg_FilterCloud(const Point3DAlg_PointCloud* in, int method,
             if (!p || n < 1) return -3;
             if (!(p[0] > 0.0)) return -3;
             dst = CP::filterApproxVoxelGrid(src, p[0]);
+            break;
+        }
+        case 11: {  // conditionalRemoval：复合条件去除（1.7.0 新增；PCL
+                    // ConditionalRemoval 组合管线直调）——op(0=AND 1=OR) +
+                    // 6 边界值。逐轴闭区间保留条件：PCL 比较（GT/LT）是
+                    // 严格大于/小于，闭区间口径以 ε=1e-6 补偿——min 侧
+                    // GT(min−ε)（保留 x ≥ min，含恰好 min；min−ε<x<min 的
+                    // 边缘带也保留，数值口径注释见 api.h 表），max 侧
+                    // LT(max+ε)。±INFINITY = 该侧无界（不建比较子）；
+                    // PCL 逐点 evaluate 对 NaN 恒 false（GT/LT 均不成立）
+                    // → 非有限点恒剔除，AND/OR 同
+            if (!p || n != 7) return -3;
+            const int op = ParamInt(p, 0);
+            if (op != 0 && op != 1) return -3;
+            for (int a = 0; a < 3; ++a) {
+                const double lo = p[1 + (size_t)a * 2];
+                const double hi = p[2 + (size_t)a * 2];
+                // min 侧 = 有限值或 -INFINITY，max 侧 = 有限值或 +INFINITY
+                // （NaN / 方向错误的 INFINITY → -3）；有限值时 min>max → -3
+                if (!(std::isfinite(lo) || lo == -HUGE_VAL)) return -3;
+                if (!(std::isfinite(hi) || hi == HUGE_VAL)) return -3;
+                if (std::isfinite(lo) && std::isfinite(hi) && lo > hi) return -3;
+            }
+            const double kEps = 1e-6;   // 闭区间补偿带（见上注）
+            pcl::ConditionAnd<pcl::PointXYZ>::Ptr condAnd(
+                new pcl::ConditionAnd<pcl::PointXYZ>);
+            pcl::ConditionOr<pcl::PointXYZ>::Ptr condOr(
+                new pcl::ConditionOr<pcl::PointXYZ>);
+            pcl::ConditionBase<pcl::PointXYZ>::Ptr cond =
+                (op == 0) ? boost::static_pointer_cast<pcl::ConditionBase<pcl::PointXYZ>>(condAnd)
+                          : boost::static_pointer_cast<pcl::ConditionBase<pcl::PointXYZ>>(condOr);
+            static const char* kFields[3] = { "x", "y", "z" };
+            for (int a = 0; a < 3; ++a) {
+                const double lo = p[1 + (size_t)a * 2];
+                const double hi = p[2 + (size_t)a * 2];
+                if (std::isfinite(lo))
+                    cond->addComparison(pcl::ComparisonBase<pcl::PointXYZ>::Ptr(
+                        new pcl::FieldComparison<pcl::PointXYZ>(
+                            kFields[a], pcl::ComparisonOps::GT, lo - kEps)));
+                if (std::isfinite(hi))
+                    cond->addComparison(pcl::ComparisonBase<pcl::PointXYZ>::Ptr(
+                        new pcl::FieldComparison<pcl::PointXYZ>(
+                            kFields[a], pcl::ComparisonOps::LT, hi + kEps)));
+            }
+            pcl::ConditionalRemoval<pcl::PointXYZ> f;
+            f.setCondition(cond);
+            f.setKeepOrganized(false);   // 无序输入：剔除即移除（非置 NaN 占位）
+            f.setInputCloud(src);
+            dst = CloudPtr(new CloudXYZ);
+            f.filter(*dst);
+            break;
+        }
+        case 12: {  // medianFilter：中值滤波（1.7.0 新增；PCL MedianFilter——
+                    // 椒盐噪声/平滑）。1.9 版 applyFilter 硬性要求有序点云
+                    // （isOrganized = height>1，否则报错空出），本接口输入为
+                    // 无序 SoA → 按"1 列 × N 行"伪有序化呈递：窗口沿输入点序
+                    // 滑动、仅平滑 z（x/y 保持不变），非有限中心点原样保留、
+                    // 非有限邻点不参与取中值（见 api.h 表注）
+            if (!p || n != 1) return -3;
+            int win = ParamInt(p, 0);
+            if (win < 3) return -3;
+            if (win % 2 == 0) ++win;   // 偶数自动 +1（与表注口径一致）
+            CloudPtr org(new CloudXYZ(*src));
+            org->width = 1;
+            org->height = (uint32_t)org->size();
+            org->is_dense = false;
+            pcl::MedianFilter<pcl::PointXYZ> f;
+            f.setInputCloud(org);
+            f.setWindowSize(win);
+            dst = CloudPtr(new CloudXYZ);
+            f.filter(*dst);
+            break;
+        }
+        case 13: {  // gridMinimum：格网最低点（1.7.0 新增；PCL GridMinimum——
+                    // XY 平面分格，每格保留 z 最低点，地面提取/粗下采样）。
+                    // 非有限点由 PCL 按 is_dense=false 自行剔除
+            if (!p || n != 1) return -3;
+            if (!(p[0] > 0.0)) return -3;
+            pcl::GridMinimum<pcl::PointXYZ> f((float)p[0]);   // 格网分辨率在构造时给定（无默认构造）
+            f.setInputCloud(src);
+            f.setResolution((float)p[0]);
+            dst = CloudPtr(new CloudXYZ);
+            f.filter(*dst);
             break;
         }
         default:
@@ -693,13 +1061,23 @@ int Point3DAlg_FitModel(const Point3DAlg_PointCloud* in, int method, int fit,
     const int rcIn = CheckInOnly(in);
     if (rcIn != 0)
         return rcIn;
-    if (method < 0 || method > 6 || fit < 0 || fit > 2)
+    if (method < 0 || method > 9 || fit < 0 || fit > 2)
         return -3;
     if (!(distance_threshold > 0.0))
         return -3;
-    // 系数布局长度：plane/sphere = 4，line3D = 6，torus = 8，
-    // cylinder/circle3D/cone = 7（见 api.h 表）
-    const int needed = (method <= 1) ? 4 : (method == 5 ? 6 : (method == 6 ? 8 : 7));
+    // 系数布局长度：plane/sphere/parallelPlane/perpendicularPlane = 4，
+    // line3D/stick = 6，torus = 8，cylinder/circle3D/cone = 7（见 api.h 表）
+    int needed;
+    switch (method) {
+    case 0:
+    case 1:
+    case 7:
+    case 8: needed = 4; break;
+    case 5:
+    case 9: needed = 6; break;
+    case 6: needed = 8; break;
+    default: needed = 7; break;   // method 2/3/4
+    }
     if (!out_coeffs || coeffs_capacity < needed) {
         *out_inlier_count = needed;   // 两段式：先查所需长度再分配重调
         return -3;
@@ -789,6 +1167,42 @@ int Point3DAlg_FitModel(const Point3DAlg_PointCloud* in, int method, int fit,
             }
             out_coeffs[6] = majorR;                              // 主半径（管心圆）
             out_coeffs[7] = tubeR;                               // 管半径
+            break;
+        }
+        case 7: {   // parallelPlane：[a,b,c,d]（1.7.0 新增；轴固定 +Z：法向 ⊥ Z
+                    // 的竖直平面（墙面/立面），eps 固定 5°；三种 fit 均支持——
+                    // 手写约束搜索对三 fit 统一计数评分，见 FitPlaneConstrained 注）
+            std::vector<float> coeffs;
+            if (FitPlaneConstrained(src, false, distance_threshold,
+                                    coeffs, inlierIdx) != 0 ||
+                coeffs.size() < 4)
+                return -2;
+            for (int i = 0; i < 4; ++i)
+                out_coeffs[i] = (double)coeffs[(size_t)i];
+            break;
+        }
+        case 8: {   // perpendicularPlane：[a,b,c,d]（1.7.0 新增；轴固定 +Z：法向
+                    // ∥ Z 的水平面（台面/端面），eps 固定 5°；三种 fit 均支持，
+                    // 见 FitPlaneConstrained 注）
+            std::vector<float> coeffs;
+            if (FitPlaneConstrained(src, true, distance_threshold,
+                                    coeffs, inlierIdx) != 0 ||
+                coeffs.size() < 4)
+                return -2;
+            for (int i = 0; i < 4; ++i)
+                out_coeffs[i] = (double)coeffs[(size_t)i];
+            break;
+        }
+        case 9: {   // stick：[px,py,pz, dx,dy,dz]（1.7.0 新增；布局同 line3D——
+                    // PCL stick 系数第 7 值 line_width 本接口不输出。仅 RANSAC：
+                    // fit 1/2 回退（参数被忽略，三 fit 同结果）——实现为手写
+                    // 点对搜索，见 api.h 支持度表与 FitStickRansac 注）
+            std::vector<float> coeffs;
+            if (FitStickRansac(src, distance_threshold, coeffs, inlierIdx) != 0 ||
+                coeffs.size() < 6)
+                return -2;
+            for (int i = 0; i < 6; ++i)
+                out_coeffs[i] = (double)coeffs[(size_t)i];
             break;
         }
         default: {  // cone：[ax,ay,az, dx,dy,dz, 半开角弧度]（仅 RANSAC）

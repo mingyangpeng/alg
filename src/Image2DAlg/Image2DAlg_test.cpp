@@ -214,7 +214,7 @@ static void testVersionAndLifecycle()
 
     check(ver != NULL && ver[0] != '\0', "GetVersion 非空");
 
-    check(ver != NULL && std::strcmp(ver, "2.7.0") == 0, "GetVersion = 2.7.0（2.7.0 扩展：HandEyeCalib/ProjectPoints/UndistortImagePoints/UndistortRectifyMap/CalibReprojectionStats）");
+    check(ver != NULL && std::strcmp(ver, "2.8.0") == 0, "GetVersion = 2.8.0（2.8.0 扩展：FitLineRobust/FitEllipseAMS/FitEllipseDirect——2D 稳健拟合变体）");
 
     bool hasDigit = false;
 
@@ -7805,6 +7805,97 @@ static void testCalib2p7()
 
 }
 
+// ---------------- 2.8.0 批次：稳健直线 / AMS·Direct 椭圆拟合 ----------------
+static void testRobustFit2p8()
+{
+    std::printf("== RobustFit（FitLineRobust / FitEllipseAMS / FitEllipseDirect）==\n");
+
+    // FitLineRobust：L2 精确线 + HUBER 抗外点（真线 y = 2x + 1）
+    {
+        std::vector<float> v;
+        for (int i = 0; i < 20; ++i) {
+            v.push_back((float)i);
+            v.push_back(2.0f * (float)i + 1.0f);
+        }
+        Image2DAlg_LineFit lf;
+        std::memset(&lf, 0, sizeof(lf));
+        check(Image2DAlg_FitLineRobust(v.data(), 20, 2, 0.0, &lf) == 0,
+              "FitLineRobust L2 返回 0");
+        std::fprintf(stderr, "[LR2] v=(%.4f,%.4f) p=(%.3f,%.3f)\n", lf.vx, lf.vy, lf.x0, lf.y0);   // TEMP
+        check(std::fabs(lf.vx - 1.0 / std::sqrt(5.0)) < 1e-6 &&
+                  std::fabs(lf.vy - 2.0 / std::sqrt(5.0)) < 1e-6,
+              "FitLineRobust L2 方向 = (1,2)/√5（解析值）");
+        // cv 口径：x0,y0 为线上任意一点（实测 = 投影点 (9.5,20)）——
+        // 断言"该点在真线上"而非"等于首点"
+        check(std::fabs(lf.y0 - (2.0 * lf.x0 + 1.0)) < 1e-6,
+              "FitLineRobust (x0,y0) 落在真线 y=2x+1 上（线上点语义）");
+        // HUBER 抗外点：3 个远端离群 → 线仍贴近真值
+        std::vector<float> v2 = v;
+        v2.push_back(5.0f);  v2.push_back(-30.0f);
+        v2.push_back(6.0f);  v2.push_back(-35.0f);
+        v2.push_back(7.0f);  v2.push_back(45.0f);
+        Image2DAlg_LineFit lh;
+        std::memset(&lh, 0, sizeof(lh));
+        check(Image2DAlg_FitLineRobust(v2.data(), 23, 7, 0.0, &lh) == 0,
+              "FitLineRobust HUBER 返回 0");
+        const double devH = std::fabs(lh.vx - 1.0 / std::sqrt(5.0)) +
+                            std::fabs(lh.vy - 2.0 / std::sqrt(5.0));
+        std::fprintf(stderr, "[LR] v=(%.4f,%.4f) p=(%.3f,%.3f)\n", lf.vx, lf.vy, lf.x0, lf.y0);
+        check(devH < 0.15, "FitLineRobust HUBER 离群下仍贴近真线（方向偏差 < 0.15）");
+        // 错误路径
+        check(Image2DAlg_FitLineRobust(NULL, 20, 2, 0.0, &lf) == -1, "xy=NULL -> -1");
+        check(Image2DAlg_FitLineRobust(v.data(), 1, 2, 0.0, &lf) == -3, "count=1 -> -3");
+        check(Image2DAlg_FitLineRobust(v.data(), 20, 0, 0.0, &lf) == -3,
+              "dist_type=0(DIST_USER) -> -3");
+        check(Image2DAlg_FitLineRobust(v.data(), 20, 9, 0.0, &lf) == -3,
+              "dist_type=9（超出枚举）-> -3");
+        check(Image2DAlg_FitLineRobust(v.data(), 20, 2, 0.0, NULL) == -1, "out=NULL -> -1");
+    }
+
+    // FitEllipseAMS / FitEllipseDirect：合成椭圆（中心 (50,40) 长轴 60 短轴 40 角 25°）
+    {
+        std::vector<float> v;
+        const double ang = 25.0 * 3.14159265358979323846 / 180.0;
+        const double ca = std::cos(ang), sa = std::sin(ang);
+        for (int i = 0; i < 60; ++i) {
+            const double t = 2.0 * 3.14159265358979323846 * i / 60.0;
+            const double lx = 30.0 * std::cos(t);
+            const double ly = 20.0 * std::sin(t);
+            v.push_back((float)(50.0 + ca * lx - sa * ly));
+            v.push_back((float)(40.0 + sa * lx + ca * ly));
+        }
+        Image2DAlg_EllipseFit e1, e2;
+        std::memset(&e1, 0, sizeof(e1));
+        std::memset(&e2, 0, sizeof(e2));
+        check(Image2DAlg_FitEllipseAMS(v.data(), 60, &e1) == 0, "FitEllipseAMS 返回 0");
+        check(Image2DAlg_FitEllipseDirect(v.data(), 60, &e2) == 0, "FitEllipseDirect 返回 0");
+        // OpenCV RotatedRect 口径：width 对应 rect 局部 x 轴——AMS/Direct 对
+        // 25° 椭圆返回 wh=(40,60) + ang=115°（与 FitEllipse 的 (60,40)+25° 等
+        // 价——长短轴互换、角度差 90°，同为正确解），双口径放行
+        const bool ok1 = std::fabs(e1.cx - 50.0) < 1.0 && std::fabs(e1.cy - 40.0) < 1.0 &&
+                         ((std::fabs(e1.width - 60.0) < 2.0 && std::fabs(e1.height - 40.0) < 2.0) ||
+                          (std::fabs(e1.width - 40.0) < 2.0 && std::fabs(e1.height - 60.0) < 2.0));
+        const bool ok2 = std::fabs(e2.cx - 50.0) < 1.0 && std::fabs(e2.cy - 40.0) < 1.0 &&
+                         ((std::fabs(e2.width - 60.0) < 2.0 && std::fabs(e2.height - 40.0) < 2.0) ||
+                          (std::fabs(e2.width - 40.0) < 2.0 && std::fabs(e2.height - 60.0) < 2.0));
+        std::fprintf(stderr, "[AMS] c=(%.3f,%.3f) wh=(%.3f,%.3f) ang=%.2f\n", e1.cx, e1.cy, e1.width, e1.height, e1.angle);
+        check(ok1, "FitEllipseAMS 中心/长短轴恢复（±1/±2）");
+        std::fprintf(stderr, "[DIR] c=(%.3f,%.3f) wh=(%.3f,%.3f) ang=%.2f\n", e2.cx, e2.cy, e2.width, e2.height, e2.angle);
+        check(ok2, "FitEllipseDirect 中心/长短轴恢复（±1/±2）");
+        // 角度（OpenCV 约定下 25° 与 115° 等价——长短轴互换判定，双口径放行）
+        const bool ang1 = std::fabs(std::fabs(e1.angle) - 115.0) < 3.0 ||
+                          std::fabs(std::fabs(e1.angle) - 25.0) < 3.0;
+        const bool ang2 = std::fabs(std::fabs(e2.angle) - 115.0) < 3.0 ||
+                          std::fabs(std::fabs(e2.angle) - 25.0) < 3.0;
+        check(ang1, "FitEllipseAMS 角度 ≈ 115°/25°（wh 互换对应口径）");
+        check(ang2, "FitEllipseDirect 角度 ≈ 115°/25°（同上）");
+        // 错误路径
+        check(Image2DAlg_FitEllipseAMS(NULL, 60, &e1) == -1, "AMS xy=NULL -> -1");
+        check(Image2DAlg_FitEllipseDirect(v.data(), 4, &e2) == -3, "Direct count=4 -> -3");
+        check(Image2DAlg_FitEllipseAMS(v.data(), 60, NULL) == -1, "AMS out=NULL -> -1");
+    }
+}
+
 
 
 int main()
@@ -7868,6 +7959,8 @@ int main()
     testFreqMatch2p6();
 
     testCalib2p7();
+
+    testRobustFit2p8();
 
     testRoiFamily();
 

@@ -3912,4 +3912,95 @@ int Image2DAlg_CalibReprojectionStats(const double* obj_pts, const double* img_p
     }
 }
 
+// ---------------- 稳健拟合扩展（2.8.0 新增） ----------------
+
+// 稳健直线拟合（cv::fitLine 透传）：dist_type/param 直传 cv 的 distType/param，
+// 扁平 float 点数组 → std::vector<cv::Point2f> 桥接。与 FitLine 经
+// ImageProcessor::fitLine 整数点接口（内部按像素取整、固定 DIST_L2）不同，
+// 本接口直接透传 cv、保留浮点精度，并开放 M-estimator 稳健距离族（对毛刺/
+// 离群点按残差反比迭代加权，抑制外点拉偏）。reps/aeps 用 cv 文档推荐默认
+// 0.01（未暴露进 C 签名）；rms 复算口径同 FitLine：全体点到直线垂直距离
+// （叉积模）的 RMS——含离群点，用于质量评估
+int Image2DAlg_FitLineRobust(const float* xy, int count, int dist_type,
+                             double param, Image2DAlg_LineFit* out) {
+    if (!xy || !out) return -1;
+    if (count < 2) return -3;
+    // dist_type 直传 cv::fitLine 的 distType——已核对 opencv2/imgproc.hpp
+    // enum DistTypes 实测数值：1=DIST_L1 2=DIST_L2 3=DIST_C 4=DIST_L12
+    // 5=DIST_FAIR 6=DIST_WELSCH 7=DIST_HUBER；DIST_USER=-1（用户自定义代价，
+    // 本库不支持）；枚举到 DIST_HUBER=7 为止，无 TRUNC
+    if (dist_type < 1 || dist_type > 7) return -3;
+    try {
+        std::vector<cv::Point2f> pts;
+        pts.reserve(count);
+        for (int i = 0; i < count; ++i)
+            pts.push_back(cv::Point2f(xy[i * 2], xy[i * 2 + 1]));
+        std::vector<float> line;
+        cv::fitLine(pts, line, dist_type, param, 0.01, 0.01);
+        out->vx = line[0];
+        out->vy = line[1];
+        out->x0 = line[2];
+        out->y0 = line[3];
+        double sum = 0.0;   // 点到直线距离（叉积模）RMS——口径同 FitLine
+        for (int i = 0; i < count; ++i) {
+            const double dx = xy[i * 2] - out->x0, dy = xy[i * 2 + 1] - out->y0;
+            const double cross = dx * out->vy - dy * out->vx;
+            sum += cross * cross;
+        }
+        out->rms = std::sqrt(sum / count);
+        return 0;
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+// 椭圆拟合（AMS 法，cv::fitEllipseAMS 透传）：AMS = "Approximate Mean Square"
+// ——在代数拟合代价上叠加一阶导数矩阵约束做广义特征值求解，对噪声/离群点
+// 比 FitEllipse（ImageProcessor::fitEllipse 标准代数法）更稳。RotatedRect →
+// EllipseFit 转换口径同 FitEllipse
+int Image2DAlg_FitEllipseAMS(const float* xy, int count, Image2DAlg_EllipseFit* out) {
+    if (!xy || !out) return -1;
+    if (count < 5) return -3;
+    try {
+        std::vector<cv::Point2f> pts;
+        pts.reserve(count);
+        for (int i = 0; i < count; ++i)
+            pts.push_back(cv::Point2f(xy[i * 2], xy[i * 2 + 1]));
+        cv::RotatedRect e = cv::fitEllipseAMS(pts);
+        if (e.size.width <= 0 || e.size.height <= 0) return -3;
+        out->cx = e.center.x;
+        out->cy = e.center.y;
+        out->width = e.size.width;
+        out->height = e.size.height;
+        out->angle = e.angle;
+        return 0;
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
+// 椭圆拟合（Direct 法，cv::fitEllipseDirect 透传）：Fitzgibbon 直接最小二乘
+// （偏心修正，4·Axx·Ayy − Axy² > 0 椭圆性约束），高偏心（细长）椭圆比标准
+// 代数法残差更小。其余口径同 FitEllipseAMS
+int Image2DAlg_FitEllipseDirect(const float* xy, int count, Image2DAlg_EllipseFit* out) {
+    if (!xy || !out) return -1;
+    if (count < 5) return -3;
+    try {
+        std::vector<cv::Point2f> pts;
+        pts.reserve(count);
+        for (int i = 0; i < count; ++i)
+            pts.push_back(cv::Point2f(xy[i * 2], xy[i * 2 + 1]));
+        cv::RotatedRect e = cv::fitEllipseDirect(pts);
+        if (e.size.width <= 0 || e.size.height <= 0) return -3;
+        out->cx = e.center.x;
+        out->cy = e.center.y;
+        out->width = e.size.width;
+        out->height = e.size.height;
+        out->angle = e.angle;
+        return 0;
+    } catch (const cv::Exception&) {
+        return -99;
+    }
+}
+
 } // extern "C"

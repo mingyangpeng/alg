@@ -74,6 +74,12 @@
 //            CalibReprojectionStats 重投影误差统计
 //            ——来源：批次 C 4.3/4.4：手眼标定与标定增强
 //
+//   2.8.0  + 稳健拟合变体 3 算子（OpenCV 现成函数透传）：FitLineRobust 稳健
+//            直线拟合（cv::fitLine distType/param 全透传，M-estimator 稳健族）/
+//            FitEllipseAMS 椭圆 AMS 拟合（近似均方，对噪声/离群更稳）/
+//            FitEllipseDirect 椭圆 Direct 拟合（Fitzgibbon 直接最小二乘，
+//            偏心修正）——来源：批次 D 5.4：2D 稳健拟合变体
+//
 // 【通道语义】Image2DAlg_Image.channels 支持 1（灰度）/ 3（BGR）/ 4（BGRA），
 //   data 为紧排像素（行步长 = width * channels，无对齐填充）：
 //   * 通用算子保持输入真实通道数（1→1、3→3、4→4，alpha 随通道参与运算）；
@@ -1761,6 +1767,49 @@ IMAGE2DALG_EXPORT int Image2DAlg_CalibReprojectionStats(const double* obj_pts, c
                                                         const double* kmat, const double* dist_coeffs,
                                                         int dist_count, double* out_errors,
                                                         double* out_mean, double* out_rms, double* out_max);
+
+// ---------------- 2.8.0 批次：稳健直线 / AMS·Direct 椭圆拟合 ----------------
+// （来源：批次 D 5.4：2D 稳健拟合变体。三算子均为 OpenCV 现成函数透传；
+//  点集输入为扁平 float 数组 [x0,y0,x1,y1,...]。与 FitLine / FitEllipse 经
+//  ImageProcessor 整数点接口（内部按像素取整）不同，本批直接透传 cv 接口、
+//  保留浮点精度。）
+
+/// 稳健直线拟合（cv::fitLine 透传，distType/param 全透传）。
+/// 与 FitLine 的差异：FitLine 固定 cv 默认 DIST_L2（最小二乘，外点会拉偏
+/// 结果）；本接口透传 M-estimator 稳健距离族——HUBER/WELSCH/FAIR 等低崩溃
+/// 代价函数迭代加权（按残差反比调权重），毛刺/离群点场景结果更稳。
+/// [in]  xy/count   点集（count >= 2，否则 -3）
+/// [in]  dist_type  M-estimator 距离类型，直传 cv::fitLine 的 distType
+///                  （已核对 opencv2/imgproc.hpp enum DistTypes 实测数值）：
+///                  1=DIST_L1 2=DIST_L2 3=DIST_C 4=DIST_L12 5=DIST_FAIR
+///                  6=DIST_WELSCH 7=DIST_HUBER；其他 → -3
+///                  （DIST_USER=-1 为用户自定义代价，本库不支持；枚举到
+///                  DIST_HUBER=7 为止，无 TRUNC）
+/// [in]  param      稳健代价函数参数 C（FAIR/C/WELSCH/HUBER 用；0 = cv 自动
+///                  取最优默认——FAIR 1.3998 / WELSCH 2.9846 / HUBER 1.345）
+/// [out] out        方向 / 线上一点 / 残差（结构同 FitLine；rms 复算口径同
+///                  FitLine——全体点到直线垂直距离（叉积模）的 RMS，反映
+///                  全体点（含离群点）对拟合直线的残差水平）
+/// 返回：0 成功；-1 空指针；-3 count < 2 或 dist_type 非 1~7；-99 OpenCV 异常。
+IMAGE2DALG_EXPORT int Image2DAlg_FitLineRobust(const float* xy, int count, int dist_type,
+                                               double param, Image2DAlg_LineFit* out);
+
+/// 椭圆拟合（AMS 法，cv::fitEllipseAMS 透传）：AMS = "Approximate Mean Square"
+/// 近似均方——在代数拟合代价上叠加一阶导数矩阵约束做广义特征值求解，对
+/// 噪声 / 离群点比 FitEllipse 的标准代数拟合更稳。
+/// [in]  xy/count  点集（count >= 5，否则 -3）
+/// [out] out       中心 / 全轴长（非半轴）/ 旋转角（转换口径同 FitEllipse：
+///                 cv RotatedRect 的 center/size/angle 直取）
+/// 注意：点近共线等退化输入 cv 内部求解可能抛异常 → -99（同 FitEllipse 先例）。
+/// 返回：0 成功；-1 空指针；-3 count < 5；-99 OpenCV 异常（退化输入）。
+IMAGE2DALG_EXPORT int Image2DAlg_FitEllipseAMS(const float* xy, int count,
+                                               Image2DAlg_EllipseFit* out);
+
+/// 椭圆拟合（Direct 法，cv::fitEllipseDirect 透传）：Fitzgibbon 直接最小二乘
+/// （偏心修正，4·Axx·Ayy − Axy² > 0 椭圆性约束），高偏心（细长）椭圆比标准
+/// 代数拟合残差更小。其余契约同 FitEllipseAMS。
+IMAGE2DALG_EXPORT int Image2DAlg_FitEllipseDirect(const float* xy, int count,
+                                                  Image2DAlg_EllipseFit* out);
 
 #ifdef __cplusplus
 }

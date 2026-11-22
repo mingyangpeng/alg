@@ -1,15 +1,15 @@
 ﻿#ifndef IMAGE2DALG_CALIB_H
 #define IMAGE2DALG_CALIB_H
 
-// Image2DAlg_Calib —— 相机标定（单目 / 双目立体校正 / 鱼眼 Mei 等距模型）。
+// Image2DAlg_Calib —— 相机标定（单目 / 双目立体校正 / 鱼眼 Mei 除法模型）。
 // 纯 C++ 手写实现（基于 Eigen 线性代数，OpenCV 仅用图像容器与角点检测数据结构）。
 //
 // Mei 模型（Mei et al. 2007, "Single View Point Omnidirectional Camera Calibration
-// from Planar Grids"）—— 等距投影统一球面模型：
+// from Planar Grids"）—— 统一球面除法模型：
 //   世界点 X → 单位球面投影 x_s = X/||X||（以镜面中心为原点）
-//   → 极坐标投影 r = ξ + f·θ(ρ)，θ = atan2(√(x²+y²), z) 为球面入射角
-//   → 畸变 s(ρ) 多项式 → 像素坐标 u = c + G·m + s
-// 线性部分：u = K·m + 畸变；K = [[f,0,cx],[0,f,cy],[0,0,1]]（f 为广义焦距）
+//   → 除法模型投影 u−c = f·s/(ξ+cosθ)（各向异性 fx/fy：u−cx = fx·sx/(ξ+cosθ)、
+//     v−cy = fy·sy/(ξ+cosθ)；θ = atan2(√(x²+y²), z) 为球面入射角）
+//   → 广义畸变 meiC/D/E 多项式（1 + C·r² + D·r⁴ + E·r⁶，通常很小、默认 0）→ 像素
 // ξ ∈ [0,1]：0=理想针孔，1=纯双曲面镜。
 //
 // 单目：张正友法求初值 → 非线性最小二乘（Levenberg-Marquardt）精化（含 Mei 鱼眼）。
@@ -52,7 +52,7 @@ struct IMAGE2DALG_EXPORT StereoRectify {
     cv::Size rectSize;                   // 校正后图像尺寸
 };
 
-// ---------------- Mei 等距模型：投影 / 反投影 ----------------
+// ---------------- Mei 除法模型：投影 / 反投影 ----------------
 
 /// 世界点（相机系）→ 像素坐标。
 /// [in]  X       相机系世界点 [x,y,z]（零向量或 z 落在 ξ+cosθ ≈ 0 的奇异侧 → false）
@@ -65,7 +65,7 @@ IMAGE2DALG_EXPORT bool MeiProjectPoint(
 /// [in]  u/v      像素坐标
 /// [in]  K        内参
 /// [out] out_dir  相机系单位方向向量
-/// 迭代求解（Mei 模型反投影无闭式解，牛顿法 3~5 次收敛）；
+/// 迭代求解（Mei 模型反投影无闭式解，牛顿迭代上限 30 次、|Δθ|<1e-12 判收敛）；
 /// 返回 false = θ 求解不收敛或奇异分母近零（像素超出有效视场）。
 IMAGE2DALG_EXPORT bool MeiUnprojectPixel(
     double u, double v, const CameraIntrinsics& K, double out_dir[3]);
@@ -113,7 +113,7 @@ IMAGE2DALG_EXPORT bool CalibrateMono(
 
 // ---------------- 单目鱼眼标定（Mei 模型） ----------------
 
-/// 鱼眼单目标定（Mei 等距模型）：先用针孔初值，再 LM 精化 xi + 畸变。
+/// 鱼眼单目标定（Mei 除法模型）：先用针孔初值，再 LM 精化 xi + 畸变。
 /// 输入要求同 CalibrateMono（鱼眼图上检测到的角点）。
 IMAGE2DALG_EXPORT bool CalibrateFisheyeMei(
     const std::vector<std::vector<cv::Point2f>>& imagePoints,

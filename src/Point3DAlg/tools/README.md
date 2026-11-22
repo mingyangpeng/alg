@@ -116,7 +116,7 @@ cmake --build build --config Release --target Point3DAlg_RegistTool
 4. P 保存，把打印的 init_transform 值粘进 ComUI 节点
 ```
 
-## 算法验证结果（19 项 check 全过）
+## 算法验证结果（26 项 check 全过）
 
 | 验证项 | 结果 |
 |---|---|

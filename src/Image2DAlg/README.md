@@ -24,7 +24,7 @@ Image2DAlg.dll
 | `Image2DAlg_Ops.cpp` | 通用处理与测量算子（复用 ImageProcessor） |
 | `Image2DAlg_Calib.h/.cpp` | 标定接口类（单目/双目/鱼眼 Mei、立体校正），C++ API |
 | `Image2DAlg_test.cpp` | C ABI 测试入口（ctest 第 3 项） |
-| `Image2DAlg_CalibTest.cpp` | 标定模拟数据验证（未注册 ctest） |
+| `Image2DAlg_CalibTest.cpp` | 标定模拟数据验证（2026-11-20 起 add_test 注册 ctest，ctest 第 13 项） |
 
 ComUI 适配层在 `integration/comui/Image2DAlg_comui.cpp`，节点声明在 `integration/comui/image2d_*.node.json`。
 

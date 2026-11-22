@@ -57,7 +57,7 @@ ctest --test-dir build -C Release
 - **5 个算法 DLL**：CommonAlg.dll、ShapelyAlg.dll、Image2DAlg.dll、Point3DAlg.dll、BusinessAlg.dll
 - **105 个 node.json**（image2d 70 + point3d 33 + business 2，随各模块迭代持续增长；逐接口功能/参数见 docs/接口文档.md，全量清单以 scripts/make_delivery_checklist.py 与 scripts/_coverage_matrix.md 为准）
 - **14 个测试/验证 exe**（13 项注册 ctest + Point3DAlg_test）：CommonAlg_test.exe、ShapelyAlg_test.exe、Image2DAlg_test.exe、Image2DAlg_CalibTest.exe、Point3DAlg_RegistTest.exe、Point3DAlg_DomeFitTest.exe、Point3DAlg_RegionPlaneTest.exe、Point3DAlg_CloudDiffTest.exe、Point3DAlg_CircleFitTest.exe、Point3DAlg_ProfileTest.exe、Point3DAlg_BumpReportTest.exe、Point3DAlg_SickSynthTest.exe、BusinessAlg_test.exe + Point3DAlg_test.exe（依赖 Z: 扫描数据，不注册 ctest；另含 ShapelyAlg_demo.exe、Point3DAlg_RegistTool.exe）
-- **第三方运行时**：opencv_world440、OpenNI2、geos、pcl_*_release.dll（全量 20 个，代码直接依赖其中 11 个子模块——common/io/filters/features/kdtree/keypoints/octree/registration/sample_consensus/segmentation/surface）等
+- **第三方运行时**：opencv_world440、OpenNI2、geos、pcl_*_release.dll（全量 20 个，代码直接依赖其中 12 个子模块——common/io/filters/features/kdtree/keypoints/octree/registration/sample_consensus/segmentation/surface/visualization，visualization 仅 Point3DAlg_RegistTool 可视化工具用）等
 
 交付前核对：`python -I scripts/make_delivery_checklist.py` 生成 markdown 交付清单并自动核对必备项（5 个算法 DLL / 全量 node.json / pcl 20 个，缺失即告警），退出码 0=齐全 / 1=缺失 / 2=目录不存在。
 一键只读验证：`scripts\verify_image2d.cmd` 与 `scripts\verify_point3d.cmd`（测试 exe / dumpbin 导出与依赖 / ctest / GetVersion 五源一致性 / 交付清单逐项核对）。scripts/ 下另存临时探针与链路脚本（`_wafer_*.py`、`_analyze_wafer.py`、`_test_comui_*.py` 等，`_` 前缀不入文档索引）。

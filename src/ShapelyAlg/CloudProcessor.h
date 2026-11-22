@@ -815,7 +815,8 @@ public:
 
     /// 点云到闭合网格的带符号距离（内负外正）。
     /// 口径：距离 = 点-三角面精确最近距离（同 measurePointToMeshDistance）；
-    /// 符号 = 从点沿 +X 发射射线，穿越三角面次数奇偶（奇 = 内）。
+    /// 符号 = 从点沿固定斜向射线（单位化 (1,0.3,0.2)）发射，穿越三角面次数奇偶
+    /// （奇 = 内；轴对齐射线在轴对齐网格会命中共享棱双重计数，故取斜向）。
     /// 注意：仅闭合（水密）网格符号有物理意义；非水密网格符号无意义（距离仍准）。
     /// 非有限点输出 NaN。返回：src 为空/mesh 无效返回空数组。
     static std::vector<float> measurePointToMeshSignedDistance(const CloudConstPtr& src,
@@ -867,7 +868,8 @@ public:
     /// 两平面交线。
     /// [out] out_point  交线上一点（三方程 n1·x=-d1, n2·x=-d2, dir·x=0 的解 = 最靠近原点的交点）
     /// [out] out_dir    交线方向（n1×n2 单位化）
-    /// 返回：false = 非法输入 / 近平行（|n1×n2| < 1e-9，无交线或交线在无穷远）。
+    /// 返回：false = 非法输入 / 近平行（|n̂1×n̂2| < 1e-9，n̂1×n̂2 归一化后判定、
+    /// 阈值作用于单位法向叉积；无交线或交线在无穷远）。
     /// 用途：折弯件两面的交棱定位、两面夹角判定（配合 measurePlaneAngle）。
     static bool measurePlaneIntersection(const float plane1[4], const float plane2[4],
                                           float out_point[3], float out_dir[3]);

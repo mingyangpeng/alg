@@ -3,9 +3,13 @@ build/
 build_*/
 output/
 Testing/
+dispatch/render/
+dispatch/archive/   # 大体积历史文档归档不入库，权威文档为 docs/接口文档.md
 
 # 本地工具状态 / 依赖目录
 .mimosa/
+.workbuddy/
+.zcode/
 node_modules/
 
 # 本地测试输出（大体积，不入库）
@@ -28,10 +32,10 @@ sick_depth_fov.png
 # 临时文件
 *.log
 *.tmp
+_o_*
 #pcl1.9.1的库太大，跳过
  
 # Python 工具
 __pycache__/
 *.pyc
-regist_T*.txt
-regist_truth.txt
+regist_*.txt

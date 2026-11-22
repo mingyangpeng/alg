@@ -24,6 +24,15 @@
 // 内存约定：全部 out_* 缓冲由本库 malloc，统一用 Point3DAlg_FreeBuffer
 // 释放（Point3DAlg_api.h）；均为**独立副本**（非类内部缓冲），释放后句柄
 // 仍可用。输出指针在出错时统一置 NULL/0。
+//
+// 节点化状态（对照 scripts/_coverage_matrix.md §二）：
+//   句柄族 CreateSickReader / LoadRawInto / FreeSickReader —— C API only（不透明
+//     句柄状态无法经节点端口流转，节点化需 ABI v2）；
+//   GetSickInfo / GetSickRowY / GetSickIntensity / GetSickRaw —— C 类，无直连节点
+//     （诊断/调试口径；其中 GetSickIntensity / GetSickRaw 已由 sick_intensity /
+//     sick_raw 节点读图覆盖，GetSickInfo / GetSickRowY 无节点）；
+//   StitchQuality —— A 类未直连节点化（comui 有一次性编排节点
+//     alg.point3d.sick_quality 封装，句柄不跨节点）；GetFovBoxes —— A 类未节点化。
 
 #include "AlgExport.h"
 #include "Point3DAlg_SickReader.h"   // Point3DAlg_SickConfig / StitchQualityResult

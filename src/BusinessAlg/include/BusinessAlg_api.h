@@ -32,6 +32,7 @@ extern "C" {
 //       min_z / max_z 高度区间；roi_x/y/w/h 感兴趣区域矩形
 // 输出：defect_ratio（ROI 内有效点投影面积 / ROI 面积）、area（有效投影面积，mm²）
 // 返回：0 成功；-1 空指针/参数非法（count<=0、roi_w/h<=0）；2 ROI 内无有效投影
+//       （本接口沿用历史正值约定，非全局 -N 错误码族）
 BUSINESSALG_EXPORT int BusinessAlg_ComputeRegionRatio(const float* xyz, int count,
                                                       double min_z, double max_z,
                                                       double roi_x, double roi_y,

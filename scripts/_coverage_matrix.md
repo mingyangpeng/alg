@@ -11,7 +11,7 @@
 
 ---
 
-## 一、Image2DAlg 完整矩阵（73 个业务 C API）
+## 一、Image2DAlg 完整矩阵（73 个业务 C API，2026-11-19 初版快照；当前 100 个业务 API，见 §五）
 
 ### 1.1 已节点化（55 / 73，本次补缺后）
 
@@ -172,7 +172,7 @@
 | 项 | 交付 | 状态 |
 |---|---|---|
 | FitCircleEx / FitCircleRobust / HoughLinesPROI / HoughCirclesROI | §一 "A（未入选）下一批首选" 4 项全部节点化：alg.image2d.fit_circle_ex / fit_circle_robust / hough_lines_proi / hough_circles_roi（适配层 2.4.0 段） | ✅ 已闭环 |
-| Image2DAlg_Laplacian / Image2DAlg_Filter2D | 2.3.0 新增 2 个 C API（总数 95→97），当批节点化 alg.image2d.laplacian / filter2d；中值/双边/高斯经审计由 Blur method 0/1/2 覆盖，不另设入口 | ✅ A 类新增即闭环 |
+| Image2DAlg_Laplacian / Image2DAlg_Filter2D / Image2DAlg_DenoiseNLMeans | 2.3.0 新增 3 个 C API（总数 95→98：Laplacian/Filter2D/DenoiseNLMeans，api.h:1298/1308/1336），当批节点化 alg.image2d.laplacian / filter2d / denoise_nlmeans；中值/双边/高斯经审计由 Blur method 0/1/2 覆盖，不另设入口 | ✅ A 类新增即闭环 |
 | Point3DAlg FitModel method 5 = line3D / FilterCloud method 10 = approxVoxel | 1.3.0 无新导出（既有接口扩取值域，C ABI 42 不变）；节点 point3d_fit_model / point3d_filter_cloud 扩 method 上限并登记 | ✅ 已闭环 |
 | Point3DAlg SaveCloudEx / KnnSearch / RadiusSearch / ThicknessMap | §二 A- 类 4 项节点化：alg.point3d.save_cloud_ex / knn_search / radius_search / thickness_map（T2 交付） | ✅ 已闭环 |
 | 节点计数 | 83 → 93（image2d 62 + point3d 29 + business 2）；id 全局唯一复核通过；声明 method 全部可在 DLL 导出表解析（Laplacian/Filter2D 核心 + 62 Comui 入口实测） | ✅ |

@@ -205,7 +205,7 @@ Point3DAlg_RegistRun(session, src, dst, params, &step);   // 策略 1~6
 | `Point3DAlg_CloudDiffTest` | 高度差 31 check | ✅ |
 | `Point3DAlg_SickSynthTest` | SICK 拼接合成 40 check | ✅ |
 | `Point3DAlg_test` | 通用 C API（合成数据 A1~A13，恒跑：滤波/裁剪/变换/IO + 体素一致性 + 拟合/分割/搜索/度量 + 八叉树空间检索 A9b + 法线/特征/关键点 + 表面重建/MeshOp + HeightMap）+ SICK 真实数据端到端 + 深层句柄族 | ❌（B 部分依赖 Z: 数据，手动跑；数据缺失打印 SKIP） |
-| `scripts/_test_comui_*.py` ×3 | ctypes 模拟宿主端到端 | 手动 |
+| `scripts/_test_comui_*.py` ×10 | ctypes 模拟宿主端到端 | 手动 |
 | `scripts/_wafer_dome_baseline.py` | DomeFit Python 基准（数值对照） | 手动 |
 
 ## 已知局限与遗留

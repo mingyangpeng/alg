@@ -1625,8 +1625,9 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiGdt(const AlgoCInput* in, AlgoC
         out->error = "match_radius 须 >= 0"; return 3;
     }
 
-    // params 组装：method 2 = [match_radius, 理论孔位...]（ParseDoubleList 上限
-    // 257 = 1 + 2×128）；method 3 = [a,b,c,d]；method 0/1 无 params
+    // params 组装：method 2 取 text#0 theoretical = [match_radius, 理论孔位...]
+    // （ParseDoubleList 上限 257 = 1 + 2×128）；method 3 取 text#1 plane_params
+    // = [a,b,c,d]；method 0/1 无 params
     double params[257] = { 0 };
     int pc = 0;
     if (method == 2) {
@@ -1640,7 +1641,7 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiGdt(const AlgoCInput* in, AlgoC
         params[0] = match_radius;
         pc = n;
     } else if (method == 3) {
-        const AlgoCParam* pp = FindParam(in, 2, 0);
+        const AlgoCParam* pp = FindParam(in, 2, 1);   // plane_params 是 text#1（text#0 = theoretical，method 2 专用）
         const int n = pp ? ParseDoubleList(pp->s, params, 4) : 0;
         if (n < 0) { out->error = "plane_params 含非数值内容（需逗号分隔数字）"; return 3; }
         if (n != 4) {

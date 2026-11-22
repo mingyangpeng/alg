@@ -1,4 +1,5 @@
 // alg 项目接口文档生成脚本（docx-js）
+// 注：docx 为历史版本生成器，现权威文档为 docs/接口文档.md。
 // 数据来源：src/*/include/*_api.h、integration/comui/*.node.json、*_comui.cpp、docs/HOST_VERIFY.md（全部实况核对）
 const {
   Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell,

@@ -759,7 +759,8 @@ POINT3DALG_EXPORT int Point3DAlg_PlaneResiduals(const Point3DAlg_PointCloud* in,
  *   -2 法线估计失败（底层返回空，理论上不发生——输入非空即有输出）；
  *   -3 method 不是 0/1、param 非法（k<3、radius<=0）；
  *   -4 内存分配失败；
- *   -99 PCL 异常。 */
+ *   -99 PCL 异常。
+ * 注：C API only（容器无法经 ABI v1 端口流转）。 */
 POINT3DALG_EXPORT int Point3DAlg_EstimateNormals(const Point3DAlg_PointCloud* in, int method,
                                                  double param, float** out_normals, int* out_count);
 
@@ -785,7 +786,8 @@ POINT3DALG_EXPORT int Point3DAlg_EstimateNormals(const Point3DAlg_PointCloud* in
  *   -3 desc_type 不是 0~3、param 非法（FPFH 半径<=0、协方差 k<3、
  *      最近邻距离 k<1）；
  *   -4 内存分配失败；
- *   -99 PCL 异常。 */
+ *   -99 PCL 异常。
+ * 注：C API only（容器无法经 ABI v1 端口流转）。 */
 POINT3DALG_EXPORT int Point3DAlg_ComputeFeature(const Point3DAlg_PointCloud* in, int desc_type,
                                                 double param, float** out_features,
                                                 int* out_dim, int* out_count);
@@ -879,7 +881,8 @@ typedef struct Point3DAlg_Mesh {
  *   -2 重建失败/空网格（含 type 8 有序点云限制、gridProjection 稀疏拒算）；
  *   -3 type 不是 0~8、param_count 与布局表不符、参数值非法（见上表）；
  *   -4 内存分配失败；
- *   -99 PCL 异常。 */
+ *   -99 PCL 异常。
+ * 注：C API only（容器无法经 ABI v1 端口流转）。 */
 POINT3DALG_EXPORT int Point3DAlg_ReconstructSurface(const Point3DAlg_PointCloud* in, int type,
                                                     const double* params, int param_count,
                                                     Point3DAlg_Mesh* out_mesh);
@@ -930,7 +933,8 @@ POINT3DALG_EXPORT void Point3DAlg_FreeMesh(Point3DAlg_Mesh* mesh);
  *   -3 op 不是 0~7、param_count 与布局表不符（含 op 5 的 params 缺失/
  *      非 3 倍数）、参数值非法（见上表）；
  *   -4 内存分配失败；
- *   -99 PCL 异常。 */
+ *   -99 PCL 异常。
+ * 注：C API only（容器无法经 ABI v1 端口流转）。 */
 POINT3DALG_EXPORT int Point3DAlg_MeshOp(const Point3DAlg_Mesh* in, int op,
                                         const double* params, int param_count,
                                         Point3DAlg_Mesh* out_mesh, double* out_scalar,
@@ -952,7 +956,8 @@ POINT3DALG_EXPORT int Point3DAlg_MeshOp(const Point3DAlg_Mesh* in, int op,
  *   用 Point3DAlg_FreeBuffer 释放。
  * 错误码：0 成功；-1 in/mesh/out_distances/out_distance_count 为 NULL、
  *   in 缺失或 mesh 无效（vertices/faces NULL、数量<=0）；-2 防御路径（底层
- *   返回空——入口已拦空输入，正常不触发）；-4/-99 同全局约定。 */
+ *   返回空——入口已拦空输入，正常不触发）；-4/-99 同全局约定。
+ * 注：C API only（容器无法经 ABI v1 端口流转）。 */
 POINT3DALG_EXPORT int Point3DAlg_MeasurePointToMeshSignedDistance(
     const Point3DAlg_PointCloud* in, const Point3DAlg_Mesh* mesh,
     float** out_distances, int* out_distance_count);
@@ -1006,7 +1011,8 @@ POINT3DALG_EXPORT int Point3DAlg_CloudToHeightMap(const Point3DAlg_PointCloud* i
  *      结构本身不携带缓冲长度，调用方须保证 cells/mask 各含
  *      width*height 个元素——长度不足属调用方错误，无法在本层校验）；
  *   -2 hm 无效（valid=0）/宽高<=0/无有效格；
- *   -4 内存分配失败；-99 PCL 异常。 */
+ *   -4 内存分配失败；-99 PCL 异常。
+ * 注：C API only（容器无法经 ABI v1 端口流转）。 */
 POINT3DALG_EXPORT int Point3DAlg_HeightMapToCloud(const Point3DAlg_HeightMap* hm,
                                                   Point3DAlg_PointCloud* out);
 

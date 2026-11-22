@@ -22,7 +22,7 @@
       "type": "int",
       "default": 0,
       "min": 0,
-      "max": 10,
+      "max": 13,
       "description": "0=voxel体素质心降采样 1=random随机采样 2=uniform等间隔采样 3=farthest最远点采样 4=removeNonFinite剔除非有限点 5=removeDuplicates去重 6=passThrough直通滤波 7=statisticalOutlier统计离群剔除 8=radiusOutlier半径离群剔除 9=conditionalXYZ条件滤波 10=approxVoxel近似体素降采样（大点云快速） 11=conditionalRemoval复合条件滤波（1.7.0，cond_op+六值区间，闭区间） 12=medianFilter中值滤波（1.7.0） 13=gridMinimum格网最低点（1.7.0，地面提取）"
     },
     {

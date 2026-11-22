@@ -38,7 +38,7 @@
 | 运行时 DLL | `geos_c.dll`、`geos.dll`（GEOS）、`opencv_world440.dll`、`OpenNI2.dll`、`pcl_*_release.dll`（部署目录全量 20 个，交付目录实况） |
 
 > **pcl 运行时 DLL 的两种口径**：
-> - 代码直接依赖的 pcl 子模块为 **10 个**（`CloudProcessor`/`CloudIO` 实际 include 的头文件只涉及 common、io、filters、features、kdtree、keypoints、octree、registration、segmentation、surface 这 10 个子模块）；
+> - 代码直接依赖的 pcl 子模块为 **11 个**（`CloudProcessor`/`CloudIO` 实际 include 的头文件只涉及 common、io、filters、features、kdtree、keypoints、octree、registration、sample_consensus、segmentation、surface 这 11 个子模块）；
 > - 部署目录全量为 **20 个**（CMake 的 `collect_third_party_runtime_dlls` 按 PCL 安装包全量收集，交付目录 `build/output/Release/` 实况如此），拷贝时以上表 20 个为准。
 
 > **必须整组拷贝**：`ShapelyAlg.dll` 直接依赖上表全部运行时 DLL，缺任一都会报"找不到模块或它的依赖"（不会指明缺哪个）。

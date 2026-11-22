@@ -28,7 +28,7 @@ find_matches_ex/match_template_masked 需 2~3 张；输出 BGRA（region_stats �
 | alg.image2d.morphology | ComuiMorphology | op(0~6) shape(0~2) ksize iterations | 形态学 |
 | alg.image2d.canny | ComuiCanny | threshold1 threshold2 | 边缘（0/255→BGRA） |
 | alg.image2d.sobel | ComuiSobel | dx dy ksize(1/3/5/7) | 梯度幅值灰度图 |
-| alg.image2d.hsv_threshold | ComuiHsvThreshold | h_lo h_hi s_lo s_hi v_lo v_hi | 颜色分割掩膜（红色跨 0 用 hsv_threshold_wrap 节点待增） |
+| alg.image2d.hsv_threshold | ComuiHsvThreshold | h_lo h_hi s_lo s_hi v_lo v_hi | 颜色分割掩膜（红色跨 0 用 hsv_threshold_wrap 节点） |
 | alg.image2d.to_gray | ComuiToGray | （无） | 灰度化 |
 | alg.image2d.resize | ComuiResize | out_width out_height interpolation | 缩放 |
 | alg.image2d.crop | ComuiCrop | x y width height | 裁剪（越界钳制） |
@@ -85,7 +85,7 @@ T9（node.json↔C 接口一致性审计）6/6 通过：method↔导出表逐字
 
 公共前置：
 
-1. 复制 `build/output/Release/` 下 5 个算法 DLL + 43 个 node.json 到宿主
+1. 复制 `build/output/Release/` 下 5 个算法 DLL + 105 个 node.json 到宿主
    `comdll/algo/`（连同第三方运行时 DLL，宿主只在本目录解析）；
    覆盖 DLL 前先退出宿主（不随 F5 卸载），改 node.json 可 F5 生效。
 2. F5 重载，底部日志应出现 6 条 `算子(JSON)已注册: <名称> <<id>> ← <文件>`；

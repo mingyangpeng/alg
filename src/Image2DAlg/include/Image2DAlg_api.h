@@ -177,7 +177,8 @@ IMAGE2DALG_EXPORT int Image2DAlg_Gamma(const Image2DAlg_Image* in, double gamma,
 /// 阈值化（输出 1 通道 0/maxval）。
 /// [in]  mode        0 固定二值 / 1 固定反二值 / 2 OTSU 自动阈值 /
 ///                   3 自适应均值 / 4 自适应高斯
-/// [in]  thresh      固定阈值（mode 0/1 有效；2~4 忽略）
+/// [in]  thresh      固定阈值（mode 0/1 有效；2~4 忽略；判定为 cv::THRESH_BINARY
+///                   严格大于口径，v == thresh 计入背景）
 /// [in]  maxval      超阈值赋值（常用 255）
 /// [in]  block_size  自适应窗口边长（mode 3/4 有效；偶数自动补奇，最小 3）
 /// [in]  C           自适应偏移常数（从邻域均值/加权均值中减去）
@@ -190,14 +191,15 @@ IMAGE2DALG_EXPORT int Image2DAlg_Threshold(const Image2DAlg_Image* in, int mode,
 /// 统一二值化（输出 1 通道）。相比 Threshold：补全 TRUNC/TOZERO、双阈值，且统一支持反转。
 /// 与 Threshold 的关系：本接口独立新增，不改变旧接口行为；mode 0~4 与 Threshold 语义一致。
 /// [in] mode
-///   0 固定二值      v >= thresh  -> maxval，否则 0
-///   1 固定反二值    v >= thresh  -> 0，否则 maxval
+///   0 固定二值      v > thresh  -> maxval，否则 0（cv::THRESH_BINARY 严格大于，
+///                   v == thresh 计入背景；mode 1 同口径）
+///   1 固定反二值    v > thresh  -> 0，否则 maxval
 ///   2 OTSU 自动阈值（双峰直方图；thresh 忽略）
 ///   3 自适应均值    光照不均场景（block_size/C 有效）
 ///   4 自适应高斯    光照不均场景（block_size/C 有效）
 ///   5 TRUNC 截断    v > thresh -> thresh，否则 v（保留灰度层次）
-///   6 TOZERO        v > thresh -> 0，否则 v
-///   7 TOZERO_INV    v > thresh -> v，否则 0
+///   6 TOZERO        v > thresh -> v，否则 0（保留超阈值灰度层次）
+///   7 TOZERO_INV    v > thresh -> 0，否则 v
 ///   8 双阈值·区间内前景  low <= v <= high -> maxval，否则 0（高亮带提取 / 背景抑制）
 ///   9 双阈值·区间外前景  v < low 或 v > high -> maxval，否则 0（暗/亮异常同时标记）
 ///  10 双阈值·三值化      v < low -> 0；low <= v <= high -> mid_val；v > high -> maxval
@@ -377,6 +379,7 @@ IMAGE2DALG_EXPORT void Image2DAlg_FreeContourPoints(float* xy, int* offsets);
 /// [in]  method       cv::TemplateMatchModes 0~5（0/1 = SQDIFF 系）
 /// [out] out_score    得分：SQDIFF 系越小越好（0=完全一致），其余越大越好（1=归一化满值）
 /// [out] out_x/out_y  最佳匹配的模板左上角（图像坐标系）
+/// 无独立节点，语义由 alg.image2d.match_template_subpix 节点覆盖（其为严格超集）。
 IMAGE2DALG_EXPORT int Image2DAlg_MatchTemplate(const Image2DAlg_Image* image,
                                                const Image2DAlg_Image* templ, int method,
                                                double* out_score, int* out_x, int* out_y);
@@ -388,6 +391,8 @@ IMAGE2DALG_EXPORT int Image2DAlg_MatchTemplate(const Image2DAlg_Image* image,
 /// [out] out_scale         最佳尺度（实际使用的缩放系数）
 /// 某尺度下模板缩放后越出图像则跳过该尺度；所有尺度均越界 → -3。
 /// 结果坐标在图像坐标系（模板按该尺度缩放后贴上的左上角）。
+/// 无独立节点，语义由 alg.image2d.match_template_ex 节点覆盖（angle_lo=angle_hi
+/// 退化为纯尺度搜索，结果等价）。
 IMAGE2DALG_EXPORT int Image2DAlg_MatchTemplateMulti(const Image2DAlg_Image* image,
                                                     const Image2DAlg_Image* templ, int method,
                                                     double scale_lo, double scale_hi,
@@ -413,6 +418,8 @@ IMAGE2DALG_EXPORT int Image2DAlg_MatchTemplateMasked(const Image2DAlg_Image* ima
 ///                      MatchTemplate 的左上角语义不同）
 /// [out] out_angle      命中角度（度，逆时针）；[out] out_score 得分
 /// 两图通道必须一致。代价：每角度一次全图匹配，大图建议先粗搜。
+/// 无独立节点，语义由 alg.image2d.match_template_ex 节点覆盖（scale_lo=scale_hi
+/// 退化；Ex 输出模板中心坐标语义相同）。
 IMAGE2DALG_EXPORT int Image2DAlg_MatchTemplateRotated(const Image2DAlg_Image* image,
                                                       const Image2DAlg_Image* templ,
                                                       double angle_start, double angle_end,
@@ -443,6 +450,8 @@ IMAGE2DALG_EXPORT void Image2DAlg_FreeMatches(Image2DAlg_Match* matches);
 /// 模板匹配（ROI 版）：仅在 ROI 内匹配，命中左上角平移回全图坐标系。
 /// [in]  roi_x/y/w/h  同 ConnectedComponentsROI（w/h <= 0 = 全图；无交集 → -3）；
 ///                    模板大于 ROI → -3
+/// 无独立节点，语义由 alg.image2d.find_matches_roi 节点覆盖（max_matches=1 即
+/// 单目标 ROI 匹配）。
 IMAGE2DALG_EXPORT int Image2DAlg_MatchTemplateROI(const Image2DAlg_Image* image,
                                                   int roi_x, int roi_y, int roi_w, int roi_h,
                                                   const Image2DAlg_Image* templ, int method,
@@ -745,6 +754,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_RegionStats(const Image2DAlg_Image* in,
 /// 灰度直方图（256 bins，无掩膜）。
 /// [out] out_hist  调用方分配的 int[256]，各灰度级像素计数
 /// 彩色输入先转灰度。
+/// C API only（节点无法持有容器缓冲，节点化需 ABI v2）。
 IMAGE2DALG_EXPORT int Image2DAlg_Histogram(const Image2DAlg_Image* in, int out_hist[256]);
 
 /// 直方图相似度（cv::compareHist）。
@@ -752,6 +762,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_Histogram(const Image2DAlg_Image* in, int out_h
 /// [in]  method       0 相关 CORREL（1=同）/ 1 卡方 CHISQR（0=同）/
 ///                    2 相交 INTERSECT（越大越像）/ 3 巴氏 BHATTACHARYYA（0=同）
 ///                    越界 → -3
+/// C API only（节点无法持有容器缓冲，节点化需 ABI v2）。
 IMAGE2DALG_EXPORT int Image2DAlg_CompareHist(const int* hist1, const int* hist2, int method,
                                              double* out_score);
 
@@ -824,7 +835,9 @@ IMAGE2DALG_EXPORT int Image2DAlg_WarpAffine(const Image2DAlg_Image* in,
                                             int interpolation,
                                             Image2DAlg_Image* out);
 
-/// 透视变换：dst(x,y) = 齐次投影 src(M · [x,y,1]ᵀ)。
+/// 透视变换：M 为 src→dst 前向映射（cv::warpPerspective 默认语义，非
+///                      WARP_INVERSE_MAP）——dst(x,y) 采样自
+///                      src(M⁻¹·[x,y,1]ᵀ 齐次归一化)，越界填 0。
 /// [in]  m              3x3 矩阵行主序（9 元素，可为 cv::getPerspectiveTransform 输出）
 /// [in]  out_w/out_h   输出画布尺寸（<= 0 → -3）
 /// [in]  interpolation  同 Resize
@@ -1000,6 +1013,7 @@ typedef struct Image2DAlg_Descriptors {
 /// 注：SIFT 自 OpenCV 4.4.0 起进入主库 features2d（专利到期），本库
 ///     opencv_world440 已导出 cv::SIFT::create，可直接使用（无需 contrib/nonfree）；
 ///     AKAZE 对输入关键点统一按基尺度（原始分辨率尺度空间层）计算描述子。
+/// C API only（节点无法持有容器缓冲，节点化需 ABI v2）。
 IMAGE2DALG_EXPORT int Image2DAlg_ComputeDescriptors(const Image2DAlg_Image* in,
                                                     const Image2DAlg_Point2f* pts, int count,
                                                     int type, int n_features,
@@ -1024,6 +1038,7 @@ IMAGE2DALG_EXPORT void Image2DAlg_FreeDescriptors(Image2DAlg_Descriptors* d);
 /// [out] out_count    比率测试后匹配对数
 /// 返回：0 成功；-1 空指针；-2 匹配对数 < 2（平坦图属正常）；
 ///       -3 参数越界或两描述子 type/dim/is_float 不一致；-4 内存不足；-99 OpenCV 异常。
+/// C API only（节点无法持有容器缓冲，节点化需 ABI v2）。
 IMAGE2DALG_EXPORT int Image2DAlg_MatchFeatures(const Image2DAlg_Descriptors* d1,
                                                const Image2DAlg_Descriptors* d2,
                                                const Image2DAlg_Point2f* pts1,
@@ -1089,6 +1104,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_FindHomography(const Image2DAlg_OrbMatch* match
 /// 失败语义：-1 校验失败不写任何输出；-4/-99 时 *out_points/*out_count 已置
 /// NULL/0、out_desc 已清零（本库保证失败出口无残留缓冲）。
 /// 返回：0 成功；-1 空指针/空图；-4 内存不足；-99 OpenCV 异常。
+/// C API only（节点无法持有容器缓冲，节点化需 ABI v2）。
 IMAGE2DALG_EXPORT int Image2DAlg_BriskFeatures(const Image2DAlg_Image* in, int n_features,
                                                double contrast_threshold,
                                                Image2DAlg_Point2f** out_points, int* out_count,
@@ -1100,6 +1116,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_BriskFeatures(const Image2DAlg_Image* in, int n
 /// [in]  contrast_threshold 见上方映射表（AKAZE threshold，float）
 /// 其余同 BriskFeatures（out_desc 为 AKAZE 描述子；关键点由 detectAndCompute
 /// 自产，无 ComputeDescriptors 对外部关键点的 class_id 约束）。
+/// C API only（节点无法持有容器缓冲，节点化需 ABI v2）。
 IMAGE2DALG_EXPORT int Image2DAlg_AkazeFeatures(const Image2DAlg_Image* in, int n_features,
                                                double contrast_threshold,
                                                Image2DAlg_Point2f** out_points, int* out_count,
@@ -1111,6 +1128,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_AkazeFeatures(const Image2DAlg_Image* in, int n
 /// [in]  contrast_threshold 见上方映射表（SIFT contrastThreshold）
 /// 其余同 BriskFeatures（out_desc 为浮点描述子：is_float=1、fdata 有效）。
 /// 注：SIFT 自 OpenCV 4.4.0 起进入主库 features2d（同 ComputeDescriptors 的说明）。
+/// C API only（节点无法持有容器缓冲，节点化需 ABI v2）。
 IMAGE2DALG_EXPORT int Image2DAlg_SiftFeatures(const Image2DAlg_Image* in, int n_features,
                                               double contrast_threshold,
                                               Image2DAlg_Point2f** out_points, int* out_count,
@@ -1356,6 +1374,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_DenoiseNLMeans(const Image2DAlg_Image* in,
 ///                      Image2DAlg_FreeImage 释放
 /// 返回：0 成功；-1 空指针/空图；-3 参数/组合非法（distance_type、mask_size、
 ///       dst_type 取值或与 distance_type 的搭配不支持）；-99 OpenCV 异常。
+/// 暂未节点化（后续按需，见 coverage matrix §五）。
 IMAGE2DALG_EXPORT int Image2DAlg_DistanceTransform(const Image2DAlg_Image* in, int distance_type,
                                                    int mask_size, int dst_type,
                                                    Image2DAlg_Image* out);
@@ -1376,6 +1395,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_DistanceTransform(const Image2DAlg_Image* in, i
 /// 输入不被修改（内部拷贝工作副本后就地填充）。
 /// 返回：0 成功；-1 空指针/空图（含 out_filled）；-2 填充失败（底层返回 -1）；
 ///       -3 非 1 通道/种子越界；-99 OpenCV 异常。
+/// 暂未节点化（后续按需，见 coverage matrix §五）。
 IMAGE2DALG_EXPORT int Image2DAlg_FloodFill(const Image2DAlg_Image* in, int seed_x, int seed_y,
                                            double new_val, double lo_diff, double up_diff,
                                            Image2DAlg_Image* out, int out_rect[4], int* out_filled);
@@ -1395,6 +1415,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_FloodFill(const Image2DAlg_Image* in, int seed_
 /// 返回：0 成功；-1 空指针/空图（in/map1/map2/out 任一为 NULL 或空容器）；
 ///       -3 宽高不一致 / interpolation 非法 / map 契约不符（channels != 1）；
 ///       -99 OpenCV 异常。
+/// 暂未节点化（后续按需，见 coverage matrix §五）。
 IMAGE2DALG_EXPORT int Image2DAlg_Remap(const Image2DAlg_Image* in, const Image2DAlg_Image* map1,
                                        const Image2DAlg_Image* map2, int interpolation,
                                        Image2DAlg_Image* out);
@@ -1410,6 +1431,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_Remap(const Image2DAlg_Image* in, const Image2D
 ///                       其他 -> -3）
 /// [out] out             dsize_w×dsize_h，通道数同输入（malloc 新紧排缓冲）
 /// 返回：0 成功；-1 空指针/空图；-3 flags/dsize/max_radius 非法；-99 OpenCV 异常。
+/// 暂未节点化（后续按需，见 coverage matrix §五）。
 IMAGE2DALG_EXPORT int Image2DAlg_WarpPolar(const Image2DAlg_Image* in, int dsize_w, int dsize_h,
                                            double center_x, double center_y, double max_radius,
                                            int flags, Image2DAlg_Image* out);
@@ -1422,6 +1444,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_WarpPolar(const Image2DAlg_Image* in, int dsize
 /// [in]  count_a/count_b  各自点数（均 >= 1，否则 -3）
 /// [out] out_distance  双向 Hausdorff 距离（像素；必填，NULL -> -1）
 /// 返回：0 成功；-1 空指针；-3 点数 < 1；-99 OpenCV 异常。
+/// 暂未节点化（后续按需，见 coverage matrix §五）。
 IMAGE2DALG_EXPORT int Image2DAlg_ContourHausdorff(const float* xy_a, int count_a,
                                                   const float* xy_b, int count_b,
                                                   double* out_distance);
@@ -1445,6 +1468,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ContourHausdorff(const float* xy_a, int count_a
 /// 返回：0 成功（模块统一口径；成功组数 = out_valid 中 1 的个数，
 ///       不承载在返回值上）；-1 空指针；-3 group_count <= 0
 ///       或 group_offsets 非法（非 0 起/不单调/末值超界）；-99 OpenCV 异常。
+/// 暂未节点化（后续按需，见 coverage matrix §五）。
 IMAGE2DALG_EXPORT int Image2DAlg_FitCircleBatch(const float* xy, const int* group_offsets,
                                                 int group_count, double threshold,
                                                 Image2DAlg_CircleFit* out_fits,
@@ -1629,6 +1653,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_PeriodicNotchFilter(const Image2DAlg_Image* in,
 /// [out] out_count    匹配对数
 /// 返回：0 成功；-1 空指针/空描述子缓冲/描述子数为 0；-3 参数越界或两描述子
 ///       type/dim/is_float 不一致；-4 内存不足；-99 OpenCV 异常。
+/// C API only（节点无法持有容器缓冲，节点化需 ABI v2）。
 IMAGE2DALG_EXPORT int Image2DAlg_MatchFeaturesFlann(const Image2DAlg_Descriptors* d1,
                                                     const Image2DAlg_Descriptors* d2,
                                                     const Image2DAlg_Point2f* pts1,
@@ -1650,6 +1675,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_MatchFeaturesFlann(const Image2DAlg_Descriptors
 /// [out] out_count    匹配对数
 /// 返回：0 成功；-1 空指针/空描述子缓冲/描述子数为 0；-3 参数越界或两描述子
 ///       type/dim/is_float 不一致；-4 内存不足；-99 OpenCV 异常。
+/// C API only（节点无法持有容器缓冲，节点化需 ABI v2）。
 IMAGE2DALG_EXPORT int Image2DAlg_MatchFeaturesSymmetric(const Image2DAlg_Descriptors* d1,
                                                         const Image2DAlg_Descriptors* d2,
                                                         const Image2DAlg_Point2f* pts1,
@@ -1672,6 +1698,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_MatchFeaturesSymmetric(const Image2DAlg_Descrip
 /// [out] out_inliers              RANSAC 内点数（仿射质量指标：>= 10 视为可靠）；
 ///                                 校验通过后清零，求解失败/异常时为 0
 /// 返回：0 成功；-1 空指针；-2 点数不足或无法求解；-3 参数越界；-99 OpenCV 异常。
+/// C API only（节点无法持有容器缓冲，节点化需 ABI v2）。
 IMAGE2DALG_EXPORT int Image2DAlg_EstimateAffineFull(const Image2DAlg_OrbMatch* matches,
                                                     int count,
                                                     double ransac_reproj_threshold,

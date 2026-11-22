@@ -93,3 +93,17 @@
 ## 派单 004（2026-11-20 09:00）— fitTorus 圆环面拟合（FitModel method 6，1.4.0）（进行中）
 - 工作项：全自定义圆环面拟合——ShapelyAlg::CloudProcessor 新增 fitTorus（残差 = |sqrt((ρ−R)²+z²) − r|，ρ=径向距、z=轴向距；LM 数值雅可比；RANSAC=7 点采样→LM→内点计数）→ FitModel method 6（8 系数 [cx,cy,cz, dx,dy,dz, R, r]）→ 节点 method 扩展 → 测试（合成圆环 + 噪声 + 退化）→ 文档。
 - 状态：worker 已派出（进行中）。交付底线：确定性 LM 拟合版本必须可靠；RANSAC 稳健版若诚实评估后不可靠，可交付确定性版 + 文档化稳健性边界（B/C 分类允许，需数据佐证）。
+
+### 值守轮 14（2026-11-21 10:32）——多租户状态确认 + 补推送
+- **发现**：值守自动化（cron 轮）已自主运转并交付：① 修复主会话引入的 [6] 段路径 0x0B 缺陷（893162cb）② 补录会话停滞告警 + ZCode 会话监督脚本（6e112d53）③ 验收并提交 torus 主交付（94d78c77）④ 自行派出 1.5.0 GD&T 批（5 新导出：MeasureCircleRoundness 等 C 边界封装，底层为基础库既有 measure* 算子；api.h +100 行布局文档、测试 +181、新增 point3d_gdt 节点）——**在途**。
+- **本轮动作**：补推送 3 个本地领先提交（c06edbab..94d78c77，含 torus 主交付与 cron 自治修复——cron 已按其流程验收）；1.5.0 在途改动不动（避免与在途 worker 冲突）。
+- **新增红灯登记**：ShapelyAlg_test 在全新构建目录确定性崩溃 0xC0000409（treeOctreeVoxelSearch 段，363 PASS 后）——torus worker 双对照实验证明与 torus 代码无关（回退 CloudProcessor 仍崩），属"全新重编译布局漂移暴露的存量问题"；旧二进制 709/709 正常。**1.5.0 落地后优先排查**。
+- SICK 端到端段 bad allocation（387M 点需 ~4.6GB 连续内存）为环境内存问题，非代码回归。
+- 下一批建议：① 等 1.5.0 GD&T 批收敛（五源门禁会红到收敛为止）② ShapelyAlg_test 崩溃排查（新红灯）③ 全项目无 PCL 构建回归验证（守卫改动后需复测）。
+
+### 派单 005（2026-11-22 16:25）— 八叉树/体素空间检索（1.8.0，批次 B 3.4）
+- 工作项（用户直接派单）：核实 3D 空间领域检索（体素/八叉树/kdtree）接口缺口并开发。核查结论：KdTree 已有（KnnSearch/RadiusSearch 1.2.0，不重复）；体素仅有降采样无检索；octree 底层有但未过 C API——待开发清单 §3.4 旧注"索引数组需 ABI v2 blob"**判断过时**（§9.9 的 int/float malloc 通道 1.2.0 起即承载索引数组）。
+- 交付：1.8.0 新增 3 导出 OctreeVoxelSearch / OctreeBoxSearch（KdTree 无对应查询）/ OctreeChangeDetection（in_base 空云=全部新增语义）——复用 §9.9 通道与 FreeSearchResult；底层新增 treeOctreeBoxSearch（PCL 1.9 boxSearch 入参为 Eigen::Vector3f 非点型；扩界加根级保键已核 PCL 源）；3 节点 octree_voxel_search/octree_box_search/octree_change_detection（双云输入先例 cloud_diff）→ 节点 102→105（point3d 30→33）；测试 +18（A9b 段：同体素命中/空体素/边界闭区间/升序对应/新增点/参数非法）。
+- 测试数字：Point3DAlg_test 300 PASS / 0 FAIL（SICK 端到端两次全过；另一次 B2 GetCloud bad allocation 为 ~4.6GB 内存峰值环境问题，非代码回归——既有先例）。
+- **并发观察（重要）**：本工作区存在同版本并发 worker（1.8.0 ellipsoid 批，批次 D 5.4 收官，未提交）——双方已自然收敛为同一 1.8.0（api.h 版本条目合并为"octree 3 导出 + FitModel method 10 ellipsoid"；C ABI 47→50 两者均不冲突：ellipsoid 无新导出）。**尚未提交**：待其簿记收敛（docs/README 的 FitModel 段、test 越界标签）后一并提交，避免混批误登记。
+- 下一批建议：① 收敛后跑 scripts/verify_point3d.cmd 全段（[6] 版本五源应同 1.8.0）再提交 ② 批次 A sick_fov（唯一零成本余项）③ EstimateNormalsRadius/OrientNormals 仍需 v2 blob（§3.4 剩余）。

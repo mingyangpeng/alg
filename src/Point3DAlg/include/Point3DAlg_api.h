@@ -207,14 +207,17 @@ POINT3DALG_EXPORT int Point3DAlg_SaveCloudEx(const char* path, int type,
  * param_count 少于"必填"数或超出"必填+可选"数 → -3）：
  *   method  语义                params 布局
  *   0  voxel 体素质心降采样    [0]=leaf_size 体素边长（三轴同值，>0）
- *                              [1]=min_points_per_voxel 可选（默认 0=不过滤）
+ *                              [1]=min_points_per_voxel 可选（>=0，默认
+ *                              0=不过滤；<0 → -3）
  *                              必填 1 个，最多 2 个
- *   1  random 随机采样         [0]=sample_size 目标点数（>=点数时返回副本）
- *                              [1]=seed 可选（随机种子，默认 0）
+ *   1  random 随机采样         [0]=sample_size 目标点数（>0；>=点数时返回
+ *                              副本）
+ *                              [1]=seed 可选（随机种子，>=0，默认 0）
  *                              必填 1 个，最多 2 个
  *   2  uniform 等间隔采样      [0]=every_k 每 k 点保留 1 个（>0）  必填 1 个
- *   3  farthest 最远点采样     [0]=num_samples 目标点数
- *                              [1]=start_index 可选（首采样点索引，默认 0）
+ *   3  farthest 最远点采样     [0]=num_samples 目标点数（>0）
+ *                              [1]=start_index 可选（首采样点索引，>=0，
+ *                              默认 0）
  *                              必填 1 个，最多 2 个
  *   4  removeNonFinite         无参数（剔除 NaN/Inf 点）          必填 0 个
  *   5  removeDuplicates        [0]=tolerance 可选（去重容差，默认 0=坐标完全相等）
@@ -235,6 +238,9 @@ POINT3DALG_EXPORT int Point3DAlg_SaveCloudEx(const char* path, int type,
  *   10 approxVoxel  近似体素降采样（1.3.0 新增；PCL ApproximateVoxelGrid，
  *                              大点云快速，格点质心与 method 0 可有微小偏差）
  *                              [0]=leaf 体素边长（>0）            必填 1 个
+ *                              （param_count 仅做下限校验：<1 → -3；>1 不
+ *                              拦截、多余忽略——实现较"超出即 -3"总则宽松，
+ *                              漂移登记见交付报告）
  *   11 conditionalRemoval  [0]=op 复合方式（0=AND 三轴全满足才保留，
  *      复合条件去除        1=OR 任一轴满足即保留；其余 → -3）
  *      （1.7.0 新增）      [1..6]=x_min,x_max,y_min,y_max,z_min,z_max
@@ -294,7 +300,8 @@ POINT3DALG_EXPORT int Point3DAlg_FilterCloud(const Point3DAlg_PointCloud* in, in
  *                              params[3..5]=extents xyz（三主轴半长，>0）
  *                              params[6..14]=rotation 3x3 行主序（第 d 行 =
  *                              第 d 主轴方向，与 CloudProcessor OBB3d 一致）
- *                              params[15]=invert 可选（1=保留盒外点，默认 0）
+ *                              params[15]=invert 可选（非 0=保留盒外点，
+ *                              默认 0）
  *                              必填 15 个，最多 16 个
  *   4  cropPolygonROI 多边形裁剪 params=顶点 XY 对 [x0,y0,x1,y1,...]（XY 投影
  *                              + 射线法；顶点数 >=3，param_count=2×顶点数）；
@@ -352,9 +359,10 @@ POINT3DALG_EXPORT int Point3DAlg_TransformCloud(const Point3DAlg_PointCloud* in,
  * ---------------------------------------------------------------------
  * 全部封装 ShapelyAlg::CloudProcessor（点型固定 pcl::PointXYZ），本层只做
  * 容器转换与参数/错误码翻译（例外：FitModel method 7/8/9 为 1.7.0 新增，
- * PCL SACSegmentation/RANSAC 直调不经 CloudProcessor——轴约束模型与 stick
- * 无底层包装，见 9.7 支持度表；FitModel method 10 = ellipsoid 为 1.8.0
- * 新增，同为不经 CloudProcessor 的本层实现——全自研手写 RANSAC）。错误码
+ * 本层手写确定性搜索不经 CloudProcessor——1.7.0 缺陷修复：原 PCL SAC
+ * 直调路径在共线采样/纯线段云上产出退化/垃圾模型，整体重写，见 9.7 支持
+ * 度表；FitModel method 10 = ellipsoid 为 1.8.0 新增，同为不经
+ * CloudProcessor 的本层实现——全自研手写 RANSAC）。错误码
  * 为点云计算族口径（见文件头全局约定），
  * 各接口注释写明本接口细化语义；依赖守卫同 1.1.0（无 PCL 不导出）。
  * 输出数组内存约定：一级指针输出缓冲（out_coeffs/out_values）由调用方
@@ -414,26 +422,27 @@ POINT3DALG_EXPORT int Point3DAlg_TransformCloud(const Point3DAlg_PointCloud* in,
  *   残差中值择优——高外点比例建议 0/1）；sphere 支持 RANSAC/LMEDS
  *   （MSAC 回退 RANSAC）；cylinder/cone 仅 RANSAC（fit 参数被忽略）；
  *   circle3D 的 fit/threshold 复用其内部平面拟合口径。
- *   1.7.0 新增支持度表（method 7/8/9，本层 PCL 直调，实现见
- *   Point3DAlg_CloudOps.cpp SacSegmentAxisZ / FitStickRansac——轴固定 +Z、
- *   eps 固定 5°）：
- *     parallelPlane（7） / perpendicularPlane（8）：三种 fit 均支持——轴
- *     约束经 PCL isModelValid 在各 fit 的逐候选校验中生效（头文件实测：
- *     RANSAC 走 countWithinDistance、MSAC/LMEDS 走 getDistancesToModel，
- *     两模型的这三个函数都先做 isModelValid，违约束候选按 0 内点/空距离
- *     跳过）；setEpsAngle 口径为**弧度角阈值而非余弦**（ParallelPlane 内部
- *     sin_angle_=fabs(sin(ea))、PerpendicularPlane 直接 angle_diff>eps_angle_
- *     比较，本层传 5° 对应弧度）。系数精化沿用 PCL 无约束平面 PCA，若精化
- *     后法向超出 5° 容差（极端倾斜内点集）→ 精化内点清空 → -2。
- *     stick（9）：仅 RANSAC（fit 1/2 回退 RANSAC，参数被忽略）——PCL 1.9.1
- *     SampleConsensusModelStick 系数口径缺陷实测：getDistancesToModel 把
- *     [3..5] 当"自原点方向"、countWithinDistance/selectWithinDistance 按
- *     "两点差向"解析，MSAC/LMEDS 逐候选评分基于前者 → 不可信；RANSAC 的
- *     评分与内点同走两点口径自洽。本层实现：RANSAC 直调 → 内点（>=3）
- *     PCA 精化（质心 + 主特征向量）→ 按精化线以标准点到线正交距离重选
- *     内点（不借 PCL selectWithinDistance——精化系数是"点+方向"布局，
- *     PCL 仍按两点解析会错）；距离口径为点到直线距离（端点截断不参与，
- *     PCL stick 实测）；内点 <3 或方向退化 → -2。
+ *   1.7.0 新增支持度表（method 7/8/9，本层手写确定性搜索——1.7.0 缺陷修复
+ *   后原 PCL SAC 直调路径整体弃用，实现见 Point3DAlg_CloudOps.cpp
+ *   FitPlaneConstrained / FitStickRansac——轴固定 +Z、eps 固定 5°）：
+ *     parallelPlane（7） / perpendicularPlane（8）：三种 fit 均支持——手写
+ *     约束搜索对三 fit 统一内点计数评分（精确数据下三者同解，fit 取值不
+ *     影响结果）：固定种子随机采样 3 点组 min(2000, C(n,3)) 次 → 法向叉积
+ *     归一（|n|<1e-6 即共线/重合直接跳过——零法向退化候选被天然拒绝，不
+ *     复现 PCL 退化路径）→ 轴约束校验（|n·axis| <= sin(5°) 为 PARALLEL /
+ *     >= cos(5°) 为 PERPENDICULAR，弧度角口径同原 setEpsAngle）→ 最优候选
+ *     内点 PCA 精化（质心 + 协方差最小特征向量）；精化后法向越出 5° 容差
+ *     （极端倾斜内点集）→ -2。
+ *     stick（9）：仅 RANSAC（fit 1/2 回退，参数被忽略）——弃用 PCL 直调的
+ *     原因（头文件实测）：PCL 1.9.1 SampleConsensusModelStick 系数口径缺陷
+ *     （getDistancesToModel 把 [3..5] 当"自原点方向"、countWithinDistance/
+ *     selectWithinDistance 按"两点差向"解析，MSAC/LMEDS 评分基于前者不可
+ *     信），且 isSampleGood 要求两采样点三坐标全不等——纯线段点云没有任何
+ *     合法样本对，只能产出"线点×远点"垃圾段。本层实现（函数名保留 RANSAC
+ *     字样仅为注释引用兼容，已非随机共识）：点对候选搜索（n<=400 穷举
+ *     C(n,2)，否则固定种子随机 40000 对）→ 内点（>=3）PCA 精化（质心 +
+ *     主特征向量）→ 按精化线以点到线正交距离重选内点；距离口径为点到
+ *     直线距离（端点截断不参与）；内点 <3 或方向退化 → -2。
  *   1.8.0 新增支持度表（method 10，全自研，实现见 Point3DAlg_CloudOps.cpp
  *   FitEllipsoidRansac——PCL 1.9 无椭球模型）：
  *     ellipsoid（10）：仅 RANSAC（fit 1/2 回退 RANSAC，参数被忽略）。
@@ -462,8 +471,8 @@ POINT3DALG_EXPORT int Point3DAlg_TransformCloud(const Point3DAlg_PointCloud* in,
  *   -2 拟合失败/无局内点/退化（点数不足、投影点共线、圆锥不收敛、
  *      环面剔除非有限点后 <8 点或精化后内点 <8、stick 内点 <3 或方向
  *      退化、椭球剔除非有限点后 <9 点/无正定候选/精化后仍退化等）；
- *   -3 method/fit 不是 0~10、distance_threshold<=0、coeffs_capacity 不足
- *      （*out_inlier_count = 所需系数长度，两段式回填）；
+ *   -3 method/fit 不是 0~10、distance_threshold<=0、out_coeffs 为 NULL 或
+ *      coeffs_capacity 不足（*out_inlier_count = 所需系数长度，两段式回填）；
  *   -4 内存分配失败（出参全部保持 NULL/0，不承载任何有效数据）；
  *   -99 PCL 异常。 */
 POINT3DALG_EXPORT int Point3DAlg_FitModel(const Point3DAlg_PointCloud* in, int method, int fit,
@@ -516,8 +525,9 @@ POINT3DALG_EXPORT int Point3DAlg_FitModel(const Point3DAlg_PointCloud* in, int m
  *   3 → 每区域一段（点数降序；法线由本接口内部按 k_neighbors KNN 估计）
  *   4 → 每平面局内点一段（按检出顺序 = 点数降序趋势）
  *   5 → 每簇一段（点数降序；高度差条件连通，见上表）
- *   6 → 恒 2 段：[0]=地面点（PMF 局内），[1]=非地面点——允许为空段
- *       （全部点被判为地面/非地面时）
+ *   6 → 恒 2 段：[0]=地面点（PMF 局内），[1]=非地面点——[1] 允许为空段
+ *       （全部点被判为地面时）；地面段为空（全部点被判非地面）→ -2，
+ *       不输出空地面段（实现口径，与 method 0 的 [1] 空段契约不同）
  *   7 → 前景段 1 段（minCut 图割 object 簇——PCL 口径 clusters[1]；多种子
  *       仍归同一前景簇；背景不输出）
  * out_segments/out_segment_count 必填（NULL → -1）；无有效段 → -2（
@@ -640,8 +650,9 @@ POINT3DALG_EXPORT void Point3DAlg_FreeSearchResult(int* indices, float* dists);
  *   -1 in/out_value_count 为 NULL、方法 6/7 之外的 in 缺失（in->xyz 为
  *      NULL、in->count<=0；方法 1 需 >=3 点、3 需 >=2 点）、方法 4 的
  *      other 缺失（NULL/空）；
- *   -2 方法 7 两平面近平行（无有限交线）、方法 3 点数不足、方法 5 平面
- *      拟合失败/局内点<2；
+ *   -2 方法 7 两平面近平行（无有限交线）、方法 5 平面拟合失败/局内点<2
+ *      （方法 1/3 点数不足按 -1 报，见 -1 行——原 -2 行"方法 3 点数不足"
+ *      与实现不符，实现恒 -1，漂移已登记）；
  *   -3 method 不是 0~7、param_count 与布局表不符（方法 5 需 1 个、6/7 需
  *      8 个）、参数值非法（阈值<=0、法向零向量或含非有限分量等）、
  *      out_values 为 NULL 或 values_capacity 不足（*out_value_count = 所需
@@ -720,7 +731,8 @@ POINT3DALG_EXPORT int Point3DAlg_MeasurePositionDeviation(
  * out_residuals：库 malloc float 数组（长度 = in->count，与输入逐行对齐），
  *   用 Point3DAlg_FreeBuffer 释放。
  * 错误码：0 成功；-1 in/out_residuals/out_residual_count 为 NULL、in
- *   缺失；-3 params 不是 4 个或法向非法；-4/-99 同全局约定。 */
+ *   缺失；-2 底层残差计算失败（防御路径，正常输入不触发）；-3 params
+ *   不是 4 个或法向非法；-4/-99 同全局约定。 */
 POINT3DALG_EXPORT int Point3DAlg_PlaneResiduals(const Point3DAlg_PointCloud* in,
                                                 const double* params, int param_count,
                                                 float** out_residuals, int* out_residual_count);
@@ -828,9 +840,10 @@ typedef struct Point3DAlg_Mesh {
  *                              必填 1 个，最多 3 个。输出仅顶点
  *                              （face_count=0，MLS 是点云算子非网格算子）
  *   3  Poisson 泊松重建        [0]=depth 可选（八叉树深度，默认 9）
- *                              [1]=iso_divide 可选（默认 8；>depth 时底层
- *                              自动钳到 depth，不报错）
- *                              [2]=samples_per_node 可选（默认 1.0）
+ *                              [1]=iso_divide 可选（>=1，否则 -3；默认 8；
+ *                              >depth 时底层自动钳到 depth，不报错）
+ *                              [2]=samples_per_node 可选（>0，否则 -3；
+ *                              默认 1.0）
  *                              最多 3 个。法线由本接口内部估计并强制
  *                              朝向一致化（见下），depth<2 → -3
  *   4  greedyProjection 贪婪   [0]=search_radius（>0，典型点距 2~5 倍）
@@ -938,7 +951,8 @@ POINT3DALG_EXPORT int Point3DAlg_MeshOp(const Point3DAlg_Mesh* in, int op,
  * out_distances：库 malloc float 数组（长度 = in->count，与输入逐行对齐），
  *   用 Point3DAlg_FreeBuffer 释放。
  * 错误码：0 成功；-1 in/mesh/out_distances/out_distance_count 为 NULL、
- *   in 缺失或 mesh 无效（vertices/faces NULL、数量<=0）；-4/-99 同全局约定。 */
+ *   in 缺失或 mesh 无效（vertices/faces NULL、数量<=0）；-2 防御路径（底层
+ *   返回空——入口已拦空输入，正常不触发）；-4/-99 同全局约定。 */
 POINT3DALG_EXPORT int Point3DAlg_MeasurePointToMeshSignedDistance(
     const Point3DAlg_PointCloud* in, const Point3DAlg_Mesh* mesh,
     float** out_distances, int* out_distance_count);

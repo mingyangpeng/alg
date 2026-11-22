@@ -122,17 +122,18 @@ public:
                                             std::vector<std::vector<int>>& out_trace);
 
     /// 随机采样（Open3D random_down_sample）：随机保留 sample_size 个点。
-    /// [in] sample_size  目标点数（≥ 点数时返回副本）
+    /// [in] sample_size  目标点数（≥ 点数时返回副本；<= 0 返回 nullptr）
     /// [in] seed         随机种子（固定种子可复现）
     static CloudPtr filterRandomSample(const CloudConstPtr& src, int sample_size,
                                        unsigned int seed = 0);
 
     /// 等间隔采样（Open3D uniform_down_sample）：从索引 0 起每 every_k 点保留 1 个。
+    /// 返回：every_k <= 0 返回 nullptr。
     static CloudPtr filterUniformSample(const CloudConstPtr& src, int every_k);
 
     /// 最远点采样（Open3D farthest_point_down_sample）：逐步选取距已选集合最远的点，
     /// 结果在空间上比体素更均匀，代价 O(n·k)。
-    /// [in] num_samples  目标点数（≥ 点数时返回副本）
+    /// [in] num_samples  目标点数（≥ 点数时返回副本；<= 0 返回 nullptr）
     /// [in] start_index  首个采样点索引（越界按 0 处理）
     static CloudPtr filterFarthestPointSample(const CloudConstPtr& src, int num_samples,
                                               int start_index = 0);
@@ -141,7 +142,9 @@ public:
     static CloudPtr filterRemoveNonFinite(const CloudConstPtr& src);
 
     /// 去除重复点（Open3D remove_duplicated_points）：坐标距离 ≤ tolerance 视为重复，
-    /// 保留首次出现的点；tolerance=0 表示坐标完全相等。
+    /// 保留首次出现的点；tolerance <= 0 走精确去重（坐标逐分量相等，O(n) 哈希）。
+    /// 注意：tolerance > 0 时非有限点一并剔除；tolerance <= 0 时 NaN 点因互不相等
+    /// 全部保留——调用方如需剔除非有限点请先 filterRemoveNonFinite。
     static CloudPtr filterRemoveDuplicates(const CloudConstPtr& src, double tolerance = 0.0);
 
     /// 直通滤波：沿指定字段保留 [limit_min, limit_max] 区间内的点。
@@ -187,7 +190,8 @@ public:
                                    const float max_corner[3]);
 
     /// 有向盒裁剪（Open3D crop(OBB)）：把点变换到盒局部系后做 AABB 裁剪。
-    /// [in] box               OBB3d（center + extents 半长 + rotation 行=主轴）
+    /// [in] box               OBB3d（center + extents 半长 + rotation 行=主轴；
+    ///                        box.valid=false 返回 nullptr）
     /// [in] invert            true = 保留盒外点（Open3D crop(invert=True)）
     static CloudPtr extractCropOBB(const CloudConstPtr& src, const OBB3d& box, bool invert = false);
 
@@ -214,7 +218,7 @@ public:
     static CloudPtr transTranslate(const CloudConstPtr& src, double dx, double dy, double dz);
 
     /// 绕过原点的轴旋转点云（右手系）。
-    /// [in] axis_x/y/z  旋转轴方向向量（不需单位化，内部归一）
+    /// [in] axis_x/y/z  旋转轴方向向量（不需单位化，内部归一；零向量返回 nullptr）
     /// [in] angle       旋转角（弧度）
     static CloudPtr transRotate(const CloudConstPtr& src, double axis_x, double axis_y,
                                 double axis_z, double angle);
@@ -237,7 +241,7 @@ public:
     // ---------------- feature：特征提取 ----------------
 
     /// 估计点云法线（K 近邻局部平面拟合）。
-    /// [in] k_search  近邻个数（典型 10~30，越大越平滑）
+    /// [in] k_search  近邻个数（典型 10~30，越大越平滑；< 3 返回 nullptr）
     /// 返回：法线点云（xyz = 单位法向，curvature = 曲率），与输入点一一对应；
     ///       src 为空返回 nullptr。
     static pcl::PointCloud<pcl::Normal>::Ptr featureNormalEstimation(const CloudConstPtr& src, int k_search);
@@ -284,15 +288,16 @@ public:
         double radius_search);
 
     /// 逐点协方差估计（Open3D estimate_covariances）：K 近邻局部协方差矩阵。
-    /// [out] out_covariances  每个点 3x3 协方差，行主序展开为 9 个 float（[i*9 + r*3 + c]）
-    /// 返回：false = src/normals 为空或 k<3
+    /// [out] out_covariances  每个点 3x3 协方差，行主序展开为 9 个 float（[i*9 + r*3 + c]）；
+    ///       非有限点/邻居不足 3 的点保持全零
+    /// 返回：false = src 为空/空云 或 k_search < 3
     static bool featureCovariances(const CloudConstPtr& src, int k_search,
                                    std::vector<std::array<float, 9>>& out_covariances);
 
     /// 马氏距离（Open3D compute_mahalanobis_distance）：点相对整体分布的异常程度，
     /// 用于粗筛离群点。要求点数 ≥ 4（协方差可逆）。
     /// [out] out_distances  与 src 等长的距离数组
-    /// 返回：false = 点数不足
+    /// 返回：false = 点数不足 或 含非有限坐标点（NaN 会污染均值/协方差）
     static bool featureMahalanobisDistance(const CloudConstPtr& src,
                                            std::vector<double>& out_distances);
 
@@ -384,12 +389,16 @@ public:
     ///   残差 r_i = sqrt((ρ−R)² + z²) − r（最近点必与 p 同子午面，故为精确距离）。
     /// 求解：分布初值多候选（c=质心、â=PCA 最小特征方向、R/r 由 ρ/z 分布给出
     ///   4 组候选）→ LM（数值雅可比，中心差分）精化择优。
-    /// [in]  method             RANSAC/MSAC = 采样稳健层（随机子集 → 短程 LM →
-    ///                          全云内点评分：RANSAC 内点计数最大 / MSAC 截断平方
-    ///                          残差最小，择优后在内点上全程精化；固定种子可复现）；
-    ///                          LMEDS = 确定性多候选 LM（候选按残差平方中值择优，
-    ///                          不采样——对高外点比例不稳健，含外点请用 RANSAC/MSAC）
-    /// [in]  distance_threshold 局内点判定距离阈值（同上残差口径，与坐标同单位，>0）
+    /// [in]  method             RANSAC/MSAC = 采样稳健层（确定性候选 + 随机子集
+    ///                          → 子集短程 LM（含截断残差去偏）→ 全云内点评分，
+    ///                          RANSAC 内点计数最大 / MSAC 截断平方残差最小，胜者
+    ///                          再做级联精化——捕获半径 t→2t→4t→8t 逐轮 gather
+    ///                          内点全程 LM，每轮按 t 内点数保留最优；固定种子
+    ///                          可复现）；LMEDS = 确定性多候选 LM（候选按残差平方
+    ///                          中值择优，不采样——对高外点比例不稳健，含外点请用
+    ///                          RANSAC/MSAC）
+    /// [in]  distance_threshold 局内点判定距离阈值（同上残差口径，与坐标同单位，>0；
+    ///                          <= 0 时内点恒空 → 返回 false）
     /// [out] out_center         环面中心 [x,y,z]
     /// [out] out_axis           单位轴方向 [dx,dy,dz]（符号不定：â 与 −â 同一环面）
     /// [out] out_R              主半径（管心圆半径）
@@ -504,10 +513,10 @@ public:
     /// |Δz| <= max_height_diff 才连通，连通分量 = 簇。
     /// 不走 PCL ConditionalEuclideanClustering（1.9 版条件函数是函数指针，
     /// 无法捕获参数；且 SoA 容器无法传法线/颜色——高度差约束是 v1 容器下
-    /// 可用的工业条件），KdTree 邻域 + 条件洪泛（BFS）手工实现
-    /// （segmentDBSCAN 同类的手工先例）。
-    /// 工业口径：台阶/叠层工件按高度分层——z 差超过阈值的相邻点不断开，
-    /// 侧面连通但上下表面分离。
+    /// 可用的工业条件），KdTree 邻域 + 条件洪泛（显式栈遍历，连通分量与
+    /// 遍历序无关）手工实现（segmentDBSCAN 同类的手工先例）。
+    /// 工业口径：台阶/叠层工件按高度分层——z 差超过阈值的相邻点断开，
+    /// 缓变侧面保持连通，上下表面分离。
     /// [in] tolerance        欧氏连通距离（>0）
     /// [in] min_size/max_size 簇点数上下限（范围外的簇丢弃）
     /// [in] max_height_diff  相邻连通点的最大高度差（>0；与坐标同单位）
@@ -531,8 +540,11 @@ public:
                                        int max_iteration = 0);
 
     /// ICP 点到面配准（收敛更快更稳，需要 target 法线）。
-    /// [in] target_normals  target 的法线（与 target 点一一对应，数量必须一致）
-    /// 注意：PCL 1.9 的点到面 LLS 求解在纯平面等退化几何上会产出 NaN 变换，
+    /// [in] target_normals  target 的法线（与 target 点一一对应，数量必须一致；
+    ///                      NaN 法线内部按零向量处理，有效法线 < 3 返回 false）
+    /// [in] init_transform  初始变换（可为 nullptr = 单位阵，行主序 4x4）
+    /// 注意：PCL 1.9 的点到面 LLS 求解在纯平面等退化几何上会产出 NaN 变换
+    ///       （薄几何：点数 < 6 或最薄方向 <= 1e-6×最长方向时预判回退），
     ///       此时内部自动回退到点到点 ICP；两者都失败才返回 false。
     static bool registICP_PointToPlane(const CloudConstPtr& source, const CloudConstPtr& target,
                                        const pcl::PointCloud<pcl::Normal>::Ptr& target_normals,
@@ -558,10 +570,12 @@ public:
 
     /// 基于特征的全局配准（Open3D registration_ransac_based_on_feature_matching）：
     /// FPFH 对应关系 + SAC-IA 采样一致性求初值，无需初始位姿。
-    /// [in] source_features/target_features  FPFH 描述子（与点云一一对应）
+    /// [in] source_features/target_features  FPFH 描述子（size 必须与对应点云相等；
+    ///                       含 NaN/Inf 特征直接返回 false——FPFH 对无邻居点会
+    ///                       输出全 NaN 直方图，SAC-IA 在 NaN 特征上会崩溃）
     /// [in] min_sample_distance  采样点对最小距离（通常取点云尺度 0.1~0.3 倍）
     /// [in] max_correspondence_distance  对应点距离阈值
-    /// 返回：false = 未收敛。
+    /// 返回：false = 输入为空/尺寸不匹配/特征含 NaN/未收敛。
     static bool registFeatureMatching(const CloudConstPtr& source, const CloudConstPtr& target,
                                       const pcl::PointCloud<pcl::FPFHSignature33>::ConstPtr& source_features,
                                       const pcl::PointCloud<pcl::FPFHSignature33>::ConstPtr& target_features,
@@ -581,6 +595,7 @@ public:
     /// 配准信息矩阵（Open3D get_information_matrix_from_point_clouds）：
     /// 由对应点协方差近似，用于位姿图优化中各边的权重。
     /// [out] out_information 行主序 6x6（顺序 [rx,ry,rz,tx,ty,tz]）
+    /// 返回：false = 输入为空 / 变换后有效对应点 < 6。
     static bool registInformationMatrix(const CloudConstPtr& source, const CloudConstPtr& target,
                                         const float transform[16], double max_dist,
                                         double out_information[36]);
@@ -610,24 +625,31 @@ public:
     /// [in]  query_point   查询点 [x,y,z]
     /// [in]  k             邻居个数（超过点数时按实际点数返回）
     /// [out] out_indices  近邻点索引（按距离升序）
-    /// [out] out_distances 对应欧氏距离（平方距离语义见 PCL 文档；升序对应）
+    /// [out] out_distances 对应的**平方欧氏距离**（PCL KdTree 原生语义，未开方；
+    ///                     与 out_indices 升序一一对应）
     static void treeKdTreeKNN(const CloudConstPtr& src, const float query_point[3], int k,
                               std::vector<int>& out_indices, std::vector<float>& out_distances);
 
-    /// KdTree 半径搜索：返回半径内全部点。
-    /// [in] radius  搜索半径；src 为空/点云为空时输出空列表
+    /// KdTree 半径搜索：返回半径（实半径口径，非平方）内全部点。
+    /// [in]  radius  搜索半径（与坐标同单位）；src 为空/nullptr 时输出空列表
+    /// [out] out_indices  半径内点索引（按距离升序）
+    /// [out] out_distances 对应的**平方欧氏距离**（PCL KdTree 原生语义，未开方）
     static void treeKdTreeRadiusSearch(const CloudConstPtr& src, const float query_point[3],
                                        double radius, std::vector<int>& out_indices,
                                        std::vector<float>& out_distances);
 
     // Octree 体素搜索：返回查询点所在体素内的全部点索引。
-    // resolution：体素边长（与点云同单位；默认 1.0 适合米制，mm/像素单位请显式传）
+    // resolution：体素边长（与点云同单位；默认 1.0 适合米制，mm/像素单位请显式传；
+    //             <= 0 时按 1.0 处理——非法分辨率会让 octree 死循环挂死）
     static void treeOctreeVoxelSearch(const CloudConstPtr& src, const float query_point[3],
                                       std::vector<int>& out_indices,
                                       double resolution = 1.0);
 
     /// Octree 变化检测：src2 中相对 src1 新出现（体素变化）的点索引。
     /// [in] min_resolution  体素分辨率（决定"变化"的空间粒度）
+    /// 注意：src1/src2 为 nullptr 或 src2 为空点云、或 min_resolution <= 0 时
+    ///       直接输出空列表（非法分辨率会让 octree 内部死循环挂死，必须守卫）；
+    ///       src1 为空点云（非 nullptr）是合法输入，此时全部点视为"新增"。
     static void treeOctreeChangeDetection(const CloudConstPtr& src1, const CloudConstPtr& src2,
                                           double min_resolution, std::vector<int>& out_new_indices);
 
@@ -650,16 +672,18 @@ public:
 
     /// 凹包/Alpha Shapes（Open3D create_from_point_cloud_alpha_shape 的等价物，
     /// PCL ConcaveHull）：alpha 越小越贴合点云细节，越大越接近凸包。
-    /// 返回：凹包顶点点云；src 为空/退化返回 nullptr。
+    /// 返回：凹包顶点点云；src 为空/alpha <= 0/退化返回 nullptr。
     static CloudPtr surfaceConcaveHull(const CloudConstPtr& src, double alpha);
 
     /// MLS 平滑与重采样（Open3D smooth_mls）：局部多项式拟合投影，
     /// 同时正平噪声并可按体素上采样补点。
-    /// [in] radius           搜索半径（须 > 点云平均间距）
-    /// [in] polynomial_order 拟合阶数（1=平面，2=二次曲面；典型 2）
+    /// [in] radius           搜索半径（须 > 点云平均间距；<= 0 返回 nullptr）
+    /// [in] polynomial_order 拟合阶数（1=平面，2=二次曲面；典型 2；< 1 按 1 处理）
     /// [in] voxel_size       上采样体素边长（≤0 关闭上采样，仅投影平滑）
     /// [out] out_normals     可选输出：每个输出点的法线（传 nullptr 不输出）
     /// 返回：平滑后的点云；src 为空/点数不足返回 nullptr。
+    /// 注意：输出不含 rgb/intensity 等附加字段（MLS 内部不搬运，转回 PointT 时
+    ///       丢弃）；PCL 1.9 上采样路径强制计算法线，本接口已内部规避其空指针缺陷。
     static CloudPtr surfaceSmoothMLS(const CloudConstPtr& src, double radius,
                                      int polynomial_order = 2, double voxel_size = 0.0,
                                      pcl::PointCloud<pcl::Normal>::Ptr* out_normals = nullptr);
@@ -667,8 +691,8 @@ public:
     /// Poisson 表面重建（Open3D create_from_point_cloud_poisson）：
     /// 需要一致朝向的法线，输出闭合网格（水密表面）。
     /// [in] normals       与 src 一一对应的法线（必填）
-    /// [in] depth         八叉树最大深度（8~12；越大细节越多、越慢，典型 9）
-    /// [in] iso_divide    等值面提取的八叉树划分深度（典型 8，需 ≤ depth）
+    /// [in] depth         八叉树最大深度（8~12；越大细节越多、越慢，典型 9；< 2 按 2 处理）
+    /// [in] iso_divide    等值面提取的八叉树划分深度（典型 8；> depth 自动钳到 depth）
     /// [in] samples_per_node 每节点采样数（1.0 适合噪声小的数据，1.5~2 抗噪）
     /// 返回：三角网格；失败时 Mesh3d::valid == false。
     static Mesh3d surfacePoisson(const CloudConstPtr& src,
@@ -691,7 +715,7 @@ public:
     /// Marching Cubes 重建（PCL MarchingCubesHoppe，Hoppe 符号距离场）：
     /// 无需闭合点云，按法线方向构建隐式场；适合扫描片重建。
     /// [in] normals  与 src 一一对应的法线（必填）
-    /// [in] resolution  三轴网格分辨率（典型 50~150；越大越精细）
+    /// [in] resolution  三轴网格分辨率（典型 50~150；越大越精细；< 8 返回 valid=false）
     static Mesh3d surfaceMarchingCubes(const CloudConstPtr& src,
                                        const pcl::PointCloud<pcl::Normal>::ConstPtr& normals,
                                        int resolution = 64);
@@ -699,7 +723,7 @@ public:
     /// Marching Cubes RBF 重建（PCL MarchingCubesRBF）：用径向基函数拟合符号距离场，
     /// 比 Hoppe 版更平滑，适合有噪声/稀疏的扫描片；计算量更大（需解 2N×2N 线性方程组）。
     /// [in] normals     与 src 一一对应的法线（必填）
-    /// [in] resolution  三轴网格分辨率（典型 50~120）
+    /// [in] resolution  三轴网格分辨率（典型 50~120；< 8 返回 valid=false）
     /// [in] off_surface_epsilon  离面约束点的**绝对位移量**（与坐标同单位，不是比例），
     ///       典型取点云平均间距的 0.1~0.3 倍。过小则约束不足、过大则表面膨胀。
     static Mesh3d surfaceMarchingCubesRBF(const CloudConstPtr& src,
@@ -726,7 +750,8 @@ public:
     /// 有序点云快速三角化（PCL OrganizedFastMesh）：把 organized 点云的像素邻接
     /// 直接连成三角面，速度最快、无需法线；仅适用于 height > 1 的有序点云
     /// （深度相机/结构光相机的规则栅格输出）。
-    /// [in] triangle_pixel_size  三角化步长（像素；1 = 相邻像素成面，2 = 隔 2 像素采样）
+    /// [in] triangle_pixel_size  三角化步长（像素；1 = 相邻像素成面，2 = 隔 2 像素采样；
+    ///                           < 1 返回 valid=false）
     /// [in] adaptive_cut         true = 按 z 差异自适应选择对角线（否则固定左上→右下）
     /// 注意：① 内部按视点（默认原点）做遮挡剔除，点云应位于视点前方；
     ///      ② 步长 > 1 时边缘 (step-1) 行/列不参与三角化；
@@ -738,8 +763,8 @@ public:
 
     /// 网格拉普拉斯平滑（umbrella 算子，PCL 1.9 无 VTK 网格平滑的可用封装）：
     /// 每个顶点向邻居质心移动，抑制表面锯齿。
-    /// [in] iterations  迭代次数（典型 5~20）
-    /// [in] lambda      步长 [0,1]（典型 0.3~0.6）
+    /// [in] iterations  迭代次数（典型 5~20；<= 0 返回 valid=false）
+    /// [in] lambda      步长 [0,1]（典型 0.3~0.6；> 1 内部钳到 1，<= 0 返回 valid=false）
     /// 注意：**拉普拉斯平滑会使曲面整体收缩**——球面半径随迭代单调减小
     ///      （实测球 R=10、λ=0.5：5 次→9.958，10 次→9.912，50 次→9.558）。
     ///      需要保形时减小 iterations/lambda；需要无收缩平滑请用 Taubin（λ/μ 交替），
@@ -803,11 +828,12 @@ public:
     static bool measureMinMax(const CloudConstPtr& src, Point3d& out_min, Point3d& out_max);
 
     /// 轴对齐包围盒（Open3D get_axis_aligned_bounding_box）。
-    /// AABB3d::valid == false 表示 src 为空。
+    /// AABB3d::valid == false 表示 src 为空（或全部点非有限）。
     static AABB3d measureAABB(const CloudConstPtr& src);
 
     /// 有向包围盒（Open3D get_oriented_bounding_box）：PCA 主轴对齐，
-    /// 语义与 Stereo::getOBB 一致（extents = 半长，rotation 行 = 主轴）。
+    /// 语义与 Stereo::getOBB 一致（extents = 半长，rotation 行 = 主轴）；
+    /// 点数 < 3 或协方差求解失败返回 valid=false。
     static OBB3d measureOBB(const CloudConstPtr& src);
 
     /// 质心（Open3D get_center）：点数加权平均，与 Stereo::getCentroid 同语义。

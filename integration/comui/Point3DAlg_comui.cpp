@@ -31,7 +31,11 @@ POINT3DALG_EXPORT void algo_free(void* p) {
 }
 
 // ---------------- 算子入口：体素下采样（node.json: alg.point3d.voxel_downsample） ----------------
+// 核心 C API：无——适配层内实现哈希格网体素下采样（PCL VoxelGrid 等价简化，
+// SoA 直进直出；与 filter_cloud method 0 语义一致，见 node.json 数值口径注记）。
 // 参数（按 node.json params 声明顺序）：leaf_size(number，唯一参数)。
+// 输入：1 片点云（rgb 在则颜色均值随行）；输出：1 片点云；消息通道：无。
+// 错误码：1 输入未连线；2 点云为空；3 内存不足。
 
 POINT3DALG_EXPORT int Point3DAlg_ComuiVoxel(const AlgoCInput* in, AlgoCOutput* out) {
     memset(out, 0, sizeof(*out));
@@ -108,15 +112,12 @@ static int GetIntParam(const AlgoCInput* in, int def) {
     return def;
 }
 
-static double GetDoubleParam(const AlgoCInput* in, double def) {
-    for (int i = 0; i < in->paramCount; i++)
-        if (in->params[i].kind == 0) return in->params[i].d;
-    return def;
-}
-
 // ---------------- 算子入口：SICK 扫描读取（node.json: alg.point3d.read_sick） ----------------
+// 核心 C API：Point3DAlg_ReadSickCloud。
 // 参数（按 node.json params 声明顺序）：folder(path) frame(int, <0=全部帧)；
 // 换算参数自动读取（recipe/common json，默认路径，见 Point3DAlg_api.h 注释）。
+// 输入：无输入端口；输出：点云（rgb=NULL，查看器按高度伪彩上色）；消息通道：无。
+// 错误码：1 未设置路径；2 读取失败（-4 配置/数据错误）；3 内存不足。
 
 POINT3DALG_EXPORT int Point3DAlg_ComuiReadSick(const AlgoCInput* in, AlgoCOutput* out) {
     memset(out, 0, sizeof(*out));
@@ -149,11 +150,14 @@ POINT3DALG_EXPORT int Point3DAlg_ComuiReadSick(const AlgoCInput* in, AlgoCOutput
 }
 
 // ---------------- 算子入口：手动配准 ICP（node.json: alg.point3d.manual_regist） ----------------
-// 参数（按 node.json params 声明顺序，宿主 marshal 不带参数名）：strategy(int 1-6)
+// 核心 C API：Point3DAlg_RegistParseTransformText / RegistRun / RegistApplyTransform
+// 参数（按 node.json params 声明顺序，宿主 marshal 不带参数名）：strategy(int 1-7)
 // init_transform(text 16值逗号分隔) max_distance(number) max_iteration(int)；
 // 同 kind 参数以出现次序区分：第 1 个 int=strategy、第 2 个 int=max_iteration
 // 输入：两片点云（源/目标）；输出：配准后点云（ABI v1 无 text 通道，变换矩阵并入节点消息）
 // 初值建议用 Point3DAlg_RegistTool.exe（键盘粗调）导出的 regist_T_flat.txt 内容。
+// 错误码：1 输入未连线；2 点云为空 / 配准未收敛（fitness<0，变换未定义）；3 内存不足；
+//         0 成功（消息 = fitness/rmse/T/策略信息，manual_regist 消息先例）。
 
 } // extern "C"
 
@@ -255,10 +259,12 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiManualRegist(const AlgoCInput* 
 #endif   // POINT3DALG_HAS_PCL（ManualRegist）
 
 // ---------------- 算子入口：拱形球顶拟合（node.json: alg.point3d.dome_fit） ----------------
+// 核心 C API：Point3DAlg_DomeFit / DomeStatsOf。
 // 参数（按 node.json params 声明顺序提取，同 kind 参数以出现次序区分）：
 //   height_threshold(number) cluster_tolerance(number) min_points(int) max_fit_rms(number)
 // 输入：一片点云（基面 + bump 顶点，mm）；输出：每 bump 一个点的点云（x=apex_x,
 // y=apex_y, z=bump 高度 mm），消息通道返回高度统计（有效数/均值/σ/中位/范围）。
+// 错误码：1 输入未连线；2 点云为空；3 内存不足；4 拟合失败/无有效 bump。
 
 #ifdef POINT3DALG_HAS_PCL
 extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiDomeFit(const AlgoCInput* in, AlgoCOutput* out) {
@@ -338,9 +344,11 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiDomeFit(const AlgoCInput* in, A
 #endif   // POINT3DALG_HAS_PCL（DomeFit）
 
 // ---------------- 算子入口：ROI 平面量测（node.json: alg.point3d.region_plane） ----------------
+// 核心 C API：Point3DAlg_RegionPlaneFit。
 // 参数（按 node.json params 声明顺序，全部 number）：x y w h（XY 矩形 ROI，mm）
 // 输入：一片点云（mm，z 为高度向）；无云输出，量测结果并入节点消息：
 //   高度（ROI 中心）/ 平面度 PV / σ / 内点数（ABI v1 无数值输出通道，manual_regist 同例）
+// 错误码：1 输入未连线；2 点云为空；4 量测失败（ROI 内点 < 3 或退化）。
 
 #ifdef POINT3DALG_HAS_PCL
 extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiRegionPlane(const AlgoCInput* in, AlgoCOutput* out) {
@@ -378,9 +386,12 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiRegionPlane(const AlgoCInput* i
 #endif   // POINT3DALG_HAS_PCL（RegionPlane）
 
 // ---------------- 算子入口：点云高度差对比（node.json: alg.point3d.cloud_diff） ----------------
-// 参数（按 node.json params 声明顺序，全部 number）：cell_size min_points diff_threshold
-// 输入：两片点云（clouds[0]=基准，clouds[1]=被测，XY 已对齐）；输出：差值点云
-//（每格一点 z=diff，正=被测高），统计并入消息（ABI v1 无数值输出通道）
+// 核心 C API：Point3DAlg_CloudDiff。
+// 参数（按 node.json params 声明顺序）：cell_size(number) min_points(int)
+// diff_threshold(number) align_search(number，>0 时先做 XY 粗对齐)
+// 输入：两片点云（clouds[0]=基准，clouds[1]=被测，XY 已对齐或 align_search>0 自动粗对齐）；
+// 输出：差值点云（每格一点 z=diff，正=被测高），统计并入消息（ABI v1 无数值输出通道）
+// 错误码：1 输入未连线；2 点云为空；3 内存不足；4 对比失败（两片云不重叠或格数据不足）。
 
 #ifdef POINT3DALG_HAS_PCL
 extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiCloudDiff(const AlgoCInput* in, AlgoCOutput* out) {
@@ -452,9 +463,11 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiCloudDiff(const AlgoCInput* in,
 #endif   // POINT3DALG_HAS_PCL（CloudDiff）
 
 // ---------------- 算子入口：高度切片圆/孔位量测（node.json: alg.point3d.circle_fit） ----------------
+// 核心 C API：Point3DAlg_DetectCircles。
 // 参数（按 node.json params 声明顺序）：z_low(number) z_high(number) cluster_tolerance(number)
 //                                        min_points(int) radius_min(number) radius_max(number)
 // 输入：一片点云（mm）；输出：每孔一点（x=圆心x, y=圆心y, z=半径），统计并入消息
+// 错误码：1 输入未连线；2 点云为空；3 内存不足；4 检测失败（参数非法）/高度带无切片点/无有效圆。
 
 #ifdef POINT3DALG_HAS_PCL
 extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiCircleFit(const AlgoCInput* in, AlgoCOutput* out) {
@@ -528,9 +541,11 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiCircleFit(const AlgoCInput* in,
 #endif   // POINT3DALG_HAS_PCL（CircleFit）
 
 // ---------------- 算子入口：轮廓/截面量测（node.json: alg.point3d.profile） ----------------
+// 核心 C API：Point3DAlg_Profile。
 // 参数（按 node.json params 声明顺序，全部 number）：x0 y0 x1 y1 band bin_size
 // 输入：一片点云（mm）；输出：剖面点云（每格一点，实际线坐标 xy + z=格内中位高度），
 // 统计（z 范围/位置、台阶落差 max_step 及位置）并入消息
+// 错误码：1 输入未连线；2 点云为空；3 内存不足；4 剖面提取失败（带内无点或参数非法）。
 
 #ifdef POINT3DALG_HAS_PCL
 extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiProfile(const AlgoCInput* in, AlgoCOutput* out) {
@@ -591,10 +606,15 @@ extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiProfile(const AlgoCInput* in, A
 #endif   // POINT3DALG_HAS_PCL（Profile）
 
 // ---------------- 算子入口：bump 全参数报表（node.json: alg.point3d.bump_report） ----------------
-// 参数（按 node.json 声明顺序）：height_threshold(number) cluster_tolerance(number)
-//   height_min(number) height_max(number) diameter_min(number) diameter_max(number)
+// 核心 C API：Point3DAlg_BumpReport。
+// 参数（按 node.json 声明顺序，11 个 number）：height_threshold(number)
+//   cluster_tolerance(number) height_min(number) height_max(number)
+//   diameter_min(number) diameter_max(number) nominal_pitch_x(number)
+//   nominal_pitch_y(number) nominal_origin_x(number) nominal_origin_y(number)
+//   pos_threshold(number)（nominal_pitch_x/y 均 >0 启用位置度判定）
 // 输入：一片点云；输出：每 bump 一点（x/y=球顶 XY，z=高度 mm），统计并入消息
 // （NG 位 bit0 高度越界 bit1 直径越界 bit2 截面校验失败）
+// 错误码：1 输入未连线；2 点云为空；3 内存不足；4 报表失败（未检出 bump）。
 
 #ifdef POINT3DALG_HAS_PCL
 extern "C" POINT3DALG_EXPORT int Point3DAlg_ComuiBumpReport(const AlgoCInput* in, AlgoCOutput* out) {

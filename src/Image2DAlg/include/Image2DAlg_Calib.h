@@ -71,10 +71,18 @@ IMAGE2DALG_EXPORT bool MeiUnprojectPixel(
     double u, double v, const CameraIntrinsics& K, double out_dir[3]);
 
 /// 鱼眼去畸变：像素 → 矫正后像素（映射到理想针孔图像）。
+/// [in]  u/v     鱼眼图上的像素坐标
+/// [in]  K       内参（fx/fy/cx/cy/xi 参与解算）
+/// [out] out_uv  理想针孔图像上的像素坐标 [u,v]
+/// 返回 false = 反投影不收敛 / 方向 z 分量近零（像素超出有效视场）。
 IMAGE2DALG_EXPORT bool MeiUndistortPixel(
     double u, double v, const CameraIntrinsics& K, double out_uv[2]);
 
 /// 针孔 → 鱼眼重投影（去畸变的逆映射，用于生成去畸变查表）。
+/// [in]  u_undist/v_undist  理想针孔图像上的像素坐标（fx/fy 广义焦距直接当针孔焦距）
+/// [in]  K                  内参
+/// [out] out_uv              对应的 Mei 鱼眼像素坐标 [u,v]
+/// 返回 false = 投影奇异（denom = ξ+cosθ 近零；中心点恒返回 true）。
 IMAGE2DALG_EXPORT bool MeiDistortPixel(
     double u_undist, double v_undist, const CameraIntrinsics& K, double out_uv[2]);
 
@@ -119,8 +127,10 @@ IMAGE2DALG_EXPORT bool CalibrateFisheyeMei(
 /// 双目标定：左右各自单目标定 → 立体对齐 → Bouguet 立体校正。
 /// [in] leftPoints/rightPoints   左右图像角点（张数一致、每张点数一致）
 /// [out] KL/KR                   左右内参 + 畸变
-/// [out] ext                     左→右外参
+/// [out] ext                     左→右外参（R/t 逐帧相对位姿平均）
 /// [out] rect                    立体校正输出（R1/R2/P1/P2/Q）
+/// [out] outRms                  左右单目重投影 RMS 的均值
+/// 返回 false = 左图 < 3 张 / 左右张数不一致 / 左或右单目标定失败。
 IMAGE2DALG_EXPORT bool CalibrateStereo(
     const std::vector<std::vector<cv::Point2f>>& leftPoints,
     const std::vector<std::vector<cv::Point2f>>& rightPoints,
@@ -140,6 +150,7 @@ IMAGE2DALG_EXPORT bool CalibSave(const char* path, const CameraIntrinsics& K,
                                  const StereoRectify* rect = nullptr);
 
 /// 加载（ext/rect 为 nullptr 时只读内参；文件里缺对应段则保持默认）。
+/// 返回 false = 打开/读取失败，或内参缺失（解析后 fx/fy <= 0）。
 IMAGE2DALG_EXPORT bool CalibLoad(const char* path, CameraIntrinsics& K,
                                  StereoExtrinsics* ext = nullptr,
                                  StereoRectify* rect = nullptr);

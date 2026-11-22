@@ -56,6 +56,8 @@ void Point3DAlg_FreeCloud(Point3DAlg_PointCloud* cloud)
 // 一步式读取（既有接口）
 // =====================================================================
 
+// 一步式读取：扫描文件夹 → SoA 点云（mm；内部 LoadSickConfig + SickReader 链路）。
+// 错误码 -1 参数错 / -2 无 .dat / -3 帧号越界 / -4 配置/数据错误（api.h 注为准）。
 int Point3DAlg_ReadSickCloud(const char* folder, int frame,
                              const char* recipe_path, const char* common_path,
                              float** out_xyz, int* out_count)
@@ -108,6 +110,8 @@ int Point3DAlg_ReadSickCloud(const char* folder, int frame,
     }
 }
 
+// 释放本库 malloc 的输出缓冲（ReadSickCloud xyz / SICK 句柄族 / FitModel 内点 /
+// EstimateNormals·ComputeFeature·MeshOp·PlaneResiduals 等数组出参；NULL 安全直通 free）
 void Point3DAlg_FreeBuffer(void* p)
 {
     free(p);

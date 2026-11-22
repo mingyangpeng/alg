@@ -1,7 +1,17 @@
 # 构建产物
 build/
+build_*/
 output/
 Testing/
+
+# 本地工具状态 / 依赖目录
+.mimosa/
+node_modules/
+
+# 本地测试输出（大体积，不入库）
+sick_depth.png
+sick_depth_view.png
+sick_depth_fov.png
 
 # 编辑器配置
 .vscode/

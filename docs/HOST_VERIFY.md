@@ -7,14 +7,19 @@
 >
 > 部署方式见 `docs/THIRD_PARTY_OPS.md` §8：宿主 `comdll/algo/<名称>/` 下放
 > DLL + node.json（依赖同目录），F5 重载；本仓库构建产物在
-> `build/output/Release/`（5 个算法 DLL + 43 个 node.json 均已部署）。
+> `build/output/Release/`（5 个算法 DLL + 105 个 node.json 均已部署）。
 
-## 〇、图像链路 32 节点速查（T41/T44/T45/T47/T48/T49/T50/T53/T54 九批，参数以 node.json 为准）
+## 〇、图像链路早期批次 32 节点速查（T41–T55 十批存档；现 image2d 节点 70 个，全量参数以 node.json 与 docs/接口文档.md §6 为准）
 
-前 2 个（read/gamma）见下文第二节；其余 27 个 image2d 节点（dll=`Image2DAlg.dll`，
+> **存档口径**：本表为 Image2DAlg v2.1.0（T55）时点快照，仅覆盖早期 32 个节点；此后
+> 2.2.0~2.8.0 新增的 binarize / laplacian / filter2d / denoise_nlmeans / 特征扩展 /
+> 跟踪配准立体族 / 频域缺陷 / 对位拼接流水线 / 稳健拟合变体等节点**不在本表**，
+> 联调参数一律以 `integration/comui/image2d_*.node.json` 与 `docs/接口文档.md` 为准。
+
+前 2 个（read/gamma）见下文第二节；其余 30 个 image2d 节点（dll=`Image2DAlg.dll`，
 method 前缀 `Image2DAlg_Comui`，输入 1 张 BGRA 图、absdiff/match_template_ex/find_matches/
 find_matches_ex/match_template_masked 需 2~3 张；输出 BGRA（region_stats 无图像输出，
-结果走消息通道）；单通道结果自动转 BGRA 显示；ctypes 端到端 44 项已过）：
+结果走消息通道）；单通道结果自动转 BGRA 显示；截至本表时点 ctypes 端到端 44 项已过）：
 
 | node id | method | params（声明顺序） | 说明 |
 |---|---|---|---|

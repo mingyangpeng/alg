@@ -198,7 +198,7 @@ public:
     bool nearest(const Point3d& q, int& out_index, double& out_dist) const;
 
     /// 半径搜索：半径内全部点（含边界 dist == radius），按距离升序（同距按索引升序）。
-    /// 空树输出空列表。
+    /// 空树或 radius < 0 输出空列表。
     void radiusSearch(const Point3d& q, double radius,
                       std::vector<int>& out_indices, std::vector<double>& out_dists) const;
 

@@ -102,7 +102,9 @@ ComUI 适配层在 `integration/comui/Image2DAlg_comui.cpp`，节点声明在 `i
 | `Image2DAlg_FitEllipseDirect(xy, count, &fit)` | 椭圆拟合 Direct 法（2.8.0）：cv::fitEllipseDirect 透传——Fitzgibbon 直接最小二乘（偏心修正，4·Axx·Ayy − Axy² > 0 椭圆性约束），高偏心（细长）椭圆比标准代数拟合残差更小；其余契约同 FitEllipseAMS（≥5 点、EllipseFit 同构、退化 → -99） |
 | `Image2DAlg_FitEllipsesFromBinary(in, min_area, max_area, min_axis, max_axis, &fits, &count)` | 多目标椭圆拟合（椭圆焊盘/异形孔）：二值逐外轮廓 fitEllipse + 全轴长过滤；配 `FreeEllipses` |
 | `Image2DAlg_FitLinesFromBinary(in, min_area, max_area, min_length, &lines, &count)` | 多目标直线拟合（板边/边缘线）：二值逐外轮廓 fitLine DIST_L2 + 覆盖跨度过滤；配 `FreeLineFits` |
-| `Image2DAlg_FitRect(xy, count, &fit)` | 最小外接旋转矩形，返回 `RectFit{cx, cy, width, height, angle}` |
+| `Image2DAlg_FitRect(xy, count, &fit)` | 最小外接旋转矩形，返回 `RectFit{cx, cy, width, height, angle}`（零面积退化 → -3） |
+| `Image2DAlg_ApproxPolyDP(xy, count, epsilon, closed, &out_xy, &out_count)` | 轮廓顶点逼近（Douglas-Peucker，2.0.0）：矩形/多边形形状判定——epsilon 内删冗余顶点（矩形轮廓 → 4 角点）；epsilon < 0 → -3、逼近过度退化（结果 < 3 顶点，epsilon 过大）→ -3；输出扁平点集配 `FreeContourPoints` |
+| `Image2DAlg_FitRectsFromBinary(in, min_area, max_area, &rects, &count)` | 多目标旋转矩形拟合（2.0.0，异形件/料口测量）：二值前景逐外轮廓 minAreaRect + 面积过滤；无结果 NULL/0/返回 0；配 `FreeRectFits` |
 | `Image2DAlg_FitPoly(xy, count, degree, &fit)` | 多项式拟合 y=Σcoef[i]·x^i（degree 1~5，SVD），返回 `PolyFit{coef[6], degree, rms}`——边缘直线度/翘曲趋势 |
 | `Image2DAlg_HoughLinesP(in, rho, theta_deg, threshold, min_len, max_gap, &lines, &count)` | 概率霍夫直线（线段端点 `Line4[]`），配 `FreeLines` |
 | `Image2DAlg_HoughLinesPROI(in, rx, ry, rw, rh, ...)` | ROI 版霍夫直线（端点回全图系） |
@@ -137,7 +139,7 @@ ComUI 适配层在 `integration/comui/Image2DAlg_comui.cpp`，节点声明在 `i
 | 函数 | 说明 |
 |------|------|
 | `Image2DAlg_FastFeatures(in, threshold, nonmax_suppression, &pts, &n)` | FAST 角点（比 Harris 快一个数量级；`threshold<=0` → -3；平坦图无检出返回 0/0）；配 `FreePoint2f` |
-| `Image2DAlg_ComputeDescriptors(in, pts, count, type, n_features, &out)` | 关键点描述子计算，type：0=ORB(32B) / 1=BRISK(64B) / 2=AKAZE(61B) / 3=SIFT(浮点 128 维)；`n_features` 仅 ORB 有效；关键点越界/贴边 → -2；输出 `Image2DAlg_Descriptors{type, dim, is_float, count, data, fdata}` |
+| `Image2DAlg_ComputeDescriptors(in, pts, count, type, n_features, &out)` | 关键点描述子计算，type：0=ORB(32B) / 1=BRISK(64B) / 2=AKAZE(61B) / 3=SIFT(浮点 128 维)；`n_features` 仅 ORB 有效；关键点越界（图外）→ -2（贴边点由库复制边框扩图兜底，正常出描述子）；输出 `Image2DAlg_Descriptors{type, dim, is_float, count, data, fdata}` |
 | `Image2DAlg_FreeDescriptors(d)` | 释放描述子 data/fdata 并置空（结构体归调用方；NULL 安全） |
 | `Image2DAlg_MatchFeatures(d1, d2, pts1, pts2, ratio, &matches, &count)` | BFMatcher kNN(k=2) + Lowe 比率：二进制用 Hamming、SIFT 用 L2；ratio ∉ (0,1) → -3，type/dim/is_float 不一致 → -3，匹配 < 2 对 → -2；**复用** `Image2DAlg_OrbMatch` 结构与 `FreeOrbMatches` |
 | `Image2DAlg_EstimateAffinePartial(matches, count, thr, m[6], &inliers)` | 部分仿射估计（4 DOF：旋转+等比缩放+平移，工业对位首选）：RANSAC；count < 3 → -2，thr <= 0 → -3；`m` 为 in1→in2 的 2x3 行主序（同 ORBAlign 方向，可接 WarpAffine） |

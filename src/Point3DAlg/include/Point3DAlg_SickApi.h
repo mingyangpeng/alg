@@ -104,7 +104,8 @@ POINT3DALG_EXPORT int Point3DAlg_GetSickRaw(Point3DAlg_SickReaderH handle,
 //   与 GetCloud 点一一对应（按 GetCloud 生成顺序=拼接图行主序、跳过 0 深度格，
 //   从强度图同格取值——类成员 GetCloudIntensity 当前未填充，本层按上述映射
 //   等效产出，类实现填充后语义不变）。
-// out_cloud_int/out_point_count 允许为 NULL（只取强度图）；out_img/out_w/out_h 必填。
+// out_cloud_int/out_point_count 允许为 NULL（只取强度图）——两者按对生效：
+//   任一为 NULL 即视为不需要逐点强度，两出参均不填充；out_img/out_w/out_h 必填。
 // 错误码：-1 handle/out_img/out_w/out_h NULL；-2 未加载 / 无强度通道 / 强度图为空；
 //   -4 拼接/取点云抛异常、内存不足。
 POINT3DALG_EXPORT int Point3DAlg_GetSickIntensity(Point3DAlg_SickReaderH handle,

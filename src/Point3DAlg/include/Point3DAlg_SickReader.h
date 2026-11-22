@@ -4,8 +4,13 @@
 // SICK Ranger3 扫数据读取类（C++）。
 // 数据布局与换算链路同 Juxin6X3D stitchingDepthImg（ReadSickData/ReadFolderData/ReadScan3DMultiPart），
 // 已按 Z:\ScanImage\3D 真实数据逐字节验证：
-//   .dat 平面布局：[N × 5120B 高度图（2560 × uint16 小端，0 = 无效点）]
-//                  [N × 20B  编码器记录（5 × int32：A, 0x40000000, B, C, 0）]
+//   .dat 平面布局（分块存放，每行均摊两格式分别 5140B / 7700B；ScanDevice
+//   按行距整除 + 编码器块 magic 判别）：
+//     旧格式 = [N × 5120B 高度图（2560 × uint16 小端，0 = 无效点）]
+//              + [N × 20B 编码器记录（5 × int32：A, 0x40000000, B, C, 0）]
+//     新格式 = 旧格式的高度块与编码器块之间多一块 [N × 2560B 强度图
+//              （2560 × uint8，0 = 无效）]（hasRef = true，Fov::refRow /
+//              GetIntensity / GetCloudIntensity 消费）
 //     A 为扫描轴编码器值，逐行 ±scanStep，蛇形往返由方向翻转体现。
 //   同名 .xml（icon_data_format，a/c axis range scale/offset）：**预留**——当前实现
 //   未读取 xml，换算完全依赖 recipe/common json（需要兜底时再按 icon_data_format 补）。
@@ -54,24 +59,29 @@ typedef struct Point3DAlg_SickConfig {
 //   3 = recipe 缺 LensRatio；4 = common 文件不存在；
 //   5 = common 缺 mmPulse；  6 = common 缺补偿组（LensRatio 无 "5x"/"10x" 对应组）。
 // err_msg 为调用方提供的缓冲（可为 NULL），失败原因写入其中（UTF-8/ANSI，截断到 err_len）。
+// 另：cfg 为 NULL → 返回 -1（err_msg = "cfg 参数为空"），不触碰 err 码 1~6。
 POINT3DALG_EXPORT int Point3DAlg_LoadSickConfig(const char* recipe_path, const char* common_path,
                                                 Point3DAlg_SickConfig* cfg,
                                                 char* err_msg, int err_len);
 
 // ---------------- 单独的保存接口 ----------------
 // 点云保存为 PLY（binary=1 二进制 little-endian，0 ASCII 文本）。返回 0 成功。
+// 错误码：-1 path/xyz 为 NULL、path 空串、count<=0；-2 文件打不开；-3 写入失败。
 POINT3DALG_EXPORT int Point3DAlg_SaveCloud(const char* path,
                                            const float* xyz, int count,
                                            int binary /*0=ASCII 1=二进制*/);
 
 // 深度图保存：rows×cols 的 float 深度图（mm，0=无效）存为 16 位灰度 PNG
 // （有效点线性映射 1..65535，0 = 无效点专用；zmin/zmax 为映射范围，传 0 则按数据自适应）。
+// 错误码：-1 path/depth 为 NULL、path 空串、rows/cols<=0；-2 PNG 写文件失败；
+//   -3 无有效点（自适应映射时数据全为 0）。
 POINT3DALG_EXPORT int Point3DAlg_SaveDepth(const char* path,
                                            const float* depth, int rows, int cols,
                                            double zmin, double zmax);
 
 // 深度图可视版：同上映射到 1..255 的 8 位灰度 PNG（低=暗 高=亮），供人眼查看。
 // 注意：依赖 OpenCV（POINT3DALG_NO_OPENCV 构建时返回 -9，主链路不受影响）。
+// 错误码：同 SaveDepth（-1/-2/-3），另有 -9 = 无 OpenCV 构建。
 POINT3DALG_EXPORT int Point3DAlg_SaveDepthView(const char* path,
                                                const float* depth, int rows, int cols,
                                                double zmin, double zmax);
@@ -81,6 +91,7 @@ POINT3DALG_EXPORT int Point3DAlg_SaveDepthView(const char* path,
 //   每个 FOV 的框颜色按 id 哈希随机（HSV 全彩），与灰度底图区分明显。
 //   rects[i] = {x, y, w, h}（像素，列 x 起、行 y 起）；ids[i] = FOV 序号。
 //   ids 为 NULL 时用数组下标 i 作为序号。返回 0 成功。
+// 错误码：同 SaveDepth（-1/-2/-3），另有 -9 = 无 OpenCV 构建。
 POINT3DALG_EXPORT int Point3DAlg_DrawFovBoxes(const char* path,
                                               const float* depth, int rows, int cols,
                                               double zmin, double zmax,

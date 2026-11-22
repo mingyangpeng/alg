@@ -19,6 +19,7 @@ std::mutex          g_mutex;      // 保护 g_file / g_filePath / 写操作
 FILE*               g_file = nullptr;
 std::string         g_filePath;
 
+// 级别 → 定宽 5 字符标签（保证日志列对齐，便于 grep）
 const char* LevelName(CommonAlg_LogLevel lv)
 {
     switch (lv) {

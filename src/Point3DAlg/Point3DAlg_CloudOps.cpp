@@ -936,6 +936,8 @@ int FitEllipsoidRansac(const CloudPtr& src, double threshold,
 // 点云文件读写
 // =====================================================================
 
+// 加载点云文件（0=PCD 1=PLY 2=TXT；TXT 分隔符 NULL/空串 = 连续空白切分；
+// 错误码 -1 参数/-2 打不开或格式错/-3 type 越界/-4 内存/-99，见 api.h 注）
 int Point3DAlg_LoadCloud(const char* path, int type,
                          const char* delimiter,
                          Point3DAlg_PointCloud* out)
@@ -966,6 +968,8 @@ int Point3DAlg_LoadCloud(const char* path, int type,
     }
 }
 
+// 保存点云文件（0=PCD 恒二进制 1=PLY（binary 生效）2=TXT 恒文本空格分隔；
+// 错误码 -1 参数/空点云/-2 写失败/-3 type 越界/-99，见 api.h 注）
 int Point3DAlg_SaveCloudEx(const char* path, int type,
                            const Point3DAlg_PointCloud* cloud,
                            int binary /*0=ASCII 1=二进制（仅 PLY 生效）*/)
@@ -996,6 +1000,10 @@ int Point3DAlg_SaveCloudEx(const char* path, int type,
 // 滤波与降采样（method/params 布局表见 api.h）
 // =====================================================================
 
+// 滤波/降采样 14 method（0=voxel 1=random 2=uniform 3=farthest 4=removeNonFinite
+// 5=removeDuplicates 6=passThrough 7=statisticalOutlier 8=radiusOutlier
+// 9=conditionalXYZ 10=approxVoxel 11=conditionalRemoval 12=medianFilter
+// 13=gridMinimum；params 布局与取值范围以 api.h 表为准）
 int Point3DAlg_FilterCloud(const Point3DAlg_PointCloud* in, int method,
                            const double* params, int param_count,
                            Point3DAlg_PointCloud* out)
@@ -1204,6 +1212,8 @@ static int CheckIndices(const int* indices, int indices_count, int count)
     return 0;
 }
 
+// 提取/裁剪 5 method（0=byIndices 1=byIndicesInverted 2=cropBox 3=cropOBB
+// 4=cropPolygonROI；indices/params 布局以 api.h 表为准）
 int Point3DAlg_ExtractCloud(const Point3DAlg_PointCloud* in, int method,
                             const int* indices, int indices_count,
                             const double* params, int param_count,
@@ -1290,6 +1300,8 @@ int Point3DAlg_ExtractCloud(const Point3DAlg_PointCloud* in, int method,
 // 空间变换（method/params 布局表见 api.h）
 // =====================================================================
 
+// 空间变换 7 method（0=applyMatrix 1=translate 2=rotate 3=rotateAround
+// 4=scale 5=scaleAround 6=project；params 布局以 api.h 表为准，点数不因变换改变）
 int Point3DAlg_TransformCloud(const Point3DAlg_PointCloud* in, int method,
                               const double* params, int param_count,
                               Point3DAlg_PointCloud* out)
@@ -1372,6 +1384,8 @@ int Point3DAlg_TransformCloud(const Point3DAlg_PointCloud* in, int method,
 // 通用几何拟合（1.2.0 P1；method/fit 枚举与 out_coeffs 布局表见 api.h）
 // =====================================================================
 
+// 通用几何拟合 11 method × 3 fit（out_coeffs 布局/支持度表以 api.h 注为准；
+// 两段式 capacity：不足 → -3 并回填所需长度；out_inliers 库 malloc，FreeBuffer 释放）
 int Point3DAlg_FitModel(const Point3DAlg_PointCloud* in, int method, int fit,
                         double distance_threshold,
                         double* out_coeffs, int coeffs_capacity,
@@ -1583,6 +1597,9 @@ int Point3DAlg_FitModel(const Point3DAlg_PointCloud* in, int method, int fit,
 // 分割与聚类（1.2.0 P1；method/params 布局表见 api.h）
 // =====================================================================
 
+// 分割/聚类 8 method（0=planeRANSAC 1=euclideanCluster 2=dbscan 3=regionGrowing
+// 4=planesMulti 5=conditionalEuclidean 6=groundPlane 7=minCut；段数组库 malloc，
+// FreeClouds 释放；逐 method 段语义以 api.h out_segments 注为准）
 int Point3DAlg_SegmentCloud(const Point3DAlg_PointCloud* in, int method,
                             const double* params, int param_count,
                             Point3DAlg_PointCloud** out_segments,
@@ -1939,6 +1956,7 @@ static int SearchCommon(const Point3DAlg_PointCloud* in, const double query[3],
     }
 }
 
+// KNN 搜索（k<=0 → -3；dist = 欧氏距离升序，indices/dists 库 malloc，FreeSearchResult 释放）
 int Point3DAlg_KnnSearch(const Point3DAlg_PointCloud* in,
                          const double query[3], int k,
                          int** out_indices, float** out_dists, int* out_count)
@@ -1946,6 +1964,7 @@ int Point3DAlg_KnnSearch(const Point3DAlg_PointCloud* in,
     return SearchCommon(in, query, 0, (double)k, out_indices, out_dists, out_count);
 }
 
+// 半径搜索（radius<=0 → -3；FLANN 原生无序，本层按距离升序稳定排序，其余同 KnnSearch）
 int Point3DAlg_RadiusSearch(const Point3DAlg_PointCloud* in,
                             const double query[3], double radius,
                             int** out_indices, float** out_dists, int* out_count)
@@ -2105,6 +2124,8 @@ static bool ParseTwoPlanes(const double* p, int n, float plane1[4], float plane2
     return true;
 }
 
+// 通用度量 8 method（0=AABB 1=OBB 2=质心 3=均值协方差 4=点云距离 5=平面度
+// 6=平面夹角 7=平面交线；out_values 布局以 api.h §9.10 表为准，两段式 capacity）
 int Point3DAlg_MeasureCloud(const Point3DAlg_PointCloud* in,
                             const Point3DAlg_PointCloud* other,
                             int method, const double* params, int param_count,
@@ -2296,6 +2317,7 @@ static shapely::FitMethod GdtFitMethod(int fit)
                                    : shapely::FitMethod::LMEDS;
 }
 
+// 圆度（GD&T 简化口径；out_values 9 值 = roundness + circle3D 拟合参数，见 api.h 注）
 int Point3DAlg_MeasureCircleRoundness(const Point3DAlg_PointCloud* in,
                                       int fit, double distance_threshold,
                                       double* out_values, int values_capacity,
@@ -2341,6 +2363,7 @@ int Point3DAlg_MeasureCircleRoundness(const Point3DAlg_PointCloud* in,
     }
 }
 
+// 圆柱度（GD&T 简化口径；out_values 8 值 = form + cylinder 拟合参数，PCL 仅 RANSAC）
 int Point3DAlg_MeasureCylinderForm(const Point3DAlg_PointCloud* in,
                                    int fit, double distance_threshold,
                                    double* out_values, int values_capacity,
@@ -2386,6 +2409,8 @@ int Point3DAlg_MeasureCylinderForm(const Point3DAlg_PointCloud* in,
     }
 }
 
+// 位置度偏差表（params = [match_radius, 理论孔位 x0,y0,...]；out_values 4T/位，
+// 按理论位顺序 [dx,dy,dist,measured_idx]，未配对 idx=-1，见 api.h 注）
 int Point3DAlg_MeasurePositionDeviation(const Point3DAlg_PointCloud* measured,
                                         const double* params, int param_count,
                                         double* out_values, int values_capacity,
@@ -2453,6 +2478,8 @@ int Point3DAlg_MeasurePositionDeviation(const Point3DAlg_PointCloud* measured,
     }
 }
 
+// 平面有符号残差数组（residual = n·p + d 逐点，n 不归一时内部除 |n|；
+// out_residuals 库 malloc 长度 = in->count，非有限点输出 NaN）
 int Point3DAlg_PlaneResiduals(const Point3DAlg_PointCloud* in,
                               const double* params, int param_count,
                               float** out_residuals, int* out_residual_count)
@@ -2494,6 +2521,8 @@ int Point3DAlg_PlaneResiduals(const Point3DAlg_PointCloud* in,
     }
 }
 
+// 点到闭合网格带符号距离（内负外正，斜射线穿越奇偶定符号；out_distances
+// 库 malloc 长度 = in->count，非有限点输出 NaN；暴力 O(n·f)，见 api.h 注）
 int Point3DAlg_MeasurePointToMeshSignedDistance(const Point3DAlg_PointCloud* in,
                                                 const Point3DAlg_Mesh* mesh,
                                                 float** out_distances, int* out_distance_count)
@@ -2531,6 +2560,8 @@ int Point3DAlg_MeasurePointToMeshSignedDistance(const Point3DAlg_PointCloud* in,
 // 法线估计（1.2.0 P2；输出 N×4 [nx,ny,nz,curvature]，见 api.h §9.11a）
 // =====================================================================
 
+// 法线估计（0=KNN k>=3 1=radius>0 邻居上限 100；out_normals 库 malloc，
+// N×4 布局 [nx,ny,nz,curvature]，与输入逐点一一对应，FreeBuffer 释放）
 int Point3DAlg_EstimateNormals(const Point3DAlg_PointCloud* in, int method,
                                double param, float** out_normals, int* out_count)
 {
@@ -2583,6 +2614,8 @@ int Point3DAlg_EstimateNormals(const Point3DAlg_PointCloud* in, int method,
 // 特征描述（1.2.0 P2；desc_type/param/out_dim 布局表见 api.h §9.11b）
 // =====================================================================
 
+// 特征描述（0=FPFH dim33 1=逐点协方差 dim9 2=马氏距离 dim1 3=最近邻距离 dim1；
+// out_features 库 malloc count*dim 个，FreeBuffer 释放；布局见 api.h §9.11b 表）
 int Point3DAlg_ComputeFeature(const Point3DAlg_PointCloud* in, int desc_type,
                               double param, float** out_features,
                               int* out_dim, int* out_count)
@@ -2675,6 +2708,8 @@ int Point3DAlg_ComputeFeature(const Point3DAlg_PointCloud* in, int desc_type,
 // 关键点检测（1.2.0 P2；type/参数映射见 api.h §9.11c）
 // =====================================================================
 
+// 关键点检测（0=Harris3D：radius>0/threshold>=0；1=ISS3D：radius=salient>0/
+// threshold=non_max>0；0 检出 → -2，out 点云 FreeCloud 释放）
 int Point3DAlg_DetectKeypoints(const Point3DAlg_PointCloud* in, int type,
                                double radius, double threshold,
                                Point3DAlg_PointCloud* out)
@@ -2718,6 +2753,9 @@ int Point3DAlg_DetectKeypoints(const Point3DAlg_PointCloud* in, int type,
 // 表面重建（1.2.0 P2；type/params 布局表见 api.h §9.12）
 // =====================================================================
 
+// 表面重建 9 type（0=convexHull 1=concaveHull 2=MLS 3=Poisson 4=greedyProjection
+// 5/6=marchingCubes 7=gridProjection 8=organizedFastMesh 恒 -2；type3~7 内部
+// 自动估法线 + MST 朝向一致化；params 布局以 api.h §9.12 表为准）
 int Point3DAlg_ReconstructSurface(const Point3DAlg_PointCloud* in, int type,
                                   const double* params, int param_count,
                                   Point3DAlg_Mesh* out_mesh)
@@ -2866,6 +2904,8 @@ void Point3DAlg_FreeMesh(Point3DAlg_Mesh* mesh)
 // 网格处理与度量（1.2.0 P2；op/params/出参分流表见 api.h）
 // =====================================================================
 
+// 网格处理与度量 8 op（0=平滑 1=抽稀 2=OBB 裁剪 → out_mesh；3=面积 4=体积 →
+// out_scalar；5=点距 6=面法线 7=顶点法线 → out_array；出参分流表见 api.h 注）
 int Point3DAlg_MeshOp(const Point3DAlg_Mesh* in, int op,
                       const double* params, int param_count,
                       Point3DAlg_Mesh* out_mesh, double* out_scalar,
@@ -2996,6 +3036,8 @@ int Point3DAlg_MeshOp(const Point3DAlg_Mesh* in, int op,
 // 3D→2D 桥接（1.2.0 P2；HeightMap 容器布局见 api.h §9.13）
 // =====================================================================
 
+// 点云 XY 栅格化高度图（mode 0=最高 z 1=最低 2=均值 3=点计数密度；cell>0，
+// 上限 2000 万格；out cells/mask 库 malloc，FreeHeightMap 释放）
 int Point3DAlg_CloudToHeightMap(const Point3DAlg_PointCloud* in,
                                 double cell, int mode,
                                 Point3DAlg_HeightMap* out)
@@ -3023,6 +3065,8 @@ int Point3DAlg_CloudToHeightMap(const Point3DAlg_PointCloud* in,
     }
 }
 
+// 高度图反向点云化（每有效格一格心点：x=x0+(col+0.5)*cell、y=y0+(row+0.5)*cell、
+// z=cells 值；out 用 FreeCloud 释放）
 int Point3DAlg_HeightMapToCloud(const Point3DAlg_HeightMap* hm,
                                 Point3DAlg_PointCloud* out)
 {
@@ -3051,6 +3095,8 @@ int Point3DAlg_HeightMapToCloud(const Point3DAlg_HeightMap* hm,
     }
 }
 
+// 厚度图（上云每格最高 z − 下云每格最低 z，栅格范围 = 两云 XY 包围盒并集；
+// 负厚度保留不钳制；cell>0，上限同 CloudToHeightMap）
 int Point3DAlg_ThicknessMap(const Point3DAlg_PointCloud* top,
                             const Point3DAlg_PointCloud* bottom,
                             double cell, Point3DAlg_HeightMap* out)

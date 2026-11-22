@@ -12,8 +12,6 @@
 #include <windows.h>
 #endif
 
-// ---------------- 编码检测与转换 ----------------
-
 // ---------------- 编码转换 ----------------
 
 // 是否合法 UTF-8（含 4 字节序列校验；BOM 已由调用方处理）
@@ -150,7 +148,8 @@ std::vector<double> JsonValue::array() const
 
 std::vector<double> JsonValue::group(int idx) const
 {
-    // 二维数组的第 idx 组：等价于 at(idx).array()
+    // 二维数组的第 idx 组：组内非数值元素填 0.0
+    // （与 array() 的"跳过非数值"语义不同，契约见头文件 group 注释）
     if (!j_ || !j_->is_array() || idx < 0 || (size_t)idx >= j_->size())
         return {};
     const nlohmann::json& sub = (*j_)[(size_t)idx];

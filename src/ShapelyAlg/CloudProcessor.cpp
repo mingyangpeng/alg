@@ -1766,7 +1766,7 @@ void torusCascadeRefine(const std::vector<Eigen::Vector3d>& pts, double scale, d
 }
 
 // 采样稳健层（fit=RANSAC/MSAC 共享引擎，评分口径不同）：
-//   确定性候选/随机试验 → 胜者立即级联精化（宽捕获 8t→4t→2t→t 逐轮 gather
+//   确定性候选/随机试验 → 胜者立即级联精化（窄进宽出：t→2t→4t→8t 逐轮 gather
 //   内点全程 LM，见 torusCascadeRefine）→ 按 t 口径内点数择优。
 // 采样规模 s = clamp(n/4, 8, 32)：不取严格 7 点最小采样——7 点定 8 参数需要解
 // 7 点环面方程组（无解析解，数值求解在 7 点上严重过拟合：7 自由度模型对任意
@@ -1774,7 +1774,7 @@ void torusCascadeRefine(const std::vector<Eigen::Vector3d>& pts, double scale, d
 // 远高于 7 点 PCA，实测内点收敛率显著更高。
 // 评分：RANSAC = 内点计数最大；MSAC = Σ min(r_i², t²) 最小（M-估计截断口径）。
 // 提前终止：经典 RANSAC 外推 N = log(1−p_good)/log(1−w^s)，p_good = 0.999，
-// 上限 400 试验；固定种子（kTorusSeed）保证同输入结果可复现。
+// 上限 800 试验；固定种子（kTorusSeed）保证同输入结果可复现。
 bool torusRobust(const std::vector<Eigen::Vector3d>& pts, double scale, double t,
                  bool msacScore, Eigen::VectorXd& out_th, std::vector<int>& out_inliers)
 {
@@ -2745,8 +2745,8 @@ void CloudProcessor<PointT>::treeOctreeChangeDetection(const CloudConstPtr& src1
                                                        std::vector<int>& out_new_indices)
 {
     out_new_indices.clear();
-    // src1 为空是合法输入（全部点都是"新增"），但分辨率非法会让 octree 内部
-    // 死循环挂死（实测 res=0 卡死），必须先钳制
+    // src1 为空点云（非 nullptr）是合法输入（全部点都是"新增"）；分辨率非法会让
+    // octree 内部死循环挂死（实测 res=0 卡死），非法输入直接返回空列表
     if (!src1 || !src2 || src2->empty() || min_resolution <= 0)
         return;
     pcl::octree::OctreePointCloudChangeDetector<PointT> oct((float)min_resolution);
@@ -3331,10 +3331,6 @@ double CloudProcessor<PointT>::measureMeshVolume(const Mesh3d& mesh)
     }
     return volume;
 }
-
-
-
-// 带符号点-网格距离：精确最近距离 × 射线奇偶符号（仅闭合网格有物理意义）
 
 // 网格每面单位法线（退化/越界面 = (0,0,0)）
 template <typename PointT>

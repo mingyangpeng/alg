@@ -40,8 +40,10 @@ COMMONALG_EXPORT void CommonAlg_LogSetLevel(CommonAlg_LogLevel level);
 /// 当前级别（即最近一次 SetLevel 的值；未设置时为 Info）。
 COMMONALG_EXPORT CommonAlg_LogLevel CommonAlg_LogGetLevel();
 
-/// 设置日志文件路径（追加写；目录需已存在）。传空串关闭文件输出。
-/// 返回 false 表示文件打不开（仍会输出到 stderr）。
+/// 设置日志文件路径（追加写；目录须已存在，库不代建）。传空串关闭文件输出。
+/// 调用即先关闭旧日志文件再打开新文件；返回 false = 新文件打不开
+/// （此时旧文件输出也已关闭，之后仅 stderr；可随时调用，线程安全）。
+/// Windows 下 path 按 ANSI（936/GBK）码页解释（非 UTF-8）。
 COMMONALG_EXPORT bool CommonAlg_LogSetFile(const std::string& path);
 
 /// 关闭日志文件（之后只输出 stderr）。
@@ -49,11 +51,13 @@ COMMONALG_EXPORT void CommonAlg_LogCloseFile();
 
 // ---------------- 输出（一般用下面的宏，不直接调用） ----------------
 
-/// 写一条日志。
+/// 写一条日志（一般不直接调用，走下方宏）。线程安全：多线程并发调用
+/// 单条完整不交叉；写文件后立即 flush（进程崩溃时已写日志不丢）。
 /// [in] level  级别
-/// [in] file   源文件名（宏自动传 __FILE__）
+/// [in] file   源文件名（宏自动传 __FILE__；输出只显示文件名部分）
 /// [in] line   行号（宏自动传 __LINE__）
-/// [in] fmt    printf 风格格式串
+/// [in] fmt    printf 风格格式串（变参个数/类型须与之匹配，否则未定义行为）
+/// 消息体超约 2047 字节截断；每条同时输出到 stderr 与日志文件（若已设置）。
 COMMONALG_EXPORT void CommonAlg_LogWrite(CommonAlg_LogLevel level, const char* file, int line,
                         const char* fmt, ...);
 

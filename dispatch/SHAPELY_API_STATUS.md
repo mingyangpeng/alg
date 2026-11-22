@@ -1,13 +1,19 @@
-﻿# ShapelyAlg 接口清单与完成状态（2026-11-12 迭代 14 后，从头文件实测提取）
+﻿# ShapelyAlg 接口清单与完成状态（2026-11-12 迭代 14 后，从头文件实测提取；2026-11-22 盘点增补）
 
-> 口径：方法名一级（重载计 1 个名字）；全部**已实现并有测试**（701 断言；Release + Debug 双配置 ctest 全绿）。
-> 未完成项见文末（方向 C 余项 + 方向 D + 技术债），当前**无半成品/占位接口**。
+> 口径：方法名一级（重载计 1 个名字）；全部**已实现并有测试**（701 断言 @ 迭代 14；此后 1.3.0~1.8.0
+> 各批仅增不减——ShapelyAlg_test 静态 check( 计数 680、旧构建目录直跑 709/709 全绿 @ 2026-11-20
+> 值守基线。**注意**：全新构建目录存在确定性崩溃红灯（treeOctreeVoxelSearch 段 363 PASS 后 0xC0000409，
+> 存量布局漂移问题非新增回归），进展见 dispatch/PM_LOG.md 值守轮 14）。
+> 未完成项见文末（技术债 + 方向 D 尾项），当前**无半成品/占位接口**。
 
 ## Geom —— 二维几何（49 公开 + PreparedGeom 6）
 
 > 计数口径（2026-11-12 全仓对账）：精确 grep `^    static` + 公开成员，全库 270 接口 + 适配层 5 = **275**；
 > 分模块：Geom 49 / PreparedGeom 6 / Stereo 29 / KdTree3 6 / ImageProcessor 78 / CloudProcessor 90 /
 > CloudIO 6 / MeshIO 4 / HeightMapIO 2 / 适配层 5（GeomCV 2 + StereoPCL 2 + HeightMap 1）
+> **2026-11-22 增补**：上述为迭代 14 时点基线；CloudProcessor 此后新增 5 算子——fitLine3D /
+> filterApproxVoxelGrid（1.3.0）、fitTorus（1.4.0）、segmentConditionalEuclidean（1.6.0）、
+> treeOctreeBoxSearch（1.8.0），tree 组 4→5，其余模块无增删。
 
 | 分组 | 接口 |
 |---|---|
@@ -60,16 +66,16 @@
 
 | 模块 | 接口 |
 |---|---|
-| filter ×11 | filterVoxelGrid / filterVoxelGridAndTrace / filterRandomSample / filterUniformSample / filterFarthestPointSample / filterRemoveNonFinite / filterRemoveDuplicates / filterPassThrough / filterStatisticalOutlier / filterRadiusOutlier / filterConditionalXYZ |
+| filter ×12 | filterVoxelGrid / filterVoxelGridAndTrace / filterRandomSample / filterUniformSample / filterFarthestPointSample / filterRemoveNonFinite / filterRemoveDuplicates / filterPassThrough / filterStatisticalOutlier / filterRadiusOutlier / filterConditionalXYZ / filterApproxVoxelGrid（1.3.0） |
 | extract ×5 | extractByIndices / extractByIndicesInverted / extractCropBox / extractCropOBB / extractByPolygonROI |
 | trans ×7 | transApplyMatrix / transProject / transTranslate / transRotate / transRotateAround / transScale / transScaleAround |
 | feature ×8 | featureNormalEstimation / featureNormalEstimationRadius / featureOrientNormalsToDirection / …TowardsPoint / …ConsistentTangentPlane / featureFPFH / featureCovariances / featureMahalanobisDistance / featureNearestNeighborDistance |
 | keypoint ×2 | keypointHarris3D / keypointISS3D |
-| fit ×5 | fitPlane / fitSphere / fitCylinder / **fitCone**（绕开 PCL CONE 缺陷）/ **fitCircle3D** |
+| fit ×7 | fitPlane / fitSphere / fitCylinder / **fitCone**（绕开 PCL CONE 缺陷）/ **fitCircle3D** / fitLine3D（1.3.0，SACMODEL_LINE）/ fitTorus（1.4.0，全自研——PCL 1.9 无 SACMODEL_TORUS） |
 | GD&T ×5 | **measureCircleRoundness**（圆度）/ **measureCylinderForm**（圆柱度）/ **measurePositionDeviation**（位置度表，PositionDeviation 结构）/ planeResiduals（有符号残差数组）/ measureFlatness |
-| segment ×5 | segmentPlaneRANSAC / segmentEuclideanCluster / segmentDBSCAN / segmentRegionGrowing / **segmentPlanesMulti** |
+| segment ×6 | segmentPlaneRANSAC / segmentEuclideanCluster / segmentDBSCAN / segmentRegionGrowing / **segmentPlanesMulti** / segmentConditionalEuclidean（1.6.0，高度差约束） |
 | regist ×7 | registICP_PointToPoint / registICP_PointToPlane / registNDT / registPCA / registGICP / registFeatureMatching / registEvaluate / registInformationMatrix |
-| tree ×4 | treeKdTreeKNN / treeKdTreeRadiusSearch / treeOctreeVoxelSearch / treeOctreeChangeDetection |
+| tree ×5 | treeKdTreeKNN / treeKdTreeRadiusSearch / treeOctreeVoxelSearch / treeOctreeChangeDetection / treeOctreeBoxSearch（1.8.0） |
 | surface ×11 | surfaceConvexHull / surfaceConcaveHull / surfaceSmoothMLS / surfacePoisson / surfaceGreedyProjection / surfaceMarchingCubes / surfaceMarchingCubesRBF / surfaceGridProjection / surfaceOrganizedFastMesh / surfaceMeshLaplacianSmooth / surfaceMeshClusterDecimate |
 | measure ×13 | measureMinMax / measureAABB / measureOBB / measureCentroid / measureMeanAndCovariance / measurePointCloudDistance / measureFlatness / **measurePlaneAngle / measurePlaneIntersection** / **measureMeshArea / measureMeshVolume / measurePointToMeshDistance** / cloudToHeightMap（mode 3=点计数密度）/ **thicknessMap** / **heightMapToCloud** |
 | mesh 几何 ×4 | **meshFaceNormals**（每面法线）/ **meshVertexNormals**（面积加权顶点法线）/ **meshCropByOBB**（面级裁剪重编号）/ **measurePointToMeshSignedDistance**（内负外正，斜向射线奇偶） |

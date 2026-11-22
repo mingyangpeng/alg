@@ -18,6 +18,7 @@
 
 namespace {
 
+// 后缀匹配（区分大小写）
 bool EndsWith(const std::string& s, const std::string& suffix)
 {
     return s.size() >= suffix.size() &&

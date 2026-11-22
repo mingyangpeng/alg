@@ -35,10 +35,13 @@ BUSINESSALG_EXPORT void algo_free(void* p) {
 }
 
 // ---------------- 算子入口：区域缺陷率统计（node.json: business.region.ratio） ----------------
+// 核心 C API：BusinessAlg_ComputeRegionRatio（src/BusinessAlg/BusinessAlg_Region.cpp）。
 // 参数（按 node.json params 声明顺序提取，宿主 marshal 不带参数名）：
 //   0=min_z(number) 1=max_z(number) 2=roi_x(number) 3=roi_y(number)
 //   4=roi_w(number) 5=roi_h(number)
 // 输入：1 片点云（SoA float[3N]）；输出：无端口，结果并入节点消息。
+// 错误码：1 输入未连线；2 点云为空；3 参数不足；4 核心层失败（-1 参数非法 / 2 无有效投影）；
+//         0 成功（消息 = defect_ratio/area，宿主当前 rc!=0 才读取，见文件头注）。
 
 BUSINESSALG_EXPORT int BusinessAlg_ComuiRegionRatio(const AlgoCInput* in, AlgoCOutput* out) {
     memset(out, 0, sizeof(*out));
@@ -80,11 +83,14 @@ BUSINESSALG_EXPORT int BusinessAlg_ComuiRegionRatio(const AlgoCInput* in, AlgoCO
 #ifdef SHAPELYALG_HAS_PCL   // PCL 段：依赖 Point3DAlg_DomeFit/BumpCompare（PCL 工具层），无 PCL 时入口不编译
 
 // ---------------- 算子入口：bump 高度 NG 判定（node.json: business.bump_ng_check） ----------------
-// 业务编排示例：Point3DAlg_DomeFit（基准/被测各拟合）→ Point3DAlg_BumpCompare（一对一
-// 匹配 + 高度差 NG）。参数（按 node.json 声明顺序）：ng_threshold(number, 0.02)
+// 核心 C API：Point3DAlg_DomeFit + Point3DAlg_BumpCompare（业务编排示例：
+// 基准/被测各拟合拱形球顶 bump，一对一匹配 + 高度差 NG）。
+// 参数（按 node.json 声明顺序）：ng_threshold(number, 0.02)
 // match_radius(number, 0.3) height_threshold(number, 0.02 DomeFit 基面分离阈值)
+// cluster_tolerance(number, 0.25 DomeFit 聚类连通距离)
 // 输入：2 片点云（clouds[0]=基准，clouds[1]=被测）
 // 输出：NG 差异点云（每配对 bump 一点：x/y=apex，z=高度偏差，正=被测高）+ 统计消息
+// 错误码：1 输入未连线；2 点云为空；3 内存不足；4 基准/被测未检出 bump 或无配对 bump。
 
 extern "C" BUSINESSALG_EXPORT int BusinessAlg_ComuiBumpNgCheck(const AlgoCInput* in, AlgoCOutput* out) {
     memset(out, 0, sizeof(*out));

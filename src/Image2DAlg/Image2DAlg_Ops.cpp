@@ -164,6 +164,7 @@ void SubPixelEdgePoints(const cv::Mat& gray, const std::vector<cv::Point>& conto
 
 extern "C" {
 
+// 灰度化：1 通道原样拷贝；3/4 通道转灰度输出 1 通道
 int Image2DAlg_ToGray(const Image2DAlg_Image* in, Image2DAlg_Image* out) {
     cv::Mat src;
     if (int rc = Wrap(in, src)) return rc;
@@ -175,6 +176,7 @@ int Image2DAlg_ToGray(const Image2DAlg_Image* in, Image2DAlg_Image* out) {
     }
 }
 
+// Gamma 校正：LUT 一次查表，输出通道与输入一致（gamma < 0.05 钳为 0.05）
 int Image2DAlg_Gamma(const Image2DAlg_Image* in, double gamma, Image2DAlg_Image* out) {
     cv::Mat src;
     if (int rc = Wrap(in, src)) return rc;
@@ -192,6 +194,7 @@ int Image2DAlg_Gamma(const Image2DAlg_Image* in, double gamma, Image2DAlg_Image*
     }
 }
 
+// 阈值化（mode 0~4）：彩色先转灰度，输出 1 通道
 int Image2DAlg_Threshold(const Image2DAlg_Image* in, int mode, double thresh, double maxval,
                          int block_size, double C, Image2DAlg_Image* out) {
     cv::Mat src;
@@ -218,6 +221,7 @@ int Image2DAlg_Threshold(const Image2DAlg_Image* in, int mode, double thresh, do
     }
 }
 
+// 统一二值化（mode 0~10）：单阈值族/OTSU/自适应/双阈值 LUT 分段 + 统一反转，输出 1 通道
 int Image2DAlg_Binarize(const Image2DAlg_Image* in, int mode,
                         double thresh, double thresh2, double maxval, double mid_val,
                         int block_size, double C, int invert, Image2DAlg_Image* out) {
@@ -286,6 +290,7 @@ int Image2DAlg_Binarize(const Image2DAlg_Image* in, int mode,
     }
 }
 
+// 模糊 / 降噪（method 0 高斯 / 1 中值 / 2 双边；4ch 双边拆 BGR 保 alpha），输出同输入通道
 int Image2DAlg_Blur(const Image2DAlg_Image* in, int method, int ksize, double sigma1,
                     double sigma2, Image2DAlg_Image* out) {
     cv::Mat src;
@@ -319,6 +324,7 @@ int Image2DAlg_Blur(const Image2DAlg_Image* in, int method, int ksize, double si
     }
 }
 
+// 形态学（op 0~6 / shape 0~2）：逐次迭代就地处理，输出同输入通道
 int Image2DAlg_Morphology(const Image2DAlg_Image* in, int op, int shape, int ksize,
                           int iterations, Image2DAlg_Image* out) {
     cv::Mat src;
@@ -346,6 +352,7 @@ int Image2DAlg_Morphology(const Image2DAlg_Image* in, int op, int shape, int ksi
     }
 }
 
+// Canny 边缘检测：彩色先转灰度，输出 1 通道 0/255
 int Image2DAlg_Canny(const Image2DAlg_Image* in, double threshold1, double threshold2,
                      Image2DAlg_Image* out) {
     cv::Mat src;
@@ -360,6 +367,7 @@ int Image2DAlg_Canny(const Image2DAlg_Image* in, double threshold1, double thres
     }
 }
 
+// Sobel 梯度：CV_16S 求导后 |梯度| 缩放 0~255，输出 1 通道
 int Image2DAlg_Sobel(const Image2DAlg_Image* in, int dx, int dy, int ksize,
                      Image2DAlg_Image* out) {
     cv::Mat src;
@@ -375,6 +383,7 @@ int Image2DAlg_Sobel(const Image2DAlg_Image* in, int dx, int dy, int ksize,
     }
 }
 
+// 缩放：interpolation 透传 cv::InterpolationFlags，输出通道同输入
 int Image2DAlg_Resize(const Image2DAlg_Image* in, int out_width, int out_height,
                       int interpolation, Image2DAlg_Image* out) {
     cv::Mat src;
@@ -390,6 +399,7 @@ int Image2DAlg_Resize(const Image2DAlg_Image* in, int out_width, int out_height,
     }
 }
 
+// 裁剪 ROI：越界钳制到图内，空结果 → -3，输出通道同输入
 int Image2DAlg_Crop(const Image2DAlg_Image* in, int x, int y, int width, int height,
                     Image2DAlg_Image* out) {
     cv::Mat src;
@@ -407,6 +417,7 @@ int Image2DAlg_Crop(const Image2DAlg_Image* in, int x, int y, int width, int hei
     }
 }
 
+// 旋转：绕图像中心 getRotationMatrix2D + warpAffine，输出与原图同尺寸（越界填黑）
 int Image2DAlg_Rotate(const Image2DAlg_Image* in, double angle, double scale,
                       int interpolation, Image2DAlg_Image* out) {
     cv::Mat src;
@@ -423,6 +434,7 @@ int Image2DAlg_Rotate(const Image2DAlg_Image* in, double angle, double scale,
     }
 }
 
+// HSV 阈值分割（wrap 版）：h_lo > h_hi 按环绕区间 [h_lo,180]∪[0,h_hi] 取并集
 int Image2DAlg_HSVThresholdWrap(const Image2DAlg_Image* in, double h_lo, double h_hi,
                                 double s_lo, double s_hi, double v_lo, double v_hi,
                                 Image2DAlg_Image* out) {
@@ -454,6 +466,7 @@ int Image2DAlg_HSVThresholdWrap(const Image2DAlg_Image* in, double h_lo, double 
     }
 }
 
+// 仿射变换：M 为 src→dst 前向映射（2x3 行主序），越界填黑，输出通道同输入
 int Image2DAlg_WarpAffine(const Image2DAlg_Image* in, const double* m,
                           int out_width, int out_height, int interpolation,
                           Image2DAlg_Image* out) {
@@ -473,6 +486,7 @@ int Image2DAlg_WarpAffine(const Image2DAlg_Image* in, const double* m,
     }
 }
 
+// 透视变换：M 为 3x3 行主序前向映射，越界填黑，输出通道同输入
 int Image2DAlg_WarpPerspective(const Image2DAlg_Image* in, const double* m,
                                int out_width, int out_height, int interpolation,
                                Image2DAlg_Image* out) {
@@ -491,6 +505,7 @@ int Image2DAlg_WarpPerspective(const Image2DAlg_Image* in, const double* m,
     }
 }
 
+// 灰度增强（method 0 全局均衡输出 1 通道 / 1 CLAHE：彩色走 Lab 亮度通道、4ch 保 alpha）
 int Image2DAlg_Enhance(const Image2DAlg_Image* in, int method, double clip_limit,
                        int tile_size, Image2DAlg_Image* out) {
     cv::Mat src;
@@ -577,6 +592,7 @@ int RunConnectedComponents(const cv::Mat& src, int connectivity, int min_area, i
     return 0;
 }
 
+// 连通域统计：二值语义（非零为前景），面积过滤 [min_area, max_area]（max<=0 不设上限）
 int Image2DAlg_ConnectedComponents(const Image2DAlg_Image* in, int connectivity,
                                    int min_area, int max_area,
                                    Image2DAlg_Blob** out_blobs, int* out_count) {
@@ -592,6 +608,7 @@ int Image2DAlg_ConnectedComponents(const Image2DAlg_Image* in, int connectivity,
     }
 }
 
+// 连通域统计（ROI 版）：ROI 内统计，bbox 左上角与质心平移回全图坐标系
 int Image2DAlg_ConnectedComponentsROI(const Image2DAlg_Image* in, int roi_x, int roi_y,
                                       int roi_w, int roi_h, int connectivity,
                                       int min_area, int max_area,
@@ -675,6 +692,7 @@ int RunAnalyzeContours(const cv::Mat& src, int external_only, int min_area,
     return 0;
 }
 
+// 轮廓测量：一次组装面积/周长/圆度/包围盒/质心/最小外接矩形/最小外接圆
 int Image2DAlg_AnalyzeContours(const Image2DAlg_Image* in, int external_only, int min_area,
                                Image2DAlg_ContourInfo** out_contours, int* out_count) {
     cv::Mat src;
@@ -687,6 +705,7 @@ int Image2DAlg_AnalyzeContours(const Image2DAlg_Image* in, int external_only, in
     }
 }
 
+// 轮廓测量（ROI 版）：ROI 内提取轮廓，各几何量坐标平移回全图坐标系
 int Image2DAlg_AnalyzeContoursROI(const Image2DAlg_Image* in, int roi_x, int roi_y,
                                   int roi_w, int roi_h, int external_only, int min_area,
                                   Image2DAlg_ContourInfo** out_contours, int* out_count) {
@@ -715,6 +734,7 @@ int RunMatchTemplate(const cv::Mat& img, const cv::Mat& tpl, int method,
     return 0;
 }
 
+// 模板匹配：两图通道一致 + 模板不大于图像校验，输出最佳左上角与得分
 int Image2DAlg_MatchTemplate(const Image2DAlg_Image* image, const Image2DAlg_Image* templ,
                              int method, double* out_score, int* out_x, int* out_y) {
     cv::Mat img, tpl;
@@ -731,6 +751,7 @@ int Image2DAlg_MatchTemplate(const Image2DAlg_Image* image, const Image2DAlg_Ima
     }
 }
 
+// 模板匹配（ROI 版）：仅 ROI 内匹配，命中左上角平移回全图坐标系
 int Image2DAlg_MatchTemplateROI(const Image2DAlg_Image* image,
                                 int roi_x, int roi_y, int roi_w, int roi_h,
                                 const Image2DAlg_Image* templ, int method,
@@ -755,6 +776,7 @@ void Image2DAlg_FreeBlobs(Image2DAlg_Blob* blobs) {
     free(blobs);
 }
 
+// 多目标圆拟合：二值前景逐外轮廓 Kåsa 拟合 + 半径过滤；subpixel 启用梯度亚像素细化
 int Image2DAlg_FitCirclesFromBinary(const Image2DAlg_Image* in,
                                     int min_area, int max_area,
                                     double min_r, double max_r, int subpixel,
@@ -813,6 +835,7 @@ int Image2DAlg_FitCirclesFromBinary(const Image2DAlg_Image* in,
     }
 }
 
+// 形状相似度（Hu 矩距离）：点集按像素取整后 matchShapes，method 1/2/3
 int Image2DAlg_MatchShapes(const float* xy1, int count1, const float* xy2, int count2,
                            int method, double* out_score) {
     if (!xy1 || !xy2 || !out_score) return -1;
@@ -835,6 +858,7 @@ int Image2DAlg_MatchShapes(const float* xy1, int count1, const float* xy2, int c
     }
 }
 
+// 凸性缺陷：点序自适应归一（顺时针先反转），返回索引统一映射回输入点序
 int Image2DAlg_ConvexityDefects(const float* xy, int count,
                                 Image2DAlg_Defect** out_defects, int* out_count) {
     if (!xy || !out_defects || !out_count) return -1;
@@ -887,6 +911,7 @@ int Image2DAlg_ConvexityDefects(const float* xy, int count,
     }
 }
 
+// 多尺度模板匹配：步进缩放模板逐一匹配，取跨尺度最佳位置/得分/尺度
 int Image2DAlg_MatchTemplateMulti(const Image2DAlg_Image* image, const Image2DAlg_Image* templ,
                                   int method, double scale_lo, double scale_hi, double scale_step,
                                   double* out_score, int* out_x, int* out_y, double* out_scale) {
@@ -937,6 +962,7 @@ int Image2DAlg_MatchTemplateMulti(const Image2DAlg_Image* image, const Image2DAl
     }
 }
 
+// 带掩膜模板匹配：仅统计 mask 非零区域（method 限 0/3，掩膜 1 通道同模板尺寸）
 int Image2DAlg_MatchTemplateMasked(const Image2DAlg_Image* image, const Image2DAlg_Image* templ,
                                    const Image2DAlg_Image* mask, int method,
                                    double* out_score, int* out_x, int* out_y) {
@@ -963,6 +989,7 @@ int Image2DAlg_MatchTemplateMasked(const Image2DAlg_Image* image, const Image2DA
     }
 }
 
+// 旋转模板搜索：逐角度旋转匹配取全局最优，输出模板中心落点（亚像素）与命中角度
 int Image2DAlg_MatchTemplateRotated(const Image2DAlg_Image* image, const Image2DAlg_Image* templ,
                                     double angle_start, double angle_end, double angle_step,
                                     int method, double* out_score, double* out_cx,
@@ -1011,6 +1038,7 @@ int RunFindAllMatches(const cv::Mat& img, const cv::Mat& tpl, int method,
     return 0;
 }
 
+// 多目标模板匹配：按得分从优到劣提取至多 max_matches 个目标（NMS 去重）
 int Image2DAlg_FindAllMatches(const Image2DAlg_Image* image, const Image2DAlg_Image* templ,
                               int method, double score_threshold, int max_matches, int nms_radius,
                               Image2DAlg_Match** out_matches, int* out_count) {
@@ -1029,6 +1057,7 @@ int Image2DAlg_FindAllMatches(const Image2DAlg_Image* image, const Image2DAlg_Im
     }
 }
 
+// 多目标模板匹配（ROI 版）：NMS 在 ROI 内进行，命中左上角平移回全图坐标系
 int Image2DAlg_FindAllMatchesROI(const Image2DAlg_Image* image,
                                  int roi_x, int roi_y, int roi_w, int roi_h,
                                  const Image2DAlg_Image* templ, int method,
@@ -1052,6 +1081,7 @@ int Image2DAlg_FindAllMatchesROI(const Image2DAlg_Image* image,
     }
 }
 
+// 多尺度 × 多角度组合模板匹配：每尺度做旋转搜索，取跨尺度全局最优
 int Image2DAlg_MatchTemplateEx(const Image2DAlg_Image* image, const Image2DAlg_Image* templ,
                                int method, double scale_lo, double scale_hi, double scale_step,
                                double angle_lo, double angle_hi, double angle_step,
@@ -1101,6 +1131,7 @@ int Image2DAlg_MatchTemplateEx(const Image2DAlg_Image* image, const Image2DAlg_I
     }
 }
 
+// 金字塔粗搜提速版旋转+尺度模板匹配：顶层全范围粗搜 → 逐级回原图邻域精化
 int Image2DAlg_MatchTemplatePyramid(const Image2DAlg_Image* image, const Image2DAlg_Image* templ,
                                     int method, double scale_lo, double scale_hi,
                                     double scale_step, double angle_lo, double angle_hi,
@@ -1195,6 +1226,7 @@ void Image2DAlg_FreeCircles(Image2DAlg_CircleFit* circles) {
     free(circles);
 }
 
+// 亚像素模板匹配：整像素峰 + 三分点抛物线插值（±0.5 像素修正）
 int Image2DAlg_MatchTemplateSubPix(const Image2DAlg_Image* image,
                                    const Image2DAlg_Image* templ, int method,
                                    double* out_score, double* out_x, double* out_y) {
@@ -1217,6 +1249,7 @@ int Image2DAlg_MatchTemplateSubPix(const Image2DAlg_Image* image,
     }
 }
 
+// 多目标 × 旋转 × 尺度阵列全检：每 (scale, angle) 组合多目标提取，跨组合全局 NMS
 int Image2DAlg_FindAllMatchesEx(const Image2DAlg_Image* image, const Image2DAlg_Image* templ,
                                 int method, double score_threshold, int max_matches,
                                 int nms_radius, double scale_lo, double scale_hi,
@@ -1348,6 +1381,7 @@ int RunHoughLines(const cv::Mat& src, double rho, double theta_deg, int threshol
     return 0;
 }
 
+// 概率霍夫直线检测：theta_deg 内部转弧度，线段端点数组输出
 int Image2DAlg_HoughLinesP(const Image2DAlg_Image* in,
                            double rho, double theta_deg, int threshold,
                            int min_line_length, int max_line_gap,
@@ -1364,6 +1398,7 @@ int Image2DAlg_HoughLinesP(const Image2DAlg_Image* in,
     }
 }
 
+// 概率霍夫直线（ROI 版）：ROI 内检测，线段端点平移回全图坐标系
 int Image2DAlg_HoughLinesPROI(const Image2DAlg_Image* in,
                               int roi_x, int roi_y, int roi_w, int roi_h,
                               double rho, double theta_deg, int threshold,
@@ -1406,6 +1441,7 @@ int RunHoughCircles(const cv::Mat& src, double dp, double min_dist, double param
     return 0;
 }
 
+// 霍夫圆检测（HOUGH_GRADIENT）：不做预模糊，锐利二值图由调用方先接 Blur
 int Image2DAlg_HoughCircles(const Image2DAlg_Image* in,
                             double dp, double min_dist, double param1, double param2,
                             double min_r, double max_r,
@@ -1422,6 +1458,7 @@ int Image2DAlg_HoughCircles(const Image2DAlg_Image* in,
     }
 }
 
+// 霍夫圆检测（ROI 版）：ROI 内检测，圆心平移回全图坐标系
 int Image2DAlg_HoughCirclesROI(const Image2DAlg_Image* in,
                                int roi_x, int roi_y, int roi_w, int roi_h,
                                double dp, double min_dist, double param1, double param2,
@@ -1449,6 +1486,7 @@ void Image2DAlg_FreeCirclesHough(Image2DAlg_HoughCircle* circles) {
     free(circles);
 }
 
+// 区域灰度统计：ROI 钳制（w/h <= 0 = 全图），彩色先转灰度，输出 mean/stddev/min/max
 int Image2DAlg_RegionStats(const Image2DAlg_Image* in,
                            int roi_x, int roi_y, int roi_w, int roi_h,
                            Image2DAlg_GrayStats* out) {
@@ -1474,6 +1512,7 @@ int Image2DAlg_RegionStats(const Image2DAlg_Image* in,
     }
 }
 
+// 灰度直方图：256 bins 逐级计数写入调用方的 int[256]，彩色先转灰度
 int Image2DAlg_Histogram(const Image2DAlg_Image* in, int out_hist[256]) {
     cv::Mat src;
     if (int rc = Wrap(in, src)) return rc;
@@ -1488,6 +1527,7 @@ int Image2DAlg_Histogram(const Image2DAlg_Image* in, int out_hist[256]) {
     }
 }
 
+// 直方图相似度（cv::compareHist）：method 0~3，越界 → -3
 int Image2DAlg_CompareHist(const int* hist1, const int* hist2, int method, double* out_score) {
     if (!hist1 || !hist2 || !out_score) return -1;
     if (method < 0 || method > 3) return -3;   // cv::HISTCMP_* 枚举
@@ -1500,6 +1540,7 @@ int Image2DAlg_CompareHist(const int* hist1, const int* hist2, int method, doubl
     }
 }
 
+// 轮廓原始点集导出：扁平 xy + 每条轮廓起始点索引表（供宿主绘制/二次处理）
 int Image2DAlg_ContourPoints(const Image2DAlg_Image* in,
                              int external_only, int min_area,
                              float** out_xy, int* out_points,
@@ -1558,6 +1599,7 @@ void Image2DAlg_FreeContourPoints(float* xy, int* offsets) {
     free(offsets);
 }
 
+// HSV 阈值分割：inRange 0/255 掩膜；4 通道先去 alpha，灰度图 → -3
 int Image2DAlg_HSVThreshold(const Image2DAlg_Image* in, double h_lo, double h_hi,
                             double s_lo, double s_hi, double v_lo, double v_hi,
                             Image2DAlg_Image* out) {
@@ -1582,6 +1624,7 @@ int Image2DAlg_HSVThreshold(const Image2DAlg_Image* in, double h_lo, double h_hi
     }
 }
 
+// 批板差分：两图逐像素差的绝对值（尺寸与通道必须一致）
 int Image2DAlg_AbsDiff(const Image2DAlg_Image* in1, const Image2DAlg_Image* in2,
                        Image2DAlg_Image* out) {
     cv::Mat a, b;
@@ -1598,6 +1641,7 @@ int Image2DAlg_AbsDiff(const Image2DAlg_Image* in1, const Image2DAlg_Image* in2,
     }
 }
 
+// 最小二乘圆拟合（Kåsa 代数法 + SVD）：无解 / r²<=0 → -3，rms 逐点复算
 int Image2DAlg_FitCircle(const float* xy, int count, Image2DAlg_CircleFit* out) {
     if (!xy || !out) return -1;
     if (count < 3) return -3;
@@ -1632,6 +1676,7 @@ int Image2DAlg_FitCircle(const float* xy, int count, Image2DAlg_CircleFit* out) 
     }
 }
 
+// 直线拟合（DIST_L2）：整数点接口（内部按像素取整），rms = 点到直线叉积模 RMS
 int Image2DAlg_FitLine(const float* xy, int count, Image2DAlg_LineFit* out) {
     if (!xy || !out) return -1;
     if (count < 2) return -3;
@@ -1660,6 +1705,7 @@ int Image2DAlg_FitLine(const float* xy, int count, Image2DAlg_LineFit* out) {
     }
 }
 
+// 圆拟合高精度版：ImageProcessor::fitCircle（Kåsa 初值 + GN 精化），共线/近共线 → -3
 int Image2DAlg_FitCircleEx(const float* xy, int count, Image2DAlg_CircleFit* out) {
     if (!xy || !out) return -1;
     if (count < 3) return -3;
@@ -1681,6 +1727,7 @@ int Image2DAlg_FitCircleEx(const float* xy, int count, Image2DAlg_CircleFit* out
     }
 }
 
+// 圆拟合 RANSAC 抗外点：threshold 内点判定（<=0 → -3），内点索引可选用 malloc 返回
 int Image2DAlg_FitCircleRobust(const float* xy, int count, double threshold, int max_iters,
                                unsigned int seed, Image2DAlg_CircleFit* out,
                                int** out_inliers, int* out_inlier_count) {
@@ -1717,6 +1764,7 @@ int Image2DAlg_FitCircleRobust(const float* xy, int count, double threshold, int
     }
 }
 
+// 椭圆拟合（cv::fitEllipse 代数法）：整数点接口（内部按像素取整），count >= 5
 int Image2DAlg_FitEllipse(const float* xy, int count, Image2DAlg_EllipseFit* out) {
     if (!xy || !out) return -1;
     if (count < 5) return -3;
@@ -1739,6 +1787,7 @@ int Image2DAlg_FitEllipse(const float* xy, int count, Image2DAlg_EllipseFit* out
     }
 }
 
+// 多目标椭圆拟合：二值前景逐外轮廓 fitEllipse + 全轴长（较大者）过滤
 int Image2DAlg_FitEllipsesFromBinary(const Image2DAlg_Image* in,
                                      int min_area, int max_area,
                                      double min_axis, double max_axis,
@@ -1792,6 +1841,7 @@ void Image2DAlg_FreeEllipses(Image2DAlg_EllipseFit* ellipses) {
     free(ellipses);
 }
 
+// 最小外接矩形拟合（旋转矩形）：整数点接口，零面积退化 → -3
 int Image2DAlg_FitRect(const float* xy, int count, Image2DAlg_RectFit* out) {
     if (!xy || !out) return -1;
     if (count < 3) return -3;
@@ -1814,6 +1864,7 @@ int Image2DAlg_FitRect(const float* xy, int count, Image2DAlg_RectFit* out) {
     }
 }
 
+// 多项式拟合 y = Σ coef[i]·x^i（degree 1~5，SVD 最小二乘），升幂系数 + rms
 int Image2DAlg_FitPoly(const float* xy, int count, int degree, Image2DAlg_PolyFit* out) {
     if (!xy || !out) return -1;
     if (degree < 1 || degree > 5) return -3;
@@ -1856,7 +1907,8 @@ int Image2DAlg_FitPoly(const float* xy, int count, int degree, Image2DAlg_PolyFi
 
 // ---------------- 特征点查找（cv 直接调用：ImageProcessor 未封装 cornerHarris/ORB） ----------------
 
-// 亚像素细化公共步骤：cornerSubPix + 失败防护（细化失败保持原位置）
+// 亚像素细化公共步骤：cornerSubPix（固定 5x5 窗）+ 兜底防护
+//（异常/越界结果仅做负坐标钳 0——NaN 与右/下越界坐标不会被还原，防护不完整）
 void RefineSubPix(const cv::Mat& gray, std::vector<cv::Point2f>& pts) {
     cv::cornerSubPix(gray, pts, cv::Size(5, 5), cv::Size(-1, -1),
                      cv::TermCriteria(cv::TermCriteria::EPS | cv::TermCriteria::MAX_ITER, 30, 0.03));
@@ -1867,6 +1919,7 @@ void RefineSubPix(const cv::Mat& gray, std::vector<cv::Point2f>& pts) {
                                  std::lround(pts[i].y) < 0 ? 0 : pts[i].y);
 }
 
+// Harris 角点：相对最大响应比例阈值 + 3x3 膨胀 NMS，subpix 走亚像素细化
 int Image2DAlg_HarrisCorners(const Image2DAlg_Image* in, int block_size, int ksize, double k,
                              double thresh_ratio, int subpix,
                              Image2DAlg_Point2f** out_points, int* out_count) {
@@ -1909,6 +1962,7 @@ int Image2DAlg_HarrisCorners(const Image2DAlg_Image* in, int block_size, int ksi
     }
 }
 
+// Shi-Tomasi 角点（goodFeaturesToTrack）：质量降序、内置最小间距 NMS
 int Image2DAlg_GoodFeatures(const Image2DAlg_Image* in, int max_corners,
                             double quality_level, double min_distance, int subpix,
                             Image2DAlg_Point2f** out_points, int* out_count) {
@@ -1938,6 +1992,7 @@ int Image2DAlg_GoodFeatures(const Image2DAlg_Image* in, int max_corners,
     }
 }
 
+// 角点亚像素细化：win_size 仅校验（>= 3），实际固定 5x5 求解窗（见 api.h 说明）
 int Image2DAlg_CornerSubPix(const Image2DAlg_Image* in,
                             const Image2DAlg_Point2f* pts, int count,
                             int win_size, Image2DAlg_Point2f** out_points) {
@@ -1967,6 +2022,7 @@ int Image2DAlg_CornerSubPix(const Image2DAlg_Image* in,
 
 // ---------------- 多边形拟合 / 多目标旋转矩形 ----------------
 
+// 轮廓顶点逼近（Douglas-Peucker）：整数点接口，逼近结果 < 3 顶点 → -3
 int Image2DAlg_ApproxPolyDP(const float* xy, int count, double epsilon,
                             int closed, float** out_xy, int* out_count) {
     if (!xy || !out_xy || !out_count) return -1;
@@ -1997,6 +2053,7 @@ int Image2DAlg_ApproxPolyDP(const float* xy, int count, double epsilon,
     }
 }
 
+// 多目标旋转矩形拟合：二值前景逐外轮廓 minAreaRect + 面积过滤
 int Image2DAlg_FitRectsFromBinary(const Image2DAlg_Image* in,
                                   int min_area, int max_area,
                                   Image2DAlg_RectFit** out_rects, int* out_count) {
@@ -2044,6 +2101,8 @@ void Image2DAlg_FreeRectFits(Image2DAlg_RectFit* rects) {
 
 // ---------------- ORB 特征对位（cv features2d/calib3d 直接调用） ----------------
 
+// ORB 特征对位一站式：检测+匹配（Hamming kNN + Lowe 比率）+ RANSAC 全仿射
+//（edgeThreshold 按小图收紧到 8），m 为 in1 → in2 的 2x3 行主序
 int Image2DAlg_ORBAlign(const Image2DAlg_Image* in1, const Image2DAlg_Image* in2,
                         int n_features, double ratio, double m[6],
                         Image2DAlg_OrbMatch** out_matches, int* out_count, int* out_inliers) {
@@ -2121,6 +2180,7 @@ void Image2DAlg_FreePoint2f(Image2DAlg_Point2f* pts) {
 
 // ---------------- 特征链路拆分（2.1.0：检测/描述/匹配/几何估计可独立复用，与 ORBAlign 同风格） ----------------
 
+// FAST 角点检测：threshold <= 0 → -3，无检出属正常（NULL/0/返回 0）
 int Image2DAlg_FastFeatures(const Image2DAlg_Image* in, int threshold, int nonmax_suppression,
                             Image2DAlg_Point2f** out_points, int* out_count) {
     cv::Mat src;
@@ -2217,6 +2277,8 @@ int MatchDescriptorsLowe(const cv::Mat& d1, const cv::Mat& d2, bool is_float, do
     return 0;
 }
 
+// 关键点描述子计算：复制边框扩图（margin 64）保证贴边点确定出描述子，
+// 越界点在清零 out 之前拦截 → -2（保护调用方未释放的旧缓冲）
 int Image2DAlg_ComputeDescriptors(const Image2DAlg_Image* in,
                                   const Image2DAlg_Point2f* pts, int count,
                                   int type, int n_features,
@@ -2282,6 +2344,8 @@ void Image2DAlg_FreeDescriptors(Image2DAlg_Descriptors* d) {
     d->fdata = nullptr;
 }
 
+// 描述子匹配：BFMatcher kNN(k=2) + Lowe 比率（二进制 Hamming / 浮点 L2），
+// 比率测试后 < 2 对 → -2
 int Image2DAlg_MatchFeatures(const Image2DAlg_Descriptors* d1,
                              const Image2DAlg_Descriptors* d2,
                              const Image2DAlg_Point2f* pts1,
@@ -2337,6 +2401,7 @@ void MatchPointsOf(const Image2DAlg_OrbMatch* matches, int count,
     }
 }
 
+// 部分仿射估计（4 DOF，estimateAffinePartial2D + RANSAC）：m 为 in1 → in2 的 2x3
 int Image2DAlg_EstimateAffinePartial(const Image2DAlg_OrbMatch* matches,
                                      int count, double ransac_reproj_threshold,
                                      double m[6], int* out_inliers) {
@@ -2362,6 +2427,7 @@ int Image2DAlg_EstimateAffinePartial(const Image2DAlg_OrbMatch* matches,
     }
 }
 
+// 单应矩阵估计（findHomography + RANSAC）：h 为 in1 → in2 的 3x3 行主序
 int Image2DAlg_FindHomography(const Image2DAlg_OrbMatch* matches,
                               int count, double ransac_reproj_threshold,
                               double h[9], int* out_inliers) {
@@ -2390,6 +2456,7 @@ int Image2DAlg_FindHomography(const Image2DAlg_OrbMatch* matches,
 
 // ---------------- 多目标直线拟合（板边 / 边缘线测量） ----------------
 
+// 多目标直线拟合：二值前景逐外轮廓 DIST_L2 拟合 + 投影跨度过滤，rms 为直线度指标
 int Image2DAlg_FitLinesFromBinary(const Image2DAlg_Image* in,
                                   int min_area, int max_area, double min_length,
                                   Image2DAlg_LineFit** out_lines, int* out_count) {
@@ -2503,6 +2570,7 @@ int DetectAndDescribeFeatures(const Image2DAlg_Image* in, int type, int n_featur
     }
 }
 
+// BRISK 特征（检测 + 描述一次完成，type 1）：委托 DetectAndDescribeFeatures
 int Image2DAlg_BriskFeatures(const Image2DAlg_Image* in, int n_features,
                              double contrast_threshold,
                              Image2DAlg_Point2f** out_points, int* out_count,
@@ -2511,6 +2579,7 @@ int Image2DAlg_BriskFeatures(const Image2DAlg_Image* in, int n_features,
                                      out_points, out_count, out_desc);
 }
 
+// AKAZE 特征（检测 + 描述一次完成，type 2）：委托 DetectAndDescribeFeatures
 int Image2DAlg_AkazeFeatures(const Image2DAlg_Image* in, int n_features,
                              double contrast_threshold,
                              Image2DAlg_Point2f** out_points, int* out_count,
@@ -2519,6 +2588,7 @@ int Image2DAlg_AkazeFeatures(const Image2DAlg_Image* in, int n_features,
                                      out_points, out_count, out_desc);
 }
 
+// SIFT 特征（检测 + 描述一次完成，type 3 浮点 128 维）：委托 DetectAndDescribeFeatures
 int Image2DAlg_SiftFeatures(const Image2DAlg_Image* in, int n_features,
                             double contrast_threshold,
                             Image2DAlg_Point2f** out_points, int* out_count,
@@ -2527,6 +2597,8 @@ int Image2DAlg_SiftFeatures(const Image2DAlg_Image* in, int n_features,
                                      out_points, out_count, out_desc);
 }
 
+// 斑点检测（SimpleBlobDetector）：四个过滤参数按接口约定构建（<= 0 显式关闭），
+// 其余用默认（暗斑 / 阈值 50~220 步进 10 / 惯性比 0.1 / 重复性 2）
 int Image2DAlg_BlobDetect(const Image2DAlg_Image* in, double min_area, double max_area,
                           double min_circularity, double min_convexity,
                           Image2DAlg_BlobFeature** out_blobs, int* out_count) {
@@ -2590,6 +2662,7 @@ void Image2DAlg_FreeBlobFeatures(Image2DAlg_BlobFeature* blobs) {
     free(blobs);
 }
 
+// 一站式检测 + 描述 + 匹配（ORBAlign 泛化版，type 0~3 四选一算子工厂）
 int Image2DAlg_DetectAndMatch(const Image2DAlg_Image* in1, const Image2DAlg_Image* in2,
                               int type, int n_features, double ratio,
                               Image2DAlg_OrbMatch** out_matches, int* out_count) {
@@ -2633,6 +2706,7 @@ int Image2DAlg_DetectAndMatch(const Image2DAlg_Image* in1, const Image2DAlg_Imag
 
 // ---------------- 2.2.0：跟踪、配准与立体（video / calib3d 直接调用） ----------------
 
+// 金字塔 LK 光流跟踪：out_status 为调用方预分配的一级指针缓冲（count 字节）
 int Image2DAlg_CalcOpticalFlowPyrLK(const Image2DAlg_Image* prev, const Image2DAlg_Image* next,
                                     const Image2DAlg_Point2f* pts, int count,
                                     int win_size, int max_level,
@@ -2672,6 +2746,8 @@ int Image2DAlg_CalcOpticalFlowPyrLK(const Image2DAlg_Image* prev, const Image2DA
     }
 }
 
+// ECC 图像对齐：API 枚举 0/1/2 映射 cv::MOTION_*（本 API 不暴露欧氏模型），
+// 不收敛/相关性 < 0.5 → -2
 int Image2DAlg_FindTransformECC(const Image2DAlg_Image* templ, const Image2DAlg_Image* input,
                                 int motion_type, int max_iters, double epsilon,
                                 double m[9], double* out_correlation) {
@@ -2719,6 +2795,7 @@ int Image2DAlg_FindTransformECC(const Image2DAlg_Image* templ, const Image2DAlg_
     }
 }
 
+// 相位相关平移估计：灰度 + CV_32F + 默认窗（noArray），输出亚像素 (dx,dy) 与响应
 int Image2DAlg_PhaseCorrelate(const Image2DAlg_Image* a, const Image2DAlg_Image* b,
                               double* out_dx, double* out_dy, double* out_response) {
     cv::Mat ma, mb;
@@ -2742,6 +2819,7 @@ int Image2DAlg_PhaseCorrelate(const Image2DAlg_Image* a, const Image2DAlg_Image*
     }
 }
 
+// 双目 SGBM 视差：输出 8U 整数视差（CV_16S/16 四舍五入），无效视差标记显式比对 → 0
 int Image2DAlg_StereoMatch(const Image2DAlg_Image* left, const Image2DAlg_Image* right,
                            int min_disparity, int num_disparities, int block_size,
                            Image2DAlg_Image* out_disparity) {
@@ -2792,6 +2870,7 @@ int Image2DAlg_StereoMatch(const Image2DAlg_Image* left, const Image2DAlg_Image*
     }
 }
 
+// 2D-3D 位姿估计（solvePnP 默认迭代法）：dist_count 非 0/4/5/8/12/14 显式拦截 -3
 int Image2DAlg_SolvePnP(const double* object_points, const Image2DAlg_Point2f* image_points,
                         int count, const double camera_matrix[9],
                         const double* dist_coeffs, int dist_count,
@@ -2916,6 +2995,7 @@ int Image2DAlg_DenoiseNLMeans(const Image2DAlg_Image* in, double h, double h_col
 
 // ---------------- 几何测量扩展（2.4.0 新增） ----------------
 
+// 距离变换：8U 单通道二值图透传，distance_type/mask_size/dst_type 组合校验
 int Image2DAlg_DistanceTransform(const Image2DAlg_Image* in, int distance_type,
                                  int mask_size, int dst_type, Image2DAlg_Image* out) {
     cv::Mat src;
@@ -2940,6 +3020,7 @@ int Image2DAlg_DistanceTransform(const Image2DAlg_Image* in, int distance_type,
     }
 }
 
+// 泛洪填充：8U 单通道限定，内部拷贝工作副本后就地填充（不改调用方输入）
 int Image2DAlg_FloodFill(const Image2DAlg_Image* in, int seed_x, int seed_y,
                          double new_val, double lo_diff, double up_diff,
                          Image2DAlg_Image* out, int out_rect[4], int* out_filled) {
@@ -2972,6 +3053,7 @@ int Image2DAlg_FloodFill(const Image2DAlg_Image* in, int seed_x, int seed_y,
     }
 }
 
+// 任意重映射：map1/map2 为 CV_32F 位流契约（channels=1），按 (h,w,CV_32F) 零拷贝视图解读
 int Image2DAlg_Remap(const Image2DAlg_Image* in, const Image2DAlg_Image* map1,
                      const Image2DAlg_Image* map2, int interpolation, Image2DAlg_Image* out) {
     cv::Mat src;
@@ -2997,6 +3079,7 @@ int Image2DAlg_Remap(const Image2DAlg_Image* in, const Image2DAlg_Image* map1,
     }
 }
 
+// 极坐标展开：flags 0/1 映射 cv::WARP_POLAR_*（原始 cv 值非 0/1，不直传）
 int Image2DAlg_WarpPolar(const Image2DAlg_Image* in, int dsize_w, int dsize_h,
                          double center_x, double center_y, double max_radius,
                          int flags, Image2DAlg_Image* out) {
@@ -3026,6 +3109,7 @@ int Image2DAlg_WarpPolar(const Image2DAlg_Image* in, int dsize_w, int dsize_h,
     }
 }
 
+// 双轮廓 Hausdorff 距离（暴力 O(n·m) 双向最大-最小距离），浮点点集直传
 int Image2DAlg_ContourHausdorff(const float* xy_a, int count_a, const float* xy_b,
                                 int count_b, double* out_distance) {
     if (!xy_a || !xy_b || !out_distance) return -1;
@@ -3045,6 +3129,8 @@ int Image2DAlg_ContourHausdorff(const float* xy_a, int count_a, const float* xy_
     }
 }
 
+// 批量圆拟合：按前缀偏移切片逐组拟合（threshold>0 RANSAC / <=0 最小二乘），
+// 失败组 valid=0 且结果字段置 0，返回值不承载成功组数
 int Image2DAlg_FitCircleBatch(const float* xy, const int* group_offsets, int group_count,
                               double threshold, Image2DAlg_CircleFit* out_fits,
                               unsigned char* out_valid, unsigned int seed, int max_iters) {
@@ -3093,6 +3179,7 @@ int Image2DAlg_FitCircleBatch(const float* xy, const int* group_offsets, int gro
 
 // ---------------- 对位拼接扩展（2.5.0 新增） ----------------
 
+// 批量局部相位配准：统一网格切瓦片逐块 phaseCorrelate，两段式容量契约
 int Image2DAlg_PhaseCorrelateBatch(const Image2DAlg_Image* ref, const Image2DAlg_Image* moved,
                                    int tile_w, int tile_h,
                                    double* out_dx, double* out_dy,
@@ -3136,6 +3223,7 @@ int Image2DAlg_PhaseCorrelateBatch(const Image2DAlg_Image* ref, const Image2DAlg
     }
 }
 
+// 偏移重采样：dst(x,y) = src(x-dx, y-dy)，WARP_INVERSE_MAP 直接按 M 采样，越界补 0
 int Image2DAlg_OffsetRemap(const Image2DAlg_Image* in, double dx, double dy,
                            int interpolation, Image2DAlg_Image* out) {
     cv::Mat src;
@@ -3159,6 +3247,7 @@ int Image2DAlg_OffsetRemap(const Image2DAlg_Image* in, double dx, double dy,
     }
 }
 
+// 掩膜平移复核：golden 掩膜最近邻平移采样后与 current 逐像素比对三计数
 int Image2DAlg_MaskShiftRecheck(const Image2DAlg_Image* golden_mask,
                                 const Image2DAlg_Image* current_mask,
                                 double dx, double dy,
@@ -3200,6 +3289,8 @@ int Image2DAlg_MaskShiftRecheck(const Image2DAlg_Image* golden_mask,
     }
 }
 
+// 两图拼接融合：next 按 floor(dx/dy) 放置，画布 = 两矩形并集包围盒，
+// 重叠区沿 X 线性渐变混合（单列重叠特例 0.5）
 int Image2DAlg_StitchBlend(const Image2DAlg_Image* base, const Image2DAlg_Image* next,
                            double dx, double dy,
                            int* out_origin_x, int* out_origin_y,
@@ -3264,6 +3355,9 @@ int Image2DAlg_StitchBlend(const Image2DAlg_Image* base, const Image2DAlg_Image*
     }
 }
 
+// 模板复合仿射对位：多尺度×多角度模板匹配粗对位（TM_CCOEFF_NORMED，逐角度
+// 展开、越界角度跳过）→ golden warpAffine 到 current 帧 → ORB+RANSAC 精修，
+// M_total = M_local ∘ M_rough 合成 golden → current 的 2x3
 int Image2DAlg_TemplateAffineAlign(const Image2DAlg_Image* golden,
                                    const Image2DAlg_Image* current,
                                    double rough_scale_lo, double rough_scale_hi,

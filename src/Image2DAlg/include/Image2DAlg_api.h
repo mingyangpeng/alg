@@ -105,7 +105,8 @@
 //     FreeBlobs / FreeContours / FreeDefects 释放（free 指针本身，调用方自行置空）；
 //   * 输入容器仅作只读视图，算子不修改输入，生命周期归调用方。
 //
-// 【线程性】无全局状态，各算子可多线程并发调用（Init/Cleanup 为占位）。
+// 【线程性】算子无共享状态，可多线程并发调用（Init/Cleanup 仅维护占位标志，
+//   不参与算子行为）。
 //
 // 【最小示例】
 //   Image2DAlg_Image src, bin;
@@ -131,7 +132,7 @@ extern "C" {
 /// 新增接口 → 次版本 +1；行为修正 → 补丁 +1。返回静态字符串，无需释放。
 IMAGE2DALG_EXPORT const char* Image2DAlg_GetVersion(void);
 
-/// 初始化（占位实现：本库无全局状态，算子可直接调用）。
+/// 初始化（占位实现：仅置位一个无功能影响的内部标志；算子无共享状态，可直接调用）。
 /// @return 恒 0；重复调用幂等。
 IMAGE2DALG_EXPORT int Image2DAlg_Init(void);
 
@@ -156,7 +157,8 @@ IMAGE2DALG_EXPORT void Image2DAlg_FreeImage(Image2DAlg_Image* image);
 /// 图像文件读取。
 /// [in]  img_path   文件路径（ANSI 编码；支持 png / tiff / jpg / jpeg）
 /// [out] out_image  固定输出 BGRA 4 通道（模块唯一强制 4 通道的接口，宿主契约）
-/// @return 0 成功；-1 空指针；-2 打开失败（路径不存在/格式不支持）；-4 内存不足。
+/// @return 0 成功；-1 空指针；-2 打开失败（路径不存在/格式不支持）；
+///         -3 源图通道数不支持（如 2 通道）；-4 内存不足。
 IMAGE2DALG_EXPORT int Image2DAlg_ReadImage(const char* img_path, Image2DAlg_Image* out_image);
 
 // ---------------- 通用处理（image → image） ----------------
@@ -265,7 +267,8 @@ IMAGE2DALG_EXPORT int Image2DAlg_Crop(const Image2DAlg_Image* in,
 
 /// 旋转：绕图像中心旋转 angle 度并缩放 scale，输出与原图同尺寸。
 /// [in]  angle           逆时针角度（度，OpenCV 约定）
-/// [in]  scale           缩放系数（> 0）
+/// [in]  scale           缩放系数（> 0 才有意义；本接口不校验——0 = 输出全黑、
+///                       负值 = 中心对称翻转）
 /// [in]  interpolation  同 Resize
 /// 旋转后超出原图范围的部分填 0（黑）。
 IMAGE2DALG_EXPORT int Image2DAlg_Rotate(const Image2DAlg_Image* in, double angle, double scale,
@@ -355,7 +358,9 @@ IMAGE2DALG_EXPORT int Image2DAlg_AnalyzeContoursROI(const Image2DAlg_Image* in,
 ///                     缓冲共 2*out_points 个 float）
 /// [out] out_points    点个数（每个点占 2 个 float）
 /// [out] out_offsets   每条轮廓的起始"点索引"（int 数组，长度 = 轮廓数；malloc）
-///                     第 k 条轮廓的点 = out_xy[out_offsets[k]*2 .. out_offsets[k+1]*2)
+///                     第 k 条轮廓的点 = out_xy[out_offsets[k]*2 .. 终点*2)——
+///                     终点在 k+1 < out_contours 时取 out_offsets[k+1]、末条
+///                     轮廓取 out_points（offsets 无哨兵项，勿读 offsets[轮廓数]）
 /// [out] out_contours  轮廓条数
 /// 点序与 cv::findContours 一致（CHAIN_APPROX_SIMPLE 压缩拐点）；
 /// 无结果时各出参置 NULL/0、返回 0。释放用 Image2DAlg_FreeContourPoints。
@@ -378,7 +383,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_MatchTemplate(const Image2DAlg_Image* image,
 
 /// 多尺度模板匹配：在 [scale_lo, scale_hi] 内以 scale_step 步进缩放模板逐一匹配，
 /// 取跨尺度最佳的位置 / 得分 / 尺度。
-/// [in]  scale_lo/hi/step  尺度范围与步进（step <= 0 或 lo > hi → -3；
+/// [in]  scale_lo/hi/step  尺度范围与步进（step <= 0、scale_lo <= 0 或 lo > hi → -3；
 ///                         遍历次数 = (hi-lo)/step + 1，注意范围别开太大）
 /// [out] out_scale         最佳尺度（实际使用的缩放系数）
 /// 某尺度下模板缩放后越出图像则跳过该尺度；所有尺度均越界 → -3。
@@ -558,7 +563,8 @@ IMAGE2DALG_EXPORT int Image2DAlg_AbsDiff(const Image2DAlg_Image* in1,
 /// 最小二乘圆拟合（Kåsa 代数法，SVD 求解）。
 /// [in]  xy/count  点集（count >= 3，否则 -3）
 /// [out] out       圆心 / 半径 / 残差
-/// 共线、重合等退化输入可能得到无意义圆（不返回错误），调用方应结合 rms 判断质量；
+/// 退化输入口径：无解或 r² <= 0（完全重合等）→ -3；共线等仍可有解——可能得到
+/// 无意义大圆（不返回错误），调用方应结合 rms 判断质量；
 /// 典型合格拟合 rms 与输入噪声同量级。
 typedef struct Image2DAlg_CircleFit {
     double cx, cy;    // 圆心（像素）
@@ -593,6 +599,9 @@ IMAGE2DALG_EXPORT int Image2DAlg_FitCircleEx(const float* xy, int count,
 /// [in]  max_iters    RANSAC 迭代上限（< 1 按 1000）
 /// [in]  seed         随机种子（固定可复现）
 /// [out] out_inliers 内点索引数组（malloc，用 FreeInliers 释放；可为 NULL 不接收）
+///       （out_inlier_count 必填，NULL → -1）
+/// 返回：0 成功；-1 空指针；-3 count < 3 / threshold <= 0 / 无有效圆（内点 < 3）；
+///       -4 内存不足；-99 OpenCV 异常。
 IMAGE2DALG_EXPORT int Image2DAlg_FitCircleRobust(const float* xy, int count, double threshold,
                                                  int max_iters, unsigned int seed,
                                                  Image2DAlg_CircleFit* out,
@@ -630,7 +639,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_FitEllipsesFromBinary(const Image2DAlg_Image* i
 IMAGE2DALG_EXPORT void Image2DAlg_FreeEllipses(Image2DAlg_EllipseFit* ellipses);
 
 /// 最小外接矩形拟合（旋转矩形）。
-/// [in]  count >= 3（否则 -3）
+/// [in]  count >= 3（否则 -3）；零面积退化（有效点重合）→ -3
 typedef struct Image2DAlg_RectFit {
     double cx, cy;        // 中心（像素）
     double width, height; // 边长（像素）
@@ -656,7 +665,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_FitPoly(const float* xy, int count, int degree,
 
 /// 概率霍夫直线检测（线段端点输出）。
 /// [in]  in               二值/边缘图（先 Canny）
-/// [in]  rho              距离分辨率（像素，典型 1）
+/// [in]  rho              距离分辨率（像素，典型 1；rho <= 0 或 theta_deg <= 0 → -3）
 /// [in]  theta            角度分辨率（度，典型 1 → 内部转弧度）
 /// [in]  threshold        投票阈值（越大越严）
 /// [in]  min_line_length  最短线长（<= 0 不限）
@@ -683,7 +692,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_HoughLinesPROI(const Image2DAlg_Image* in,
 /// 霍夫圆检测（HOUGH_GRADIENT）。
 /// [in]  in          灰度语义图（彩色先转灰度；检测前内部已建议先模糊——
 ///                   本接口不做预模糊，锐利二值图可能一无所获，调用方先接 Blur 节点）
-/// [in]  dp          分辨率倒数（1 = 与源图同分辨率）
+/// [in]  dp          分辨率倒数（1 = 与源图同分辨率；dp <= 0 或 min_dist <= 0 → -3）
 /// [in]  min_dist    圆心最小间距（防重复检出）
 /// [in]  param1      内部 Canny 高阈值
 /// [in]  param2      圆心投票阈值（越小圆越多）
@@ -863,8 +872,10 @@ IMAGE2DALG_EXPORT int Image2DAlg_GoodFeatures(const Image2DAlg_Image* in, int ma
 
 /// 角点亚像素细化（梯度法，需初始角点附近有梯度结构）。
 /// [in]  pts/count   初始角点（如 HarrisCorners/GoodFeatures 的输出）
-/// [in]  win_size    搜索窗口边长（奇数，>= 3，典型 5~11）
-/// [out] out_points  malloc 数组（用 FreePoint2f 释放），细化失败的位置保持原值
+/// [in]  win_size    搜索窗口边长（仅校验 >= 3，否则 -3；当前实现固定 5x5
+///                   求解窗——该参数暂不影响细化行为，调大不等于更稳）
+/// [out] out_points  malloc 数组（用 FreePoint2f 释放）；异常结果兜底为负坐标
+///                   钳 0（不保证逐点还原原值，调用方可按需校验输出）
 IMAGE2DALG_EXPORT int Image2DAlg_CornerSubPix(const Image2DAlg_Image* in,
                                               const Image2DAlg_Point2f* pts, int count,
                                               int win_size, Image2DAlg_Point2f** out_points);
@@ -878,6 +889,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_CornerSubPix(const Image2DAlg_Image* in,
 /// [in]  closed     != 0 = 闭合轮廓（findContours 输出）
 /// [out] out_xy     malloc 扁平点集 [x0,y0,...]（用 FreeContourPoints 释放）
 /// [out] out_count  逼近后顶点个数
+/// 逼近过度退化（epsilon 过大致结果 < 3 顶点）→ -3。
 IMAGE2DALG_EXPORT int Image2DAlg_ApproxPolyDP(const float* xy, int count, double epsilon,
                                               int closed, float** out_xy, int* out_count);
 
@@ -1421,8 +1433,8 @@ IMAGE2DALG_EXPORT int Image2DAlg_ContourHausdorff(const float* xy_a, int count_a
 ///                      group_offsets 末值个点，长度由调用方保证）
 /// [in]  group_offsets  长度 group_count+1 的前缀偏移数组：组 k 的点 =
 ///                      xy[group_offsets[k]*2 .. group_offsets[k+1]*2)；
-///                      要求 group_offsets[0] == 0、单调不减、末值 = 总点数
-///                      （否则 -3）
+///                      要求 group_offsets[0] == 0、单调不减（否则 -3）；末值 =
+///                      总点数由调用方保证（本接口无总点数入参，越界无从校验）
 /// [in]  group_count    组数（<= 0 -> -3）
 /// [in]  threshold      RANSAC 内点阈值（像素）：> 0 逐组走抗外点拟合，
 ///                      <= 0 逐组走纯最小二乘

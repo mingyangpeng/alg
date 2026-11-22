@@ -176,7 +176,8 @@ public:
     /// 大图 → 带 overlap 的零拷贝瓦片（见 Tile 结构语义契约）。
     /// [in]  src        源图
     /// [in]  tile_size  瓦片设计尺寸（roi.width/height 恒等于它）
-    /// [in]  overlap    相邻瓦片重叠像素数（0 = 不重叠）；步距 = tile_size - overlap
+    /// [in]  overlap    相邻瓦片重叠像素数（0 = 不重叠）；步距 = tile_size - overlap，
+    ///                  须 < tile_size（overlap >= tile_size 输出空列表）
     /// [out] out_tiles  瓦片列表（行优先顺序）；image 为浅拷贝共享源图内存
     static void splitIntoTiles(const cv::Mat& src, cv::Size tile_size, int overlap,
                                std::vector<Tile>& out_tiles);
@@ -203,9 +204,9 @@ public:
     /// [in]  binary_src    二值图（非 0 视为前景）
     /// [in]  connectivity  4 或 8（邻域定义）
     /// [out] out_labels    标记图（与 src 同尺寸 CV_32S；0 = 背景，1..N = 各域编号）
-    /// [out] out_areas     各域像素面积，下标 i 对应标记 i（out_areas[0] 恒为背景面积）
-    /// 返回：连通域个数 N（不含背景）；输入为空返回 0。
-    /// 用途：AOI 缺陷计数/面积过滤——配合 out_areas 遍历即可按面积筛除噪声域。
+    /// [out] out_areas     各标签像素面积，下标 i 对应标签 i（out_areas[0] 恒为背景面积）
+    /// 返回：标签总数 = 前景连通域个数 N + 1（**含背景标签 0**）；输入为空返回 0。
+    /// 用途：AOI 缺陷计数/面积过滤——从 i=1 起遍历即可按面积筛除噪声域。
     static int connectedComponents(const cv::Mat& binary_src, cv::Mat& out_labels,
                                    std::vector<int>& out_areas, int connectivity = 8);
 
@@ -277,7 +278,8 @@ public:
     /// [out] out_labels     标记图（0 = 背景，1..N = 各域）
     /// [out] out_stats      每行 5 列：[CC_STAT_LEFT, TOP, WIDTH, HEIGHT, AREA]（CV_32S）
     /// [out] out_centroids  每行 (x, y) 质心（CV_64F）
-    /// 返回：连通域个数 N（不含背景）；输入为空返回 0。
+    /// 返回：标签总数 = 前景连通域个数 N + 1（**含背景标签 0**，stats/cents 行 0 =
+    ///       背景）；输入为空返回 0。
     static int connectedComponentsWithStats(const cv::Mat& binary_src, cv::Mat& out_labels,
                                             cv::Mat& out_stats, cv::Mat& out_centroids,
                                             int connectivity = 8);
@@ -319,12 +321,14 @@ public:
 
     /// 点到轮廓的距离（cv::pointPolygonTest 透传）。
     /// [in] measure_dist  true 返回带符号像素距离（内正外负）；false 只判内外（返回 +1/-1/0）
+    /// 注意：空轮廓返回 0（任何点都判为"不在内"）。
     /// 用途：点是否落入 ROI/缺陷区（配合 Geom::createPolygon 亦可）。
     static double pointPolygonTest(const std::vector<cv::Point>& contour, cv::Point2f pt,
                                    bool measure_dist);
 
     /// 形状相似度（cv::matchShapes 透传，Hu 矩）：越小越相似，0 = 完全一致。
     /// [in] method  cv::CONTOURS_MATCH_I1 / I2 / I3（常用 I1）
+    /// 注意：任一轮廓为空返回 DBL_MAX（视为"完全不相似"，cv 原生遇空轮廓会崩）。
     static double matchShapes(const std::vector<cv::Point>& contour1,
                               const std::vector<cv::Point>& contour2,
                               int method, double parameter = 0.0);
@@ -389,7 +393,7 @@ public:
 
     /// 非零像素坐标列表（cv::findNonZero 透传）。
     /// 用途：HeightMap 有效格提取（经 HeightMapAdapter::toImage 后）等。
-    /// 返回：点数（空图/全零返回 0）。
+    /// [out] out_points 非零像素坐标（行优先序）；空图/全零输出空列表。
     static void findNonZero(const cv::Mat& src, std::vector<cv::Point>& out_points);
 
     /// 沿线段卡尺（尺寸测量经典算子）：p1→p2 均匀采样灰度（双线性），中心差分
@@ -500,7 +504,7 @@ public:
     /// 圆拟合（RANSAC 抗外点）：随机三点定圆 → 统计内点 → 最优内点集 GN 精化。
     /// [in] threshold   内点判定：点到圆周距离 ≤ threshold（与坐标同单位）
     /// [out] out_inliers 内点索引（精化后圆上重算）
-    /// [in] seed        随机种子（固定可复现）；max_iters 迭代上限
+    /// [in] seed        随机种子（固定可复现）；max_iters 迭代上限（<= 0 返回 false）
     /// 返回：false = 点数 < 3 / threshold<=0 / 无有效圆（内点 < 3）。
     /// 用途：焊盘边缘毛刺/粘连外点场景（fitCircle 纯最小二乘会被外点拉偏）。
     static bool fitCircleRobust(const std::vector<cv::Point2f>& points, double threshold,

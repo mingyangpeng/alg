@@ -14,10 +14,10 @@
 //   Stereo.h          三维空间数据管理与度量（纯数学，Pimpl）
 //                     含 KdTree3 空间索引（nearest/knn/radiusSearch）、
 //                     点-盒/面距离与判定、meanNearestNeighborDistance
-//   ImageProcessor.h  二维图像算子 24 组 78 接口（OpenCV，静态工具类，头仅 core/mat）
+//   ImageProcessor.h  二维图像算子 23 组 78 接口（OpenCV，静态工具类，头仅 core/mat）
 //                     含绘图标注/带掩膜与多目标匹配/亚像素/fitCircle(RANSAC)/霍夫
-//   CloudProcessor.h  三维点云算子 12 模块 90 接口（PCL，显式实例化白名单）
-//                     含 fitCircle3D/measureFlatness/多边形 ROI/高度图双向
+//   CloudProcessor.h  三维点云算子 12 模块 96 接口（PCL，显式实例化白名单）
+//                     含 fitCircle3D/fitTorus/measureFlatness/多边形 ROI/高度图双向
 //   CloudIO.h         文件读写：点云 PCD/PLY/TXT + 网格 OBJ/STL（MeshIO）+
 //                     高度图 SHMAP1（HeightMapIO）
 //

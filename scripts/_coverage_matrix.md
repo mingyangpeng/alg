@@ -1,6 +1,6 @@
-# C API ↔ ComUI 节点覆盖矩阵审计（2026-11-19；2026-11-20 增补滤波拟合批）
+# C API ↔ ComUI 节点覆盖矩阵审计（2026-11-19 初版；2026-11-20 起后续批次增补见 §五）
 
-范围：`src/Image2DAlg/include/Image2DAlg_api.h`（2.0.0~2.2.0 全部注释）、
+范围：`src/Image2DAlg/include/Image2DAlg_api.h`（初版审计覆盖 2.0.0~2.2.0 全部注释，2.3.0 起新增见 §五增补）、
 `src/Point3DAlg/include/Point3DAlg_api.h` + `Point3DAlg_SickApi.h`、
 `src/BusinessAlg/include/BusinessAlg_api.h`，对照 `integration/comui/*.node.json`。
 排除基础设施：GetVersion / Init / Cleanup / FreeImage / ReadImage（节点化用途保留）/ 各 Free* / FreePoint2f 等。
@@ -188,5 +188,4 @@
 | Point3DAlg 椭球拟合（批次 D 5.4 收官） | 1.8.0 无新导出：FitModel method 10 = ellipsoid（out_coeffs 12 值 [cx,cy,cz, a,b,c, rx,ry,rz]，半轴不排序随方向对应）——自研：9 点最小样本二次方程 SVD 零空间求解 + 特征分解椭球参数提取 + Sampson 一阶近似内点判定 + 手写 RANSAC（仅 RANSAC，fit 1/2 回退）；退化校验（半轴非正/共面采样跳过）| ✅ 已闭环 |
 | Image2DAlg 2D 稳健拟合变体（批次 D 5.4 收官） | 2.8.0 新增 3 C API（C ABI 119→122）：FitLineRobust（cv::fitLine distType 全透传 L1/HUBER/WELSCH/FAIR/CAUCHY 等，param 开放，LineFit.rms 复算口径同 FitLine）+ FitEllipseAMS / FitEllipseDirect（cv 4.4.0 已有——4.5+ 函数在 4.4.0 同样存在，RotatedRect→EllipseFit 转换同 FitEllipse）；点集容器接口（xy 扁平数组）——节点化视 fit_circle_ex 先例 | ✅ 已闭环 |
 | Point3DAlg 八叉树/体素空间检索（批次 B 3.4） | 1.8.0 新增 3 C API（C ABI 47→50）：OctreeVoxelSearch 体素检索（查询点所在体素全部点）/ OctreeBoxSearch 盒检索（轴对齐盒闭区间——KdTree 无对应查询）/ OctreeChangeDetection 双云变化检测（相对基准云新占体素索引，dists 恒 0 占位）——复用 §9.9 既有索引/距离输出通道与 FreeSearchResult（待开发清单旧注"索引数组需 ABI v2 blob"已过时，该通道 1.2.0 已存在）；底层 treeOctreeVoxelSearch/treeOctreeChangeDetection 既有、新增 treeOctreeBoxSearch（PCL 1.9 boxSearch 入参为 Eigen::Vector3f 非点型）；八叉树 KNN/半径与 KdTree 结果全同不重复封装；待开发清单原名 TreeOctree* 改 Octree*（对齐 §9.9 已发布命名）；节点 +3（octree_voxel_search/octree_box_search/octree_change_detection，双云输入先例 cloud_diff）→ 节点 102→105（point3d 30→33）；测试 +18 用例（A9b 段：同体素命中/空体素 0 成功/边界闭区间/dists 升序对应/变化检测新增点/in_base 空云全部新增/参数非法） | ✅ 已闭环 |
-| Point3DAlg 八叉树/体素空间检索组（1.8.0，值守会话交付，归属注明） | 3 新导出（C ABI 47→50）：OctreeVoxelSearch 体素检索 / OctreeBoxSearch 盒检索（底层新增 CloudProcessor::treeOctreeBoxSearch）/ OctreeChangeDetection 双云变化检测——复用 KnnSearch/RadiusSearch 的索引/距离输出通道与 FreeSearchResult 释放；comui 3 入口 + 3 node.json（point3d 33）+ verify_point3d.cmd 导出清单同步；测试 A9b 段 | ✅ 已闭环 |
-| Point3DAlg 八叉树/体素空间检索组（1.8.0，值守会话交付，归属注明） | 3 新导出（C ABI 47→50）：OctreeVoxelSearch 体素检索 / OctreeBoxSearch 盒检索（底层新增 CloudProcessor::treeOctreeBoxSearch）/ OctreeChangeDetection 双云变化检测——复用 KnnSearch/RadiusSearch 的索引/距离输出通道与 FreeSearchResult 释放；comui 3 入口 + 3 node.json（point3d 33）+ verify_point3d.cmd 导出清单同步；测试 A9b 段 | ✅ 已闭环 |
+| Point3DAlg 八叉树/体素空间检索组（1.8.0，值守会话交付，归属注明；与上行"批次 B 3.4"为同一批交付的两个登记视角） | 3 新导出（C ABI 47→50）：OctreeVoxelSearch 体素检索 / OctreeBoxSearch 盒检索（底层新增 CloudProcessor::treeOctreeBoxSearch）/ OctreeChangeDetection 双云变化检测——复用 KnnSearch/RadiusSearch 的索引/距离输出通道与 FreeSearchResult 释放；comui 3 入口 + 3 node.json（point3d 33）+ verify_point3d.cmd 导出清单同步；测试 A9b 段（原登记曾重复两行，2026-11-22 盘点去重） | ✅ 已闭环 |

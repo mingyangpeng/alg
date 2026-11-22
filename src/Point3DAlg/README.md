@@ -30,9 +30,9 @@ Point3DAlg.dll
 | `tools/Point3DAlg_DomeFit.h/.cpp` | **拱形球顶拟合**：稳健基面 → 聚类 → Kåsa 球拟合 → bump 高度/apex/球心/R + 统计（含共面性两口径） |
 | `tools/Point3DAlg_DomeFitTest.cpp` | 球顶拟合测试（合成自检注册 ctest；带 PLY 参数 = 真实数据对照 `scripts/_wafer_dome_baseline.py` 基准断言） |
 | `tools/Point3DAlg_RegionPlane.h/.cpp` | **ROI 平面量测**：XY 矩形稳健平面拟合 → 高度/平面度 PV/σ/系数 |
-| `tools/Point3DAlg_RegionPlaneTest.cpp` | 平面量测测试（18 check，ctest） |
+| `tools/Point3DAlg_RegionPlaneTest.cpp` | 平面量测测试（19 check，ctest） |
 | `tools/Point3DAlg_CloudDiff.h/.cpp` | **点云高度差对比**：栅格 z 中位 → 逐格差值统计 + 超差判定 + 差值点云；可选 XY 粗对齐（格域 RMS 搜索 + 重叠 70% 门槛） |
-| `tools/Point3DAlg_CloudDiffTest.cpp` | 高度差测试（20 check，ctest） |
+| `tools/Point3DAlg_CloudDiffTest.cpp` | 高度差测试（31 check，ctest） |
 | `tools/Point3DAlg_SickSynthTest.cpp` | SICK 拼接合成回归（自造 .dat：列映射/交织/偏移对齐/FOV 框/蛇形 2 pass/自然序，40 check，ctest） |
 | `tools/Point3DAlg_FitUtil.h` | 量测数值内核（MedianOf/FitPlaneZ，header-only，量测家族共用） |
 | `tools/Point3DAlg_CircleFit.h/.cpp` | **圆/孔位量测**：高度切片 → 聚类 → Kåsa 圆拟合（圆心/孔径/RMS），FitCircle2D 支持独立轮廓点 |
@@ -45,7 +45,7 @@ ComUI 适配层：`integration/comui/Point3DAlg_comui.cpp`；节点声明：`int
 
 ## 接口速查
 
-### C ABI（1.2.0 起共导出 50 个：25（1.1.0）+ 17（1.2.0 P1/P2）+ 5（1.5.0 GD&T）+ 3（1.8.0 八叉树/体素检索）；1.3.0/1.4.0/1.6.0/1.7.0 无新导出，FilterCloud/FitModel/SegmentCloud 扩展取值域）
+### C ABI（共导出 50 个：25（1.0.0 及同期工具接口 + 1.1.0 累计）+ 17（1.2.0 P1/P2）+ 5（1.5.0 GD&T）+ 3（1.8.0 八叉树/体素检索）；1.3.0/1.4.0/1.6.0/1.7.0 无新导出，FilterCloud/FitModel/SegmentCloud 扩展取值域）
 
 | 函数 | 用途 |
 |---|---|
@@ -60,7 +60,7 @@ ComUI 适配层：`integration/comui/Point3DAlg_comui.cpp`；节点声明：`int
 | `Point3DAlg_FilterCloud(&in, method, params, n, &out)` | 滤波/降采样 14 method（0=voxel … 9=conditionalXYZ、10=approxVoxel 近似体素（1.3.0）、11=conditionalRemoval 复合条件去除 12=medianFilter 中值滤波 13=gridMinimum 格网最低点（均 1.7.0），params 布局见 api.h 表） |
 | `Point3DAlg_ExtractCloud(&in, method, indices, n, params, m, &out)` | 提取/裁剪 5 method（0=byIndices … 4=cropPolygonROI） |
 | `Point3DAlg_TransformCloud(&in, method, params, n, &out)` | 空间变换 7 method（0=applyMatrix(4x4 行主序) … 6=project） |
-| `Point3DAlg_FitModel(&in, method, fit, threshold, coeffs, cap, &inliers, &n)` | 通用拟合 11 model（0=plane[4] 1=sphere[4] 2=cylinder[7] 3=circle3D[7] 4=cone[7] 5=line3D[6] 空间直线（1.3.0） 6=torus[8] 圆环面（1.4.0，全自研——PCL 1.9 无环面模型） 7=parallelPlane[4] 8=perpendicularPlane[4] 平行/垂直平面（1.7.0，轴约束 +Z——PCL SACSegmentation 直调，三种 fit 均支持） 9=stick[6] 线段（1.7.0，仅 RANSAC——PCL 1.9.1 stick 距离口径缺陷，内点 PCA 精化 + 本层点到线重选内点） 10=ellipsoid[12] 椭球（1.8.0，全自研——PCL 1.9 无椭球模型，仅 RANSAC，Sampson 内点口径））× 3 fit（0=RANSAC 1=MSAC 2=LMS）；capacity 不足 → -3 回填所需长度 |
+| `Point3DAlg_FitModel(&in, method, fit, threshold, coeffs, cap, &inliers, &n)` | 通用拟合 11 model（0=plane[4] 1=sphere[4] 2=cylinder[7] 3=circle3D[7] 4=cone[7] 5=line3D[6] 空间直线（1.3.0） 6=torus[8] 圆环面（1.4.0，全自研——PCL 1.9 无环面模型） 7=parallelPlane[4] 8=perpendicularPlane[4] 平行/垂直平面（1.7.0，轴约束 +Z——1.7.0 缺陷修复后为手写确定性搜索 FitPlaneConstrained（非 PCL 直调），三 fit 统一内点计数评分） 9=stick[6] 线段（1.7.0，仅 RANSAC——1.7.0 缺陷修复后为手写点对搜索 FitStickRansac（弃 PCL 直调），内点 PCA 精化 + 本层点到线重选内点） 10=ellipsoid[12] 椭球（1.8.0，全自研——PCL 1.9 无椭球模型，仅 RANSAC，Sampson 内点口径））× 3 fit（0=RANSAC 1=MSAC 2=LMS）；capacity 不足 → -3 回填所需长度 |
 | `Point3DAlg_SegmentCloud(&in, method, params, n, &segs, &count)` | 分割 8 method（0=planeRANSAC 1=euclideanCluster 2=dbscan 3=regionGrowing 4=planesMulti 5=conditionalEuclidean 条件欧氏·高度差约束（1.6.0，KdTree+条件洪泛手工实现） 6=groundPlane 地面分割 PMF（1.6.0，恒 2 段） 7=minCut 图割前景（1.6.0，需前景种子））→ 段数组（FreeClouds 释放） |
 | `Point3DAlg_KnnSearch(&in, query[3], k, &idx, &dist, &n)` | KdTree KNN（dist = 欧氏距离升序；k<=0 → -3） |
 | `Point3DAlg_RadiusSearch(&in, query[3], r, &idx, &dist, &n)` | KdTree 半径搜索（dist = 欧氏距离**升序**，封装层排序——FLANN 半径搜索原生无序；r<=0 → -3；0 命中属成功） |
@@ -110,7 +110,7 @@ ComUI 适配层：`integration/comui/Point3DAlg_comui.cpp`；节点声明：`int
 | `FitModel(torus)` | `[cx,cy,cz 中心, dx,dy,dz 单位轴(符号不定), R 主半径, r 管半径]`（1.4.0 新增，8 值；三种 fit 均支持——0/1 采样稳健层、2 确定性多候选 LM；剔除非有限点后 <8 点 → -2） |
 | `FitModel(parallelPlane)` | `[a,b,c,d]`（ax+by+cz+d=0；1.7.0 新增，4 值——轴固定 +Z：法向 ⊥ Z 的竖直平面/墙面，eps 固定 5°；三种 fit 均支持） |
 | `FitModel(perpendicularPlane)` | `[a,b,c,d]`（1.7.0 新增，4 值——轴固定 +Z：法向 ∥ Z 的水平面/台面，eps 固定 5°；三种 fit 均支持） |
-| `FitModel(stick)` | `[px,py,pz 线上一点, dx,dy,dz 单位方向]`（1.7.0 新增，6 值，布局同 line3D——SACMODEL_STICK 有限长线段；仅 RANSAC（fit 1/2 回退），内点 <3 或方向退化 → -2） |
+| `FitModel(stick)` | `[px,py,pz 线上一点, dx,dy,dz 单位方向]`（1.7.0 新增，6 值，布局同 line3D——有限长线段语义（PCL SACMODEL_STICK 口径）；1.7.0 缺陷修复后为手写点对搜索实现，仅 RANSAC（fit 1/2 回退），内点 <3 或方向退化 → -2） |
 | `FitModel(ellipsoid)` | `[cx,cy,cz 中心, a,b,c 三条半轴（降序 a>=b>=c，与 rx,ry,rz 主轴方向一一对应）, rx,ry,rz Rodrigues 旋转向量（右手系，把 +Z 轴转到第一半轴 a 的方向；半轴方向为无向直线 → 同一椭球的 rvec 不唯一）, 保留×3 恒 0]`（1.8.0 新增，12 值，全自研——PCL 1.9 无椭球模型；仅 RANSAC（fit 1/2 回退），内点判定为 Sampson 一阶近似口径；剔除非有限点后 <9 点/无正定候选/精化后仍退化 → -2） |
 | `SegmentCloud(0 planeRANSAC)` | 恒 2 段：[局内点（恒非空）, 其余点（可为空段 count=0，如全部点在平面上）]（平面方程用 FitModel 另取） |
 | `MeasureCloud(AABB)` | `[minx,miny,minz,maxx,maxy,maxz]` |
@@ -200,9 +200,9 @@ Point3DAlg_RegistRun(session, src, dst, params, &step);   // 策略 1~6
 | 入口 | 内容 | ctest |
 |---|---|---|
 | `Point3DAlg_RegistTest` | 配准 26 check | ✅ |
-| `Point3DAlg_DomeFitTest` | 球顶拟合合成 22 check；带 PLY 参数 = moi_wafer 基准断言 | ✅（无参模式） |
-| `Point3DAlg_RegionPlaneTest` | 平面量测 18 check | ✅ |
-| `Point3DAlg_CloudDiffTest` | 高度差 20 check | ✅ |
+| `Point3DAlg_DomeFitTest` | 球顶拟合合成 30 check；带 PLY 参数 = moi_wafer 基准断言 | ✅（无参模式） |
+| `Point3DAlg_RegionPlaneTest` | 平面量测 19 check | ✅ |
+| `Point3DAlg_CloudDiffTest` | 高度差 31 check | ✅ |
 | `Point3DAlg_SickSynthTest` | SICK 拼接合成 40 check | ✅ |
 | `Point3DAlg_test` | 通用 C API（合成数据 A1~A13，恒跑：滤波/裁剪/变换/IO + 体素一致性 + 拟合/分割/搜索/度量 + 八叉树空间检索 A9b + 法线/特征/关键点 + 表面重建/MeshOp + HeightMap）+ SICK 真实数据端到端 + 深层句柄族 | ❌（B 部分依赖 Z: 数据，手动跑；数据缺失打印 SKIP） |
 | `scripts/_test_comui_*.py` ×3 | ctypes 模拟宿主端到端 | 手动 |
@@ -211,7 +211,7 @@ Point3DAlg_RegistRun(session, src, dst, params, &step);   // 策略 1~6
 ## 已知局限与遗留
 
 - **`.xml` 换算兜底预留未实现**：头注释已如实标注，换算完全依赖 recipe/common json
-- 16 位深度 PNG 无压缩（zlib 存储块），大图体积大；`zmin` 有效点映射 0 与"无效=0"语义接近（zmin 处会被当无效点，读回时需注意）
+- 16 位深度 PNG 无压缩（zlib 存储块），大图体积大；有效点映射 1..65535、0 = 无效点专用（早期"`zmin` 处映射 0 与无效点撞车"问题已修复，SaveDepth/SaveDepthView 同口径）
 - `Point3DAlg_RegistTool` 部分键位受 PCL/VTK 内置行为限制（详见 tools/README.md 已知键位问题）
 - `Image2DAlg_Calib` 同模块但属 2D 标定方向，见 Image2DAlg 文档
 - **1.2.0 表面重建的两处登记偏差**：① type 0/1（凸包/凹包）在 C 封装层直接调 PCL ConvexHull/ConcaveHull 取回面片——CloudProcessor 同名算子只回顶点云；② type 3~7（法线重建）在封装层自动组合"KNN k=10 估法线 + MST 朝向一致化 k=30"（§9.12 强制约束；SoA 容器无法传入法线），不暴露法线参数

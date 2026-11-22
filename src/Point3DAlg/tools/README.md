@@ -31,7 +31,15 @@ ComUI 插件的硬约束（`docs/THIRD_PARTY_OPS.md` §9）决定键盘交互不
 | `Point3DAlg_SickSynthTest.cpp` | SICK 拼接合成回归（自造平面布局 .dat：单机列映射 / 多相机交织 / 偏移对齐 / FOV 框坐标，注册 ctest） |
 | `Point3DAlg_FitUtil.h` | 量测数值内核（MedianOf / FitPlaneZ，header-only，DomeFit 与 RegionPlane 共用） |
 | `Point3DAlg_RegionPlane.h/.cpp` | **ROI 平面量测**（纯函数）：稳健平面拟合 → 高度/平面度 PV/σ，台阶差=两 ROI 高度相减 |
-| `Point3DAlg_RegionPlaneTest.cpp` | 平面量测测试（水平/倾斜/台阶/混台阶 20% minority/边界，18 项 check，注册 ctest） |
+| `Point3DAlg_RegionPlaneTest.cpp` | 平面量测测试（水平/倾斜/台阶/混台阶 20% minority/边界，19 项 check，注册 ctest） |
+| `Point3DAlg_CloudDiff.h/.cpp` | **点云高度差对比**（纯函数）：栅格 z 中位 → 逐格差值统计 + 超差判定 + 差值点云；可选 XY 粗对齐（格域 RMS 搜索 + 重叠 70% 门槛） |
+| `Point3DAlg_CloudDiffTest.cpp` | 高度差测试（31 项 check，注册 ctest） |
+| `Point3DAlg_CircleFit.h/.cpp` | **圆/孔位量测**（纯函数）：高度切片 → 聚类 → Kåsa 圆拟合（圆心/孔径/RMS），FitCircle2D 支持独立轮廓点 |
+| `Point3DAlg_CircleFitTest.cpp` | 圆量测测试（19 项 check，注册 ctest） |
+| `Point3DAlg_Profile.h/.cpp` | **轮廓截面量测**（纯函数）：线段带内投影 → 弧长分格 z 中位 → 剖面点列 + 台阶落差 max_step |
+| `Point3DAlg_ProfileTest.cpp` | 轮廓截面测试（22 项 check，注册 ctest） |
+| `Point3DAlg_BumpReport.h/.cpp` | **bump 全参数报表**（纯函数）：高度+截面直径+共面性偏差+NG 位一体（DomeFit×CircleFit 组合） |
+| `Point3DAlg_BumpReportTest.cpp` | bump 报表测试（28 项 check，注册 ctest） |
 
 ## 构建与运行
 

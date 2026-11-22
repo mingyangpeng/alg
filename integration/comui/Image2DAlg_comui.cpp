@@ -89,6 +89,7 @@ static AlgoCImageOut* MakeBgraOut(const Image2DAlg_Image& img) {
 }
 
 // ---------------- 算子入口：图像读取（node.json: alg.image2d.read） ----------------
+// 核心 C API：Image2DAlg_ReadImage（内部已统一转 BGRA 紧排）。
 // 参数（按 node.json params 声明顺序）：
 //   img_path   path   默认空   图像文件路径（ANSI；png/tiff/jpg/jpeg）
 // 输出：BGRA 图像（ReadImage 固定 4 通道）。
@@ -110,6 +111,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiRead(const AlgoCInput* in, AlgoCOutput* ou
 }
 
 // ---------------- 算子入口：Gamma 校正（node.json: alg.image2d.gamma） ----------------
+// 核心 C API：Image2DAlg_Gamma（LUT 与 <0.05 钳制在核心层）。
 // 参数（按 node.json params 声明顺序）：
 //   gamma   number   默认 1.0   [0.1, 5.0]（< 0.05 由核心层钳制）
 // 输出：BGRA（alpha 强制 255，与该节点既有行为一致）。
@@ -148,6 +150,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiGamma(const AlgoCInput* in, AlgoCOutput* o
 }
 
 // ---------------- 算子入口：阈值化（node.json: alg.image2d.threshold） ----------------
+// 核心 C API：Image2DAlg_Threshold（1 通道结果经 MakeBgraOut 转 BGRA）。
 // 参数（按 node.json params 声明顺序）：
 //   mode        int     默认 0    [0,4]    0 固定二值 / 1 反二值 / 2 OTSU / 3 自适应均值 / 4 自适应高斯
 //   thresh      number  默认 128  [0,255]  （mode 0/1 有效）
@@ -182,6 +185,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiThreshold(const AlgoCInput* in, AlgoCOutpu
 }
 
 // ---------------- 算子入口：统一二值化（node.json: alg.image2d.binarize） ----------------
+// 核心 C API：Image2DAlg_Binarize（-3 参数非法 → rc 3，其余失败 → rc 2）。
 // 参数（按 node.json params 声明顺序 + kind，同名 kind 用 FindParam occurrence 区分）：
 //   mode       int     默认 0   [0,10]   0 二值/1 反二值/2 OTSU/3 自适应均值/4 自适应高斯/
 //                                        5 TRUNC/6 TOZERO/7 TOZERO_INV/8 双阈值区间内/
@@ -223,6 +227,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiBinarize(const AlgoCInput* in, AlgoCOutput
 }
 
 // ---------------- 算子入口：模糊/降噪（node.json: alg.image2d.blur） ----------------
+// 核心 C API：Image2DAlg_Blur。
 // 参数（按声明顺序）：
 //   method  int     默认 0  [0,2]    0 高斯 / 1 中值 / 2 双边
 //   ksize   int     默认 3  [1,51]   核尺寸（自动补奇；双边 = 邻域直径）
@@ -255,6 +260,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiBlur(const AlgoCInput* in, AlgoCOutput* ou
 }
 
 // ---------------- 算子入口：形态学（node.json: alg.image2d.morphology） ----------------
+// 核心 C API：Image2DAlg_Morphology。
 // 参数（按声明顺序）：
 //   op          int  默认 2  [0,6]   0 腐蚀 / 1 膨胀 / 2 开 / 3 闭 / 4 梯度 / 5 顶帽 / 6 黑帽
 //   shape       int  默认 0  [0,2]   0 矩形 / 1 十字 / 2 椭圆
@@ -286,6 +292,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiMorphology(const AlgoCInput* in, AlgoCOutp
 }
 
 // ---------------- 算子入口：Canny 边缘（node.json: alg.image2d.canny） ----------------
+// 核心 C API：Image2DAlg_Canny。
 // 参数（按声明顺序）：
 //   threshold1  number  默认 50  [0,1000]  滞后阈值下限
 //   threshold2  number  默认 150 [0,1000]  滞后阈值上限（经验取 2~3 倍 threshold1）
@@ -313,6 +320,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiCanny(const AlgoCInput* in, AlgoCOutput* o
 }
 
 // ---------------- 算子入口：批板差分（node.json: alg.image2d.absdiff） ----------------
+// 核心 C API：Image2DAlg_AbsDiff。
 // 输入：2 张图像（images[0] = 基准板，images[1] = 待检板），尺寸/通道必须一致。
 // 参数：无。
 // 输出：逐像素差的绝对值（BGRA）——再接 threshold 节点即缺陷检出链。
@@ -339,6 +347,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiAbsDiff(const AlgoCInput* in, AlgoCOutput*
 }
 
 // ---------------- 算子入口：连通域统计（node.json: alg.image2d.connected_components） ----------------
+// 核心 C API：Image2DAlg_ConnectedComponents（blobs 由 FreeBlobs 释放）。
 // 参数（按声明顺序）：
 //   connectivity  int     默认 8  [4,8]      邻域定义
 //   min_area      number  默认 1  [0,1e7]    面积过滤下限（像素，闭区间）
@@ -395,6 +404,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiConnectedComponents(const AlgoCInput* in, 
 }
 
 // ---------------- 算子入口：Sobel 梯度（node.json: alg.image2d.sobel） ----------------
+// 核心 C API：Image2DAlg_Sobel。
 // 参数（按声明顺序）：
 //   dx     int  默认 1  [0,2]  X 方向求导阶数
 //   dy     int  默认 0  [0,2]  Y 方向求导阶数（dx+dy >= 1）
@@ -424,6 +434,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiSobel(const AlgoCInput* in, AlgoCOutput* o
 }
 
 // ---------------- 算子入口：HSV 阈值分割（node.json: alg.image2d.hsv_threshold） ----------------
+// 核心 C API：Image2DAlg_HSVThreshold。
 // 参数（按声明顺序，6 个 number）：
 //   h_lo 默认 0 [0,180]   h_hi 默认 180 [0,180]   （红色跨 0 需两节点取并集）
 //   s_lo 默认 0 [0,255]   s_hi 默认 255 [0,255]
@@ -456,6 +467,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiHsvThreshold(const AlgoCInput* in, AlgoCOu
 }
 
 // ---------------- 算子入口：轮廓测量（node.json: alg.image2d.analyze_contours） ----------------
+// 核心 C API：Image2DAlg_AnalyzeContours（infos 由 FreeContours 释放）。
 // 参数（按声明顺序）：
 //   external_only  int     默认 1  [0,1]  只取最外层轮廓
 //   min_area       number  默认 1  [0,1e7] 面积过滤（像素²）
@@ -511,6 +523,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiAnalyzeContours(const AlgoCInput* in, Algo
 }
 
 // ---------------- 算子入口：多目标圆拟合（node.json: alg.image2d.fit_circles） ----------------
+// 核心 C API：Image2DAlg_FitCirclesFromBinary（fits 由 FreeCircles 释放）。
 // 参数（按声明顺序）：
 //   min_area   number  默认 10  [0,1e7]   面积过滤下限
 //   max_area   number  默认 0   [0,1e7]   面积过滤上限（<=0 不限）
@@ -569,6 +582,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiFitCircles(const AlgoCInput* in, AlgoCOutp
 }
 
 // ---------------- 算子入口：灰度化（node.json: alg.image2d.to_gray） ----------------
+// 核心 C API：Image2DAlg_ToGray（结果经 MakeBgraOut 转 BGRA 显示）。
 // 参数：无。输出：灰度图转 BGRA 显示。错误码：1 输入未连线；2 处理失败。
 
 IMAGE2DALG_EXPORT int Image2DAlg_ComuiToGray(const AlgoCInput* in, AlgoCOutput* out) {
@@ -588,6 +602,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiToGray(const AlgoCInput* in, AlgoCOutput* 
 }
 
 // ---------------- 算子入口：缩放（node.json: alg.image2d.resize） ----------------
+// 核心 C API：Image2DAlg_Resize。
 // 参数（按声明顺序）：
 //   out_width      int     默认 640 [1,10000]
 //   out_height     int     默认 480 [1,10000]
@@ -615,6 +630,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiResize(const AlgoCInput* in, AlgoCOutput* 
 }
 
 // ---------------- 算子入口：裁剪（node.json: alg.image2d.crop） ----------------
+// 核心 C API：Image2DAlg_Crop。
 // 参数（按声明顺序）：
 //   x/y      int  默认 0   [0,100000]  左上角
 //   width    int  默认 100 [1,100000]  宽（越界自动钳制到图内）
@@ -643,6 +659,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiCrop(const AlgoCInput* in, AlgoCOutput* ou
 }
 
 // ---------------- 算子入口：旋转（node.json: alg.image2d.rotate） ----------------
+// 核心 C API：Image2DAlg_Rotate。
 // 参数（按声明顺序）：
 //   angle          number  默认 0  [-360,360]  逆时针角度（度）
 //   scale          number  默认 1  [0.01,10]
@@ -671,6 +688,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiRotate(const AlgoCInput* in, AlgoCOutput* 
 }
 
 // ---------------- 算子入口：灰度增强（node.json: alg.image2d.enhance） ----------------
+// 核心 C API：Image2DAlg_Enhance。
 // 参数（按声明顺序）：
 //   method      int     默认 1  [0,1]   0 直方图均衡 / 1 CLAHE
 //   clip_limit  number  默认 2  [0.1,10] CLAHE 对比度上限
@@ -700,6 +718,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiEnhance(const AlgoCInput* in, AlgoCOutput*
 }
 
 // ---------------- 算子入口：霍夫直线（node.json: alg.image2d.hough_lines） ----------------
+// 核心 C API：Image2DAlg_HoughLinesP（lines 由 FreeLines 释放）。
 // 参数（按声明顺序）：
 //   rho             number  默认 1   [0.1,10]   距离分辨率（像素）
 //   theta_deg       number  默认 1   [0.1,10]   角度分辨率（度）
@@ -757,6 +776,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiHoughLines(const AlgoCInput* in, AlgoCOutp
 }
 
 // ---------------- 算子入口：霍夫圆（node.json: alg.image2d.hough_circles） ----------------
+// 核心 C API：Image2DAlg_HoughCircles（circles 由 FreeCirclesHough 释放）。
 // 参数（按声明顺序）：
 //   dp        number  默认 1   [0.1,4]     分辨率倒数
 //   min_dist  number  默认 10  [1,10000]   圆心最小间距
@@ -822,6 +842,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiHoughCircles(const AlgoCInput* in, AlgoCOu
 }
 
 // ---------------- 算子入口：Mark 点对位（node.json: alg.image2d.match_template_ex） ----------------
+// 核心 C API：Image2DAlg_MatchTemplateEx。
 // 输入 2 张图像：images[0]=搜索图，images[1]=模板。
 // 参数（按声明顺序）：
 //   method      int     默认 5  [0,5]    cv::TemplateMatchModes（5=CCOEFF_NORMED 归一化相关）
@@ -885,6 +906,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiMatchTemplateEx(const AlgoCInput* in, Algo
 }
 
 // ---------------- 算子入口：多目标模板匹配（node.json: alg.image2d.find_matches） ----------------
+// 核心 C API：Image2DAlg_FindAllMatches（matches 由 FreeMatches 释放）。
 // 输入 2 张图像：images[0]=搜索图，images[1]=模板。
 // 参数（按声明顺序）：
 //   method          int     默认 5   [0,5]
@@ -945,6 +967,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiFindMatches(const AlgoCInput* in, AlgoCOut
 }
 
 // ---------------- 算子入口：HSV 分割 wrap 版（node.json: alg.image2d.hsv_threshold_wrap） ----------------
+// 核心 C API：Image2DAlg_HSVThresholdWrap。
 // 参数（按声明顺序，6 个 number，同 hsv_threshold）：
 //   h_lo/h_hi/s_lo/s_hi/v_lo/v_hi
 // 与 hsv_threshold 的差别：h_lo > h_hi 自动按环绕区间 [h_lo,180]∪[0,h_hi]，
@@ -976,6 +999,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiHsvThresholdWrap(const AlgoCInput* in, Alg
 }
 
 // ---------------- 算子入口：连通域 ROI（node.json: alg.image2d.connected_components_roi） ----------------
+// 核心 C API：Image2DAlg_ConnectedComponentsROI。
 // 参数（按声明顺序）：
 //   roi_x/roi_y      int     默认 0 [0,100000]  ROI 左上角
 //   roi_w/roi_h      int     默认 0 [0,100000]  ROI 尺寸（<=0 = 全图）
@@ -1037,6 +1061,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiConnectedComponentsRoi(const AlgoCInput* i
 }
 
 // ---------------- 算子入口：轮廓测量 ROI（node.json: alg.image2d.analyze_contours_roi） ----------------
+// 核心 C API：Image2DAlg_AnalyzeContoursROI。
 // 参数（按声明顺序）：
 //   roi_x/roi_y     int     默认 0 [0,100000]
 //   roi_w/roi_h     int     默认 0 [0,100000]  （<=0 = 全图）
@@ -1098,6 +1123,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiAnalyzeContoursRoi(const AlgoCInput* in, A
 }
 
 // ---------------- 算子入口：掩膜模板匹配（node.json: alg.image2d.match_template_masked） ----------------
+// 核心 C API：Image2DAlg_MatchTemplateMasked（掩膜 BGRA→单通道转换在适配层）。
 // 输入 3 张图像：images[0]=搜索图，images[1]=模板，images[2]=掩膜（1 通道语义，
 // 非 0 = 参与匹配；宿主传 BGRA 时核心层按 4 通道视图处理会 -3——掩膜节点约定
 // 掩膜图必须为灰度 BGRA（B=G=R=掩膜值））。
@@ -1154,6 +1180,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiMatchTemplateMasked(const AlgoCInput* in, 
 }
 
 // ---------------- 算子入口：Mark 阵列全检（node.json: alg.image2d.find_matches_ex） ----------------
+// 核心 C API：Image2DAlg_FindAllMatchesEx（matches 由 FreeMatchesEx 释放）。
 // 输入 2 张图像：images[0]=搜索图，images[1]=模板。
 // 多目标 × 旋转 × 尺度组合搜索（跨组合全局 NMS），按得分从优到劣输出。
 // 参数（按声明顺序）：
@@ -1236,6 +1263,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiFindMatchesEx(const AlgoCInput* in, AlgoCO
 }
 
 // ---------------- 算子入口：多目标椭圆拟合（node.json: alg.image2d.fit_ellipses） ----------------
+// 核心 C API：Image2DAlg_FitEllipsesFromBinary（fits 由 FreeEllipses 释放）。
 // 输入：二值语义图（非零为前景；彩色先转灰度）。
 // 参数（按声明顺序）：
 //   min_area   number  默认 10  [0,1e7]   面积过滤下限
@@ -1290,6 +1318,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiFitEllipses(const AlgoCInput* in, AlgoCOut
 }
 
 // ---------------- 算子入口：亚像素对位（node.json: alg.image2d.match_template_subpix） ----------------
+// 核心 C API：Image2DAlg_MatchTemplateSubPix。
 // 输入 2 张图像：images[0]=搜索图，images[1]=模板。
 // 参数（按声明顺序）：method（int，默认 5 [0,5]）。
 // 输出：搜索图克隆叠加中心十字标注（绿色）。
@@ -1334,6 +1363,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiMatchTemplateSubPix(const AlgoCInput* in, 
 }
 
 // ---------------- 算子入口：区域灰度统计（node.json: alg.image2d.region_stats） ----------------
+// 核心 C API：Image2DAlg_RegionStats。
 // 参数（按声明顺序）：roi_x/roi_y/roi_w/roi_h（4 个 int；w/h <= 0 = 全图）。
 // 输入：灰度语义图（彩色先转灰度）。
 // 输出：无图像端口（outputs 为空）；结果并入消息通道：
@@ -1364,6 +1394,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiRegionStats(const AlgoCInput* in, AlgoCOut
 
 
 // ---------------- 算子入口：Harris 角点检测（node.json: alg.image2d.harris_corners） ----------------
+// 核心 C API：Image2DAlg_HarrisCorners（corners 由 FreePoint2f 释放）。
 // 参数（按声明顺序）：
 //   block_size   int     默认 5  [3,51]    邻域窗口（奇数自动补）
 //   ksize        int     默认 3  [3,7]     Sobel 核
@@ -1421,6 +1452,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiHarrisCorners(const AlgoCInput* in, AlgoCO
 }
 
 // ---------------- 算子入口：ORB 特征对位（node.json: alg.image2d.orb_align） ----------------
+// 核心 C API：Image2DAlg_ORBAlign（matches 由 FreeOrbMatches 释放）。
 // 输入 2 张图像：images[0]=基准图（in1），images[1]=待对位图（in2）。
 // 参数（按声明顺序）：
 //   n_features  int     默认 500 [50,2000]  ORB 特征点上限
@@ -1479,6 +1511,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiORBAlign(const AlgoCInput* in, AlgoCOutput
 
 
 // ---------------- 算子入口：多目标直线拟合（node.json: alg.image2d.fit_lines） ----------------
+// 核心 C API：Image2DAlg_FitLinesFromBinary（lines 由 FreeLineFits 释放）。
 // 输入：二值语义图（非零为前景；彩色先转灰度）。
 // 参数（按声明顺序）：min_area/max_area（面积过滤，<=0 不限）、min_length（方向投影跨度过滤，<=0 不限）。
 // 输出：输入图克隆叠加拟合线段（绿色，中心 ±span/2）。
@@ -1534,6 +1567,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiFitLines(const AlgoCInput* in, AlgoCOutput
 }
 
 // ---------------- 算子入口：多目标旋转矩形（node.json: alg.image2d.fit_rects） ----------------
+// 核心 C API：Image2DAlg_FitRectsFromBinary（rects 由 FreeRectFits 释放）。
 // 输入：二值语义图（非零为前景；彩色先转灰度）。
 // 参数（按声明顺序）：min_area/max_area（面积过滤，<=0 不限）。
 // 输出：输入图克隆叠加旋转矩形（绿色 4 边框）。
@@ -1587,6 +1621,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiFitRects(const AlgoCInput* in, AlgoCOutput
 }
 
 // ---------------- 算子入口：轮廓点云输出（node.json: alg.image2d.contour_cloud） ----------------
+// 核心 C API：Image2DAlg_ContourPoints（xy/offsets 由 FreeContourPoints 释放）。
 // 输入：二值语义图（非零为前景；彩色先转灰度）。
 // 参数（按声明顺序）：external_only（int，默认 1）、min_area（number，默认 1）。
 // 输出：z=0 点云（AlgoCCloudOut，xyz=轮廓点坐标，rgb=NULL），供宿主 3D 工作台查看轮廓。
@@ -1669,6 +1704,7 @@ static AlgoCCloudOut* AllocCloudOutZ0(const float* xy, int count) {
 }
 
 // ---------------- 算子入口：Shi-Tomasi 角点检测（node.json: alg.image2d.good_features） ----------------
+// 核心 C API：Image2DAlg_GoodFeatures（corners 由 FreePoint2f 释放）。
 // 参数（按声明顺序）：
 //   max_corners    int     默认 100  [1,10000]  最大角点数（按质量降序保留）
 //   quality_level  number  默认 0.01 (0,1]     质量系数（相对最强角点响应的比例）
@@ -1724,6 +1760,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiGoodFeatures(const AlgoCInput* in, AlgoCOu
 }
 
 // ---------------- 算子入口：角点亚像素细化（node.json: alg.image2d.corner_sub_pix） ----------------
+// 核心 C API：Image2DAlg_CornerSubPix（refined 由 FreePoint2f 释放）。
 // 输入：images[0]=图像，clouds[0]=初始角点（如 good_features/harris_corners 消息坐标
 //       或 contour_cloud 轮廓点云；点集 xy 取自 xyz，z 分量忽略；count >= 1）。
 // 参数（按声明顺序）：
@@ -1810,6 +1847,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiCornerSubPix(const AlgoCInput* in, AlgoCOu
 }
 
 // ---------------- 算子入口：轮廓顶点逼近（node.json: alg.image2d.approx_poly_dp） ----------------
+// 核心 C API：Image2DAlg_ApproxPolyDP（out_xy 由 FreeContourPoints 释放）。
 // 输入：clouds[0]=轮廓点集（xy 取自 xyz，z 分量忽略；count >= 3）。
 // 参数（按声明顺序）：
 //   epsilon  number  默认 3  [0,10000]  Douglas-Peucker 容差（像素；0 = 仅去除共线冗余）
@@ -1855,6 +1893,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiApproxPolyDP(const AlgoCInput* in, AlgoCOu
 }
 
 // ---------------- 算子入口：形状相似度（node.json: alg.image2d.match_shapes） ----------------
+// 核心 C API：Image2DAlg_MatchShapes。
 // 输入 2 个点集：clouds[0]=轮廓 A，clouds[1]=轮廓 B（各 >= 3 点；xy 取自 xyz，z 分量忽略）。
 // 参数（按声明顺序）：
 //   method  int  默认 1  [1,3]  1/2/3 = cv::CONTOURS_MATCH_I1~I3（常用 1）
@@ -1891,6 +1930,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiMatchShapes(const AlgoCInput* in, AlgoCOut
 }
 
 // ---------------- 算子入口：单目标圆拟合（node.json: alg.image2d.fit_circle） ----------------
+// 核心 C API：Image2DAlg_FitCircle（Kåsa 代数法 + SVD）。
 // 输入：clouds[0]=点集（xy 取自 xyz，z 分量忽略；count >= 3）。参数：无。
 // 输出：无端口（outputs 为空）；结果并入消息通道，形态与 fit_circles 一致：
 //   "count=1; [0]c=(cx,cy) r=R rms=RMS"
@@ -1921,6 +1961,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiFitCircle(const AlgoCInput* in, AlgoCOutpu
 }
 
 // ---------------- 算子入口：单目标直线拟合（node.json: alg.image2d.fit_line） ----------------
+// 核心 C API：Image2DAlg_FitLine（DIST_L2 最小二乘）。
 // 输入：clouds[0]=点集（xy 取自 xyz，z 分量忽略；count >= 2）。参数：无。
 // 输出：无端口（outputs 为空）；结果并入消息通道，形态与 fit_lines 一致：
 //   "count=1; [0]c=(x0,y0) dir=(vx,vy) rms=R"（DIST_L2 最小二乘）。
@@ -1950,6 +1991,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiFitLine(const AlgoCInput* in, AlgoCOutput*
 }
 
 // ---------------- 算子入口：FAST 角点检测（node.json: alg.image2d.fast_features） ----------------
+// 核心 C API：Image2DAlg_FastFeatures（corners 由 FreePoint2f 释放）。
 // 参数（按声明顺序）：
 //   threshold  int  默认 20  [1,255]  圆周连续像素比较的灰度差阈值（典型 10~40）
 //   nonmax     int  默认 1   [0,1]    3x3 非极大值抑制开关（1 = 开启去重）
@@ -2022,6 +2064,9 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiFastFeatures(const AlgoCInput* in, AlgoCOu
 }
 
 // ---------------- 算子入口：特征对位（node.json: alg.image2d.feature_align） ----------------
+// 核心 C API：Image2DAlg_FastFeatures → ComputeDescriptors → MatchFeatures →
+//   EstimateAffinePartial/FindHomography（一站式串联；FAST 贴边剔除 DetectTrimmedFast
+//   在适配层，描述子不跨节点流转）。
 // 一站式特征链路（ORBAlign 泛化版）：内部串联 FastFeatures → ComputeDescriptors ×2 →
 // MatchFeatures → EstimateAffinePartial / FindHomography——描述子为二进制块无法在
 // 节点间流转（ABI v1 只有 image/cloud/消息通道），故检测/描述/匹配不拆节点。
@@ -2195,6 +2240,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiFeatureAlign(const AlgoCInput* in, AlgoCOu
 }
 
 // ---------------- 算子入口：对应点变换估计（node.json: alg.image2d.estimate_transform） ----------------
+// 核心 C API：Image2DAlg_EstimateAffinePartial / FindHomography（motion 0/1 分派）。
 // 输入 2 个点集：clouds[0]=对应点 A（in1 侧），clouds[1]=对应点 B（in2 侧）——
 // 两组数量必须相等（一一对应），xy 取自 xyz（z 分量忽略，fit_circle 点集同款约定）。
 // 给已有外部对应点的调用方独立复用几何估计（与 feature_align 的内部链路解耦）。
@@ -2309,6 +2355,7 @@ static int ParseDoubleList(const char* text, double* vals, int max_n) {
 extern "C" {
 
 // ---------------- 算子入口：斑点检测（node.json: alg.image2d.blob_detect） ----------------
+// 核心 C API：Image2DAlg_BlobDetect（blobs 由 FreeBlobFeatures 释放）。
 // 参数（按声明顺序）：
 //   min_area        number  默认 100 [0,1e7]  面积过滤下限（像素²；<=0 = 无下限）
 //   max_area        number  默认 0   [0,1e7]  面积过滤上限（<=0 = 不设上限）
@@ -2362,6 +2409,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiBlobDetect(const AlgoCInput* in, AlgoCOutp
 }
 
 // ---------------- 算子入口：一站式检测匹配（node.json: alg.image2d.detect_and_match） ----------------
+// 核心 C API：Image2DAlg_DetectAndMatch（matches 由 FreeOrbMatches 释放）。
 // DetectAndMatch = 检测（detectAndCompute）+ 描述 + 匹配（BFMatcher kNN + Lowe 比率）
 // 一站完成，复用 OrbMatch 结构——给不想管理描述子生命周期的调用方。
 // 与 feature_align 的边界：feature_align（FAST 检出 → 任意 type 描述子 → 匹配 →
@@ -2436,6 +2484,8 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiDetectAndMatch(const AlgoCInput* in, AlgoC
 }
 
 // ---------------- 算子入口：LK 光流跟踪（node.json: alg.image2d.optical_flow_lk） ----------------
+// 核心 C API：Image2DAlg_CalcOpticalFlowPyrLK（out_status 适配层预分配；tracked 由
+// FreePoint2f 释放）。
 // 金字塔 LK 光流（cv::calcOpticalFlowPyrLK）：视频/序列帧间点跟踪。
 // 输入：images[0]=前帧，images[1]=后帧（尺寸须一致），clouds[0]=初始点（xy，z 忽略，>=1 点）。
 // 参数（按声明顺序）：
@@ -2529,6 +2579,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiOpticalFlowLk(const AlgoCInput* in, AlgoCO
 }
 
 // ---------------- 算子入口：ECC 图像对齐（node.json: alg.image2d.ecc_align） ----------------
+// 核心 C API：Image2DAlg_FindTransformECC。
 // ECC 迭代最大化增强相关系数（cv::findTransformECC）：亚像素精度、对光照变化较稳。
 // 输入 2 张图像：images[0]=模板图（templ），images[1]=待配准图（input，尺寸须一致）。
 // 参数（按声明顺序）：
@@ -2587,6 +2638,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiEccAlign(const AlgoCInput* in, AlgoCOutput
 }
 
 // ---------------- 算子入口：相位相关平移估计（node.json: alg.image2d.phase_correlate） ----------------
+// 核心 C API：Image2DAlg_PhaseCorrelate。
 // FFT 频域互功率谱相位斜率（cv::phaseCorrelate）：对光照/亮度变化极稳、亚像素精度。
 // 输入 2 张图像：images[0]=基准图（a），images[1]=平移后图（b，尺寸须一致）。
 // 参数：无。
@@ -2615,6 +2667,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiPhaseCorrelate(const AlgoCInput* in, AlgoC
 }
 
 // ---------------- 算子入口：双目立体匹配（node.json: alg.image2d.stereo_match） ----------------
+// 核心 C API：Image2DAlg_StereoMatch（out_disparity 适配层预分配、FreeImage 回收）。
 // SGBM 半全局块匹配输出视差图（cv::StereoSGBM；配合 Image2DAlg_Calib.h 的立体
 // 校正结果可转深度）。
 // 输入 2 张图像：images[0]=左图，images[1]=右图（已校正灰度语义图，尺寸须一致；
@@ -2674,6 +2727,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiStereoMatch(const AlgoCInput* in, AlgoCOut
 }
 
 // ---------------- 算子入口：2D-3D 位姿估计（node.json: alg.image2d.solve_pnp） ----------------
+// 核心 C API：Image2DAlg_SolvePnP（Rodrigues 旋转矩阵换算在适配层，带 cv::Exception 捕获）。
 // solvePnP（默认迭代法 SOLVEPNP_ITERATIVE）：已知 3D 物点与 2D 投影 + 相机内参求位姿。
 // 输入 2 个点集：clouds[0]=3D 物点（xyz），clouds[1]=2D 像点（xy，z 忽略）——
 // 数量相等、一一对应，各 >= 4 点（3 点欠定）。
@@ -2783,6 +2837,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiSolvePnp(const AlgoCInput* in, AlgoCOutput
 extern "C" {
 
 // ---------------- 算子入口：仿射变换（node.json: alg.image2d.warp_affine） ----------------
+// 核心 C API：Image2DAlg_WarpAffine。
 // M 为前向映射（src→dst；cv::warpAffine 默认按 M 的逆采样，M 可直接取 estimate_transform / feature_align 消息里的
 // m=[...]（in1→in2 方向）或 cv::getRotationMatrix2D 等外部来源——
 // 宿主无消息自动接线时由用户把 6 值抄进 text 参数。
@@ -2829,6 +2884,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiWarpAffine(const AlgoCInput* in, AlgoCOutp
 }
 
 // ---------------- 算子入口：透视变换（node.json: alg.image2d.warp_perspective） ----------------
+// 核心 C API：Image2DAlg_WarpPerspective。
 // dst(x,y) = 齐次投影 src(M·[x,y,1]ᵀ)。矩阵来源：estimate_transform（motion=1）
 // 消息里的 h=[...]（3x3 行主序，h[8] 归一为 1，可直接使用）或
 // cv::getPerspectiveTransform 等外部来源。
@@ -2875,6 +2931,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiWarpPerspective(const AlgoCInput* in, Algo
 }
 
 // ---------------- 算子入口：多目标模板匹配 ROI（node.json: alg.image2d.find_matches_roi） ----------------
+// 核心 C API：Image2DAlg_FindAllMatchesROI（matches 由 FreeMatches 释放）。
 // find_matches 的 ROI 版：仅在 ROI 内提取多目标（NMS 在 ROI 内进行），命中左上角
 // 平移回全图坐标系——限区搜索既省时又屏蔽区外干扰；模板大于 ROI → 3。
 // 输入 2 张图像：images[0]=搜索图，images[1]=模板。
@@ -2943,6 +3000,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiFindMatchesRoi(const AlgoCInput* in, AlgoC
 }
 
 // ---------------- 算子入口：金字塔对位（node.json: alg.image2d.match_template_pyramid） ----------------
+// 核心 C API：Image2DAlg_MatchTemplatePyramid。
 // MatchTemplateEx 的提速版（单目标）：顶层粗化图全范围粗搜 → 逐级回原图仅在
 // 粗解 ±1 步进邻域内精化，层数 2~3 典型提速 4~10 倍；输出语义与 match_template_ex
 // 一致（模板中心落点，已映射回原图坐标系）。
@@ -3013,6 +3071,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiMatchTemplatePyramid(const AlgoCInput* in,
 }
 
 // ---------------- 算子入口：凸性缺陷（node.json: alg.image2d.convexity_defects） ----------------
+// 核心 C API：Image2DAlg_ConvexityDefects（defects 由 FreeDefects 释放）。
 // 凸包与轮廓间的凹陷检测（引脚变形/缺料）：输入轮廓点集（如 contour_cloud 的输出），
 // 输出各缺陷最深点 z=0 点云（corner_sub_pix 同款，供下游测量/判定取用），
 // 深度与顶点索引并入消息（索引以内部调整后的点序为准——输入顺时针会被先反转）。
@@ -3101,6 +3160,7 @@ static bool CircleToCloudOut(const Image2DAlg_CircleFit& st, AlgoCOutput* out) {
 }
 
 // ---------------- 算子入口：单目标圆拟合高精度版（node.json: alg.image2d.fit_circle_ex） ----------------
+// 核心 C API：Image2DAlg_FitCircleEx（Kåsa 初值 + Gauss-Newton）。
 // 输入：clouds[0]=点集（xy 取自 xyz，z 分量忽略；count >= 3）。参数：无。
 // 输出：单点云（x=圆心x y=圆心y z=半径）；详情并入消息通道，形态与 fit_circle 一致：
 //   "count=1; [0]c=(cx,cy) r=R rms=RMS"
@@ -3133,6 +3193,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiFitCircleEx(const AlgoCInput* in, AlgoCOut
 }
 
 // ---------------- 算子入口：单目标圆拟合抗外点版（node.json: alg.image2d.fit_circle_robust） ----------------
+// 核心 C API：Image2DAlg_FitCircleRobust（内点索引由 FreeInliers 释放）。
 // 输入：clouds[0]=点集（xy 取自 xyz，z 分量忽略；count >= 3）。
 // 参数（按声明顺序）：
 //   threshold  number  默认 2.0  [0.01,1000]  内点判定：点到圆周距离 <= threshold（像素；<=0 → 3）
@@ -3178,6 +3239,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiFitCircleRobust(const AlgoCInput* in, Algo
 }
 
 // ---------------- 算子入口：ROI 概率霍夫直线（node.json: alg.image2d.hough_lines_proi） ----------------
+// 核心 C API：Image2DAlg_HoughLinesPROI（lines 由 FreeLines 释放）。
 // hough_lines 的 ROI 版：仅在 ROI 内检测（检测参数语义与全图版逐字一致），线段端点
 // 已由核心层平移回全图坐标系——限区检测省时并屏蔽区外干扰（find_matches_roi 先例）。
 // 输入：二值/边缘图（链路上先接 Canny/Sobel/Threshold）。
@@ -3248,6 +3310,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiHoughLinesPRoi(const AlgoCInput* in, AlgoC
 }
 
 // ---------------- 算子入口：ROI 霍夫圆（node.json: alg.image2d.hough_circles_roi） ----------------
+// 核心 C API：Image2DAlg_HoughCirclesROI（circles 由 FreeCirclesHough 释放）。
 // hough_circles 的 ROI 版：仅在 ROI 内检测（dp/param/半径语义与全图版逐字一致），
 // 圆心已由核心层平移回全图坐标系；同样内部 3x3 高斯预平滑（HOUGH_GRADIENT
 // 对锐利二值图可能无果），圆叠加在原输入图上。
@@ -3339,6 +3402,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiHoughCirclesRoi(const AlgoCInput* in, Algo
 extern "C" {
 
 // ---------------- 算子入口：Laplacian 边缘增强（node.json: alg.image2d.laplacian） ----------------
+// 核心 C API：Image2DAlg_Laplacian。
 // 二阶导算子：对灰度突变（边缘/孤立点/细线）响应最强、平坦区响应≈0；
 // 与 Sobel（一阶导幅值）互补，对噪声更敏感——强噪声输入先接 blur。
 // 参数（按声明顺序）：
@@ -3371,6 +3435,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiLaplacian(const AlgoCInput* in, AlgoCOutpu
 }
 
 // ---------------- 算子入口：自定义卷积核滤波（node.json: alg.image2d.filter2d） ----------------
+// 核心 C API：Image2DAlg_Filter2D。
 // filter2D 任意线性滤波单一入口：锐化（Laplacian 锐化核）/平滑（高斯核）/
 // 边缘核/模板核。核布局 k×k 行主序，锚点 = 核中心。
 // 参数（按声明顺序）：
@@ -3425,6 +3490,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiFilter2D(const AlgoCInput* in, AlgoCOutput
 }
 
 // ---------------- 算子入口：非局部均值降噪（node.json: alg.image2d.denoise_nlmeans） ----------------
+// 核心 C API：Image2DAlg_DenoiseNLMeans。
 // NLMeans 块匹配加权去高斯白噪声：在搜索窗内找与模板块最相似的块做加权平均，
 // 孤立噪声点权重趋 0、结构块相似块权重高——保细节优于局部滤波，与 Blur 双边
 // 互补的另一条降噪路径（Blur 未覆盖 NLMeans 语义，故单设节点）。
@@ -3533,6 +3599,7 @@ static int AppendDoubleList4(char* msg, size_t cap, int pos, const double* vals,
 }
 
 // ---------------- 算子入口：批量局部相位配准（node.json: alg.image2d.phase_correlate_batch） ----------------
+// 核心 C API：Image2DAlg_PhaseCorrelateBatch（两段式容量探询，输出数组适配层 malloc/free）。
 // phase_correlate 的批量版：两图按统一网格切 tile_w×tile_h 瓦片逐瓦片相位配准
 //（口径同 Image2DAlg_PhaseCorrelate：灰度 + CV_32F + 默认窗），输出逐瓦片平移量
 // 与峰值响应——晶圆/面板大图的局部错位分布检测。瓦片行主序 index = r*cols + c、
@@ -3608,6 +3675,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiPhaseCorrelateBatch(const AlgoCInput* in, 
 }
 
 // ---------------- 算子入口：偏移重采样（node.json: alg.image2d.offset_remap） ----------------
+// 核心 C API：Image2DAlg_OffsetRemap。
 // 对位后内容回正：dst(x, y) = src(x−dx, y−dy)——把"内容平移了 (dx,dy)"的图搬回
 // 原位（对位流水线：对位节点输出 (dx,dy) 后按本口径重采样，内容回到参考帧坐标）；
 // 越界区域补 0，输出与输入同尺寸同通道。
@@ -3651,6 +3719,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiOffsetRemap(const AlgoCInput* in, AlgoCOut
 }
 
 // ---------------- 算子入口：掩膜平移复核（node.json: alg.image2d.mask_shift_recheck） ----------------
+// 核心 C API：Image2DAlg_MaskShiftRecheck（掩膜 BGRA→单通道转换在适配层）。
 // 缺陷确认/新增/消失统计：golden 掩膜的缺陷点 q 在 current 帧出现在 q+(dx,dy)——
 // 先把 golden 掩膜平移采样（最近邻，掩膜不做亚像素插值），再与 current 逐像素
 // 比对：matched = 平移后 golden 与 current 均非 0（缺陷在预期偏移处复现——确认）、
@@ -3712,6 +3781,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiMaskShiftRecheck(const AlgoCInput* in, Alg
 }
 
 // ---------------- 算子入口：两图拼接融合（node.json: alg.image2d.stitch_blend） ----------------
+// 核心 C API：Image2DAlg_StitchBlend。
 // 拼接 merge：next 的内容相对 base 平移了 (dx,dy)——next 的 (0,0) 放置在 base
 // 坐标系的 (floor(dx), floor(dy)) 处（与相位相关平移 PhaseCorrelate(base, next)
 // 输出直接配套；亚像素精拼先接偏移重采样节点预对齐再拼）。画布 = base 矩形 ∪
@@ -3759,6 +3829,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiStitchBlend(const AlgoCInput* in, AlgoCOut
 }
 
 // ---------------- 算子入口：模板复合仿射对位（node.json: alg.image2d.template_affine_align） ----------------
+// 核心 C API：Image2DAlg_TemplateAffineAlign（三步复合在核心层内完成）。
 // golden EB align / scan area align 二合一：金样模板对位三步复合——
 //   1. 粗对位：多尺度×多角度模板匹配（TM_CCOEFF_NORMED，步进 0.05；lo==hi 退化
 //      区间只算单尺度/单角度），得 golden 中心在 current 上的落点/尺度/角度；
@@ -3847,6 +3918,7 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiTemplateAffineAlign(const AlgoCInput* in, 
 extern "C" {
 
 // ---------------- 算子入口：幅度谱显示图（node.json: alg.image2d.fourier_spectrum） ----------------
+// 核心 C API：Image2DAlg_FourierSpectrum。
 // 频域缺陷检测底座：灰度 → CV_32F → 0 补边到最优 DFT 尺寸 → 双通道复数 DFT →
 // log(1+幅度) min-max 归一化 → 象限重排（DC 居中）→ 裁剪回输入尺寸 → 8U 单通道。
 // 工业谱显示口径：未加窗，补边区引入的边缘能量会进入谱图；周期纹理（布纹/
@@ -3881,6 +3953,8 @@ IMAGE2DALG_EXPORT int Image2DAlg_ComuiFourierSpectrum(const AlgoCInput* in, Algo
 }
 
 // ---------------- 算子入口：陷波滤波去周期纹理（node.json: alg.image2d.periodic_notch_filter） ----------------
+// 核心 C API：Image2DAlg_PeriodicNotchFilter（clean/defect 双图由 FreeImage 释放；
+// defect 图无输出端口，统计并入消息）。
 // 频域缺陷增强：对每个陷波点（相对 DC 中心的偏移量，像素，可负）及其共轭镜像
 // 点清除半径 notch_radius 圆内的复数频谱（与 DC 中心重叠的陷波点核心自动跳过
 // ——保亮度与低频轮廓），抑制布纹/网纹/摩尔纹等周期性成分；被抑制掉的残差即

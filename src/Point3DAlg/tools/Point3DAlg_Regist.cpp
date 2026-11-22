@@ -565,6 +565,7 @@ Point3DAlg_RegistStep Point3DAlg_RegistRun(
 }
 
 
+// 对点云应用 4×4 变换（行主序，与 RegistRun/手动配准导出矩阵同约定）；cloud 为 NULL 返回空云
 pcl::PointCloud<pcl::PointXYZ>::Ptr Point3DAlg_RegistApplyTransform(
     const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& cloud, const float transform[16])
 {
@@ -575,6 +576,7 @@ pcl::PointCloud<pcl::PointXYZ>::Ptr Point3DAlg_RegistApplyTransform(
     return out;
 }
 
+// 判断 4×4 变换是否为单位阵（逐元素容差 eps；供配准流程跳过恒等变换）
 bool Point3DAlg_RegistIsIdentity(const float transform[16], double eps)
 {
     float I[16];
@@ -585,6 +587,7 @@ bool Point3DAlg_RegistIsIdentity(const float transform[16], double eps)
     return true;
 }
 
+// 估计点云平均点距（隔点采样 KNN 第 2 近邻距离取中位数；退化/空云返回 1.0）
 double Point3DAlg_RegistEstimateSpacing(const pcl::PointCloud<pcl::PointXYZ>::ConstPtr& cloud)
 {
     if (!cloud || cloud->size() < 2)
@@ -612,6 +615,7 @@ double Point3DAlg_RegistEstimateSpacing(const pcl::PointCloud<pcl::PointXYZ>::Co
 // 变换文件读写
 // =====================================================================
 
+// 保存 4×4 矩阵为文本（每行 4 值空格分隔，可手工编辑）
 bool Point3DAlg_RegistSaveTransform(const char* path, const float transform[16])
 {
     if (!path || !path[0])
@@ -626,6 +630,7 @@ bool Point3DAlg_RegistSaveTransform(const char* path, const float transform[16])
     return CommonAlg_WriteFile(path, std::string(buf, (size_t)n));
 }
 
+// 保存扁平格式（一行 16 个逗号分隔值，直接粘进 ComUI manual_regist 节点参数）
 bool Point3DAlg_RegistSaveTransformFlat(const char* path, const float transform[16])
 {
     if (!path || !path[0])
@@ -633,6 +638,7 @@ bool Point3DAlg_RegistSaveTransformFlat(const char* path, const float transform[
     return CommonAlg_WriteFile(path, Point3DAlg_RegistFormatFlat(transform) + "\n");
 }
 
+// 16 值逗号分隔扁平字符串（%.6f 精度；保存与节点参数共用）
 std::string Point3DAlg_RegistFormatFlat(const float transform[16])
 {
     std::string out;
@@ -646,6 +652,7 @@ std::string Point3DAlg_RegistFormatFlat(const float transform[16])
     return out;
 }
 
+// 从任意文本提取 16 个数值（非数字字符视为分隔符，兼容 4×4 矩阵/扁平/带键名整行）
 bool Point3DAlg_RegistParseTransformText(const char* text, float transform[16])
 {
     if (!text || !text[0])
@@ -673,6 +680,7 @@ bool Point3DAlg_RegistParseTransformText(const char* text, float transform[16])
     return true;
 }
 
+// 读变换文件并解析（读不到文件/解析不足 16 值返回 false）
 bool Point3DAlg_RegistLoadTransform(const char* path, float transform[16])
 {
     if (!path || !path[0])

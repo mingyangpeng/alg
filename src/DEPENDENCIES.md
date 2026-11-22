@@ -29,7 +29,7 @@
 | PCL | 1.9.1 | 3D 点云处理、配准、滤波、特征、分割 | `thrid/PCL-1.9.1/` |
 
 **模块依赖：**
-- common, io, filters, features, registration, segmentation, kdtree, search, visualization
+- common, io, filters, features, kdtree, keypoints, octree, registration, sample_consensus, segmentation, surface, visualization（全仓实际 include 的 12 个子模块；search 经 kdtree 传递依赖，部署目录全量收集 20 个 pcl_*_release.dll）
 
 **传递依赖：**
 - Boost 1.68 (system, filesystem, thread, date_time, iostreams, serialization)

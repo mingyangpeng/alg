@@ -285,7 +285,6 @@ bool WritePngGray(const char* path, const uint16_t* px, int rows, int cols, int 
     ihdr.push_back(0);    // interlace
     PutChunk(out, "IHDR", ihdr);
 
-    // 原始数据：每行 1 字节 filter(0) + cols × 2 字节大端
     // 原始数据：每行 1 字节 filter(0) + 像素（16 位大端 2 字节 / 8 位 1 字节）
     const size_t bpc = (bitDepth == 16) ? 2 : 1;
     std::vector<uint8_t> raw;

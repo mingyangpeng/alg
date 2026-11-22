@@ -687,13 +687,6 @@
 - **T38a 顺带清掉**：src/BusinessAlg/CMakeLists.txt 补 `list(FILTER SOURCES EXCLUDE REGEX ".*_test\\.cpp$")`（GLOB 误收 test 进主 DLL，T32 同款；重建后 dumpbin 无 test 符号、BusinessAlg_test 退出码 0）。
 - 构建：0 error；全量 ctest **8/8 全过**（8.7s——执行期间用户新增 Point3DAlg_RegionPlaneTest 至 8 项，ShapelyAlg_test 已复绿）。
 - 遗留：无（node.json 7 口径同步仍挂 T38b 等 DomeFit 收尾）。
-背景：五库中唯 BusinessAlg 的适配层仍在 src/（BusinessAlg_comui.cpp + business_region_ratio.node.json），与"算法模块零 UI 痕迹、适配集中 integration/comui"口径不一致（Image2D/Point3D 已迁）。本任务纯挪位置 + 接线，零业务逻辑改动。
-1. 移动 src/BusinessAlg/BusinessAlg_comui.cpp、business_region_ratio.node.json → integration/comui/（内容逐字不变）。
-2. integration/comui/CMakeLists.txt：仿既有两例增 set(COMUI_ADAPTER_BUSINESS ...) PARENT_SCOPE。
-3. src/BusinessAlg/CMakeLists.txt：SOURCES 增 ${COMUI_ADAPTER_BUSINESS}（GLOB 不再覆盖该文件后需显式引入）；include 直指 integration/comui 的 target_include_directories 与 setup_deployment 按 Image2DAlg 先例调整（对照 src/Image2DAlg/CMakeLists.txt，node.json 改由 deploy_comui_nodes 部署）。
-4. 口径同步：grep 全仓 "BusinessAlg_comui|business_region_ratio" 找文档/注释涉及处（src/DEVELOPMENT_RULES.md、根 README、终版快照），路径统一新位置。
-5. 验证：全量构建 0 error；dumpbin /EXPORTS BusinessAlg.dll 与迁移前一致（Comui 入口/algo_free 在）；build/output/Release 下 6/6 node.json 与工作区一致；ctest 6/6。
-边界：node.json 内容不改（只挪位置）；每完成一步先落盘。预算 45 分钟。
 
 ## 终版快照（T34，2026-11-06）
 
@@ -784,14 +777,7 @@
 - [2026-11-12 R34 巡逻/异常报告] ctest 变 12 项（新增 Point3DAlg_BumpReportTest，源文件 11-12 00:00–00:02 由用户侧写入，板面无对应任务卡）：**Point3DAlg_BumpReportTest 稳定 FAIL（复跑 2 次均 EXIT=1），3 项断言失败——直径均值实测 0.2055 vs 断言 0.2269±10µm（注释称真值为"距顶 0.35 截面圆"）、直径 NG 期望 1 实测 0、NG 位与统计不一致**；同组高度/检出断言全过。按维持模式纪律只报告不修：该模块是用户凌晨新开发（BumpReport 候选报告功能），直径口径（采样截面/拟合方式）与断言期望的出入需开发者本人确认，监督不代改。其余 11 项测试全过，产物在位。待用户指示：修 BumpReport / 或纳入任务板派活。
 - [2026-11-12 R35 巡逻/异常更新] 用户侧凌晨仍在活跃开发（Image2DAlg_Ops.cpp 01:28、Image2DAlg_test.cpp 01:30、api.cpp 01:26——板面无对应任务卡）。**ctest 12 项中 1 FAIL 已转移：Point3DAlg_BumpReportTest 自愈转 PASS（R34 报告的直径口径问题用户已自行修复，BumpReport.cpp 01:30 更新）；新 FAIL 为 Image2DAlg_test 稳定 3 项断言失败（全图 mean/stddev/min/max 精确、直方图计数、BHATTACHARYYA 近似直方图——复跑 4 次均 EXIT=1），系用户开发中间态（histogram/统计类新算子刚写入）。按纪律只报告不修：等用户开发收口或明示派活。产物 5 DLL + 39 node.json 在位（节点 35→39，用户侧新增 4 个）。待用户指示。
 - [2026-11-12 R36 巡逻] 状态与 R35 一致无变化：ctest 12 项 1 FAIL 仍为 Image2DAlg_test（用户 histogram/统计开发中间态，源文件 01:28/01:30 后未再更新）；BumpReportTest 保持 PASS；39 node.json、5 DLL 在位；板尾无新指示。维持纪律：只报告不修，等用户开发收口或明示派活。
-- [2026-11-12 R37 巡逻] 状态与 R36 一致：ctest 12 项 1 FAIL 仍为 Image2DAlg_test（用户 histogram 开发中间态，源文件 01:30 后无新改动）；39 node.json/5 DLL 在位；板尾无新指示。维持纪律不变：只报告不修，等用户收口或派活指令。
-- [2026-11-12 R38 巡逻] 状态与 R37 一致：ctest 12 项 1 FAIL 仍为 Image2DAlg_test（用户 histogram 开发中间态，源文件 01:30 后无新改动）；39 node.json/5 DLL 在位；板尾无新指示。维持纪律不变：只报告不修，等用户收口或派活指令。
-- [2026-11-12 R39 巡逻] 状态与 R38 一致：ctest 12 项 1 FAIL 仍为 Image2DAlg_test（用户 histogram 开发中间态，源文件 01:30 后无新改动）；39 node.json/5 DLL 在位；板尾无新指示。维持纪律不变：只报告不修，等用户收口或派活指令。
-- [2026-11-12 R40 巡逻] 状态与 R39 一致：ctest 12 项 1 FAIL 仍为 Image2DAlg_test（用户 histogram 开发中间态，源文件 01:30 后无新改动）；39 node.json/5 DLL 在位；板尾无新指示。维持纪律不变：只报告不修，等用户收口或派活指令。
-- [2026-11-12 R41 巡逻] 状态与 R40 一致：ctest 12 项 1 FAIL 仍为 Image2DAlg_test（用户 histogram 开发中间态，源文件 01:30 后无新改动）；39 node.json/5 DLL 在位；板尾无新指示。维持纪律不变：只报告不修，等用户收口或派活指令。
-- [2026-11-12 R42 巡逻] 状态与 R41 一致：ctest 12 项 1 FAIL 仍为 Image2DAlg_test（用户 histogram 开发中间态，源文件 01:30 后无新改动）；39 node.json/5 DLL 在位；板尾无新指示。维持纪律不变：只报告不修，等用户收口或派活指令。
-- [2026-11-12 R43 巡逻] 状态与 R42 一致：ctest 12 项 1 FAIL 仍为 Image2DAlg_test（用户 histogram 开发中间态，源文件 01:30 后无新改动）；39 node.json/5 DLL 在位；板尾无新指示。维持纪律不变：只报告不修，等用户收口或派活指令。
-- [2026-11-12 R44 巡逻] 状态与 R43 一致：ctest 12 项 1 FAIL 仍为 Image2DAlg_test（用户 histogram 开发中间态，源文件 01:30 后无新改动）；39 node.json/5 DLL 在位；板尾无新指示。维持纪律不变：只报告不修，等用户收口或派活指令。
+- [2026-11-12 R37–R44 巡逻合并] 连续 8 轮状态与 R36 一致无变化（ctest 12 项 1 FAIL 仍为 Image2DAlg_test 用户 histogram 开发中间态；39 node.json/5 DLL 在位；板尾无新指示；只报告不修）。2026-11-22 文档盘点去重合并，逐轮原文见 git 历史。
 - [2026-11-13 00:00 R45/用户指示] 用户指示"做好对接接口"——本仓产物正式部署到宿主 D:/pmy/Com_UI（sess_cac7f9f7"UI界面开发"会话对应项目）。执行：旧插件目录 Image2DAlg/Point3DAlg（10-12/10-30 旧版各 2 节点）备份移至 Com_UI/output/backup-20261112/（未删）；新建 comdll/algo/AlgProject/ 平铺部署 5 算法 DLL + 39 node.json + 29 运行时 DLL（opencv/geos×2/OpenNI2/pcl release×20）+ 按 source.files 镜像源码快照（37 引用文件 + include 头目录；node.json 以所在目录为仓库根解析）。验证（VS2022 dumpbin）：39 id 唯一、runtime 全 native、assembly/method 全命中导出（Image2D 28 / Point3D 9 / Business 2）、source 零缺失。工具教训两条：①MSYS bash 下 dumpbin 参数须写 //EXPORTS（/EXPORTS 被路径转换吞掉静默无输出）②dumpbin hint 列是十六进制，导出解析应取行尾 token 精确比对，勿逐列 isdigit（假阴性）。注意：Point3DAlg_comui.cpp 23:09 有未构建改动（BumpReport 位置度，迭代十六待验），部署 DLL 为 01:13 构建——该工作收尾后需重建并重拷 AlgProject/。宿主启动后应见 39 条"算子(JSON)已注册"，联调按 docs/HOST_VERIFY.md。
 - [2026-11-13 R45 巡逻] **恢复正常**：ctest **12/12 全过**——R36 起报告的 Image2DAlg_test 3 项 histogram 中间态 FAIL 已由用户自行收口（BumpReport 位置度功能也已并入，12 项含新测试）；39 node.json/5 DLL 在位；板尾无新指示。异常清零，维持模式继续；待用户：T27 键位修复 / Calib 联动 / 快照 7 条待决。
 - [2026-11-13 00:45 R46/对接续+review] 对接续：R45 部署后构建又推进（ShapelyAlg 23:52 / Image2DAlg 00:19 / Point3DAlg 00:23），**新增第 40 节点 image2d.region_stats**（histogram 收口产物）+ bump_report 参数更新——已同步重拷 3 DLL + 全部 node.json + 源码快照 5 文件，AlgProject 现为 **40 node.json**（image2d 29 / point3d 9 / business 2）。独立复跑 ctest 12/12（8.81s）。review 三维（dumpbin /DEPENDENTS 递归闭包 + 端口结构 + 参数自洽）：①依赖闭包 21 DLL 全可解析（本地 5+16 运行时；VC 运行时 System32 实存）——宿主启动无"加载即失败"风险；②端口 48 入/37 出 type/source/from 全合法；3 个节点 outputs:[]（region_ratio/region_stats/region_plane）系量测统计类设计口径"结果并入节点消息"，非缺陷——**真机注意：其结果走 error 字段，宿主会按错误样式显示（ABI v1 已知限制）**；③参数类型/default∈[min,max]/method 无重复绑定全过。工具坑补两条：dumpbin /DEPENDENTS 区块 marker 后有空行勿提前 break；MSYS 下 sed -i 跨盘（C:↔D:）报 Invalid cross-device link。

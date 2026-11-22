@@ -682,6 +682,8 @@ auto band  = CP::filterPassThrough(cloud, "z", zMin, zMax);      // 直通（高
 auto sor   = CP::filterStatisticalOutlier(cloud, 20, 1.0);       // 统计去噪
 auto ror   = CP::filterRadiusOutlier(cloud, 1.5, 3);             // 半径去噪
 auto cond  = CP::filterConditionalXYZ(cloud, x0, x1, y0, y1, z0, z1);
+auto approx= CP::filterApproxVoxelGrid(cloud, 0.5);              // 近似体素（哈希质心，大云更快；
+                                                                 // 格数与精确版可有 1~2% 出入）
 ```
 
 ### 7.2 提取与裁剪（extract）
@@ -738,12 +740,24 @@ std::vector<float> coeffs; std::vector<int> inliers;
 bool ok = CP::fitPlane(cloud, FitMethod::RANSAC, 0.02, coeffs, inliers);
 CP::segmentPlaneRANSAC(cloud, 0.02, inCloud, outCloud, coeffs);
 
+// 空间直线拟合（PCL SACMODEL_LINE，RANSAC/LMEDS/MSAC 均支持）
+std::vector<float> linePt, lineDir; std::vector<int> lineIn;
+CP::fitLine3D(cloud, FitMethod::RANSAC, 0.02, linePt, lineDir, lineIn);
+
 // Open3D: cluster_dbscan（PCL 1.9 无 DBSCAN，内部 KdTree + 并查集）
 std::vector<int> labels;
 int nClusters = CP::segmentDBSCAN(cloud, 1.0, 5, labels);   // labels[i] = -1 为噪声
+// ⚠️ labels 与"剔除非有限点后的云"对齐（含 NaN/Inf 输入时长度 ≠ 输入点数，
+//    需要原始行号时调用方自行映射，见 CloudProcessor.h 注释）
 
 // Open3D: detect_planar_patches 的平滑区域语义
 auto regions = CP::segmentRegionGrowing(cloud, normals, 30, 5.0, 0.5, 50, 1000000);
+
+// 条件欧氏聚类（高度差约束，全自研——台阶/叠层工件按高度分层：
+// 欧氏距离 ≤ tolerance 且 |Δz| ≤ max_height_diff 才连通，上下表面分离）
+auto layers = CP::segmentConditionalEuclidean(cloud, /*tolerance=*/1.0,
+                                              /*min_size=*/50, /*max_size=*/100000,
+                                              /*max_height_diff=*/0.3);
 
 // PCL 原生
 auto clusters = CP::segmentEuclideanCluster(cloud, 1.5, 50, 100000);   // 按点数降序
@@ -814,6 +828,12 @@ double fitness = 0, rmse = 0;
 CP::registEvaluate(source, target, T, 1.0, fitness, rmse);       // 内点占比 + 内点 RMSE
 double info[36];
 CP::registInformationMatrix(source, target, T, 1.0, info);       // 6x6，顺序 [r, t]
+
+// 多尺度 ICP（大点云/大初值偏差）：voxel 金字塔由粗到细逐级点到点 ICP，
+// 每级对应距离 = factor × voxel；voxel_sizes 为空退化为单级 ICP
+std::vector<double> voxels = { 2.5, 1.0, 0.3 };
+std::vector<int> iters = { 80, 60, 60 };
+CP::registMultiscaleICP(source, target, voxels, iters, 2.0, T);
 ```
 
 ### 7.8 表面重建（surface）
@@ -1007,6 +1027,7 @@ CP::planeResiduals(cloud, /*plane=*/fcoeffs.data(), res);   // 非有限点 = Na
 std::vector<int> idx; std::vector<float> dist;
 CP::treeKdTreeKNN(cloud, query, 10, idx, dist);
 CP::treeKdTreeRadiusSearch(cloud, query, 1.5, idx, dist);
+// ⚠️ KNN/半径搜索的 dist 均为**平方欧氏距离**（PCL KdTree 原生口径，未开方）
 CP::treeOctreeVoxelSearch(cloud, query, idx, 1.0);           // res<=0 自动按 1.0
 CP::treeOctreeChangeDetection(cloud1, cloud2, 1.0, idx);     // res<=0 拒绝（octree 会挂死）
 ```
@@ -1081,6 +1102,9 @@ shapely::HeightMap hm = CP::cloudToHeightMap(cloud, /*cell=*/0.05, /*mode=*/0);
 // hm.cells 行优先 index = row*width+col；row 0 = y 最小（imshow 显示时 Y 向下）
 // 空栅格 cells=NaN + mask=0；总栅格数上限 2000 万（cell 过小 → valid=false）
 // 取值/越界安全：hm.at(row, col)，越界返回 NaN
+
+// 高度图反向点云化：每个有效格（mask=1）生成一个格心点（rgb/intensity 为 0）
+auto back = CP::heightMapToCloud(hm);                        // invalid/空图返回 nullptr
 
 // 表面重建结果（Mesh3d）落盘/读回：OBJ 通用交换格式（CloudCompare/MeshLab 可读）
 shapely::MeshIO::saveOBJ("part.obj", mesh);              // false = 网格无效/索引越界/写失败

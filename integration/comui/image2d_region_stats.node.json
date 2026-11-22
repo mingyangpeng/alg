@@ -18,7 +18,7 @@
   "params": [
     {
       "name": "roi_x",
-      "label": "ROI X(0=全图)",
+      "label": "ROI X",
       "type": "int",
       "default": 0,
       "min": 0,
@@ -45,7 +45,7 @@
     },
     {
       "name": "roi_h",
-      "label": "ROI 高",
+      "label": "ROI 高(0=全图)",
       "type": "int",
       "default": 0,
       "min": 0,

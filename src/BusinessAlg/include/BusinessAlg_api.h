@@ -17,11 +17,12 @@ extern "C" {
 //       业务层负责：参数校验、流程串联、业务语义判定、结果组装。
 //
 // 新增算子步骤：
-//   1. 在 BusinessAlg_comui.cpp 增加 Point3DAlg_ComuiXxx / BusinessAlg_ComuiXxx 入口；
+//   1. 在 BusinessAlg_comui.cpp 增加 BusinessAlg_ComuiXxx 入口（可编排调用
+//      Point3DAlg / Image2DAlg / ShapelyAlg 的工具层与 C 接口）；
 //   2. 在此加声明（若需 C 级复用）；
 //   3. 添加对应 *.node.json 声明。
 //
-// 现有算子见 BusinessAlg_comui.cpp 中的 <=> 分隔区。
+// 现有算子见 BusinessAlg_comui.cpp 的"算子入口"分隔区。
 
 // ---------------- 示例算子：区域缺陷率统计 ----------------
 // 流程：点云 → 高度过滤(Stereo) → 2.5D 投影(Geom) → 区域面积/占比

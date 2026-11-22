@@ -1,6 +1,13 @@
 ﻿# ShapelyAlg 开发路线图（2026-11-10 盘点，2026-11-11 P1 完成）
 
-> 状态基线：ShapelyAlg_test **601 断言**全过 / ctest 全库 9 项 / README 与代码同步。
+> **状态（2026-11-22 盘点）**：本路线图已由 `dispatch/SHAPELY_API_STATUS.md`（接口清单与
+> 完成状态，逐批更新）与 `待开发接口.md`（C API/节点级未完成清单）接管维护，本文保留作
+> 2026-11-10~11 的历史规划存档、状态不再逐项更新。截至盘点时点：文中 P2/P3 绝大多数项
+> 已交付（GeoJSON/DXF 导出、批量拟合、fitCone、旋转对位、KNN、HeightMapIO、OpenMP 并行、
+> D1 布尔失败语义），D5（Calib 联动）已于 2026-11-20 交付并注册 ctest（dispatch/PM_LOG.md
+> 派单 003）。剩余尾项以 SHAPELY_API_STATUS"未完成"节与待开发接口.md 为准。
+
+> 状态基线（存档时点）：ShapelyAlg_test **601 断言**全过 / ctest 全库 9 项 / README 与代码同步。
 > 维护约定：新文件 UTF-8 BOM；4 空格缩进；C++17；导出宏走 src/AlgExport.h；
 > 源码搜索 grep -a；算法模块零 UI 痕迹；占位实现必须删除；每改必配回归测试。
 
@@ -48,7 +55,7 @@
 | D2 | README 计数声称滞后 | 文档同步 | ✅ 已清（根 README "68 算子"改非数值口径；测试计数归用户会话维护口径） |
 | D3 | Stereo 移动构造 noexcept 内 new（bad_alloc→terminate，理论风险） | 代码洁癖 | 维持现状——与 KdTree3 同"源对象非空"不变量模式，改动需全量访问器审计，收益不值 |
 | D4 | GEOS thread_local context 跨线程析构（存疑，未实测出问题） | 存疑 | 观察项，出问题再修 |
-| D5 | Calib 联动避让中（Image2DAlg_Calib 你在开发） | 边界 | 等你明示后纳入测试/文档体系 |
+| D5 | Calib 联动避让中（Image2DAlg_Calib 你在开发）——**✅ 已交付（2026-11-20 派单 003：标定数学缺陷链修复 + CalibTest 注册 ctest 13 项）** | 边界 | 已纳入测试/文档体系 |
 
 ## 三、待开发方向
 

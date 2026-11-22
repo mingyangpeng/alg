@@ -1,5 +1,5 @@
 ﻿// BusinessAlg_Region.cpp —— 业务层示例算子实现。
-// 原则：本文件不含任何几何/几何算法细节，全部调用基础模块。
+// 原则：本文件不含任何几何/点云/图像算法细节，全部调用基础模块。
 
 #include "include/BusinessAlg_api.h"
 #include "ShapelyAlg.h"   // 基础模块总入口（几何/点云/图像原子能力）

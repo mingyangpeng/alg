@@ -28,7 +28,7 @@ src/
 │   ├── Point3DAlg_SickIO.cpp   # 一步式 C 接口薄封装
 │   ├── Point3DAlg_Json.*       # nlohmann/json 配置封装 (GBK 容错)
 │   ├── Point3DAlg_test.cpp     # 测试入口
-│   ├── *.node.json
+│   ├── README.md               # 模块文档（算子/节点速查）
 │   └── include/
 └── ShapelyAlg/                 # 二/三维几何基础库 (单文件夹平铺)
     ├── CMakeLists.txt
@@ -54,7 +54,7 @@ integration/                    # 集成层（与算法隔离，可整体剥离�
     ├── Image2DAlg_comui.cpp    # Image2D 的 ABI 适配（编译进 Image2DAlg.dll）
     ├── Point3DAlg_comui.cpp    # Point3D 的 ABI 适配（编译进 Point3DAlg.dll）
     ├── BusinessAlg_comui.cpp   # Business 的 ABI 适配（编译进 BusinessAlg.dll）
-    └── *.node.json             # 全部 15 个 ComUI 节点声明（image2d 8 个 + point3d 6 个 + business 1 个）
+    └── *.node.json             # 全部 105 个 ComUI 节点声明（image2d 70 + point3d 33 + business 2；全量清单见 scripts/make_delivery_checklist.py）
 ```
 
 ## 1.1 模块分层职责
@@ -183,7 +183,7 @@ IMGIO_API void algo_free(void* p);
 mkdir build && cd build
 cmake ..
 cmake --build . --config Release
-# 产物在 ../output/Release/
+# 产物在 build/output/Release/（cwd=build 时即 ./output/Release）
 ```
 
 ### 6.2 发布部署 (含第三方依赖)

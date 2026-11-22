@@ -151,6 +151,7 @@ bool MeiUnprojectTheta(double target, double xi, double& theta)
 // Mei 投影 / 反投影 / 去畸变
 // =====================================================================
 
+// Mei 正向投影：世界点 → 球面 → 等距平面（fx/fy 各向异性广义焦距）→ 广义畸变 → 像素
 bool MeiProjectPoint(const double X[3], const CameraIntrinsics& K, double out_uv[2])
 {
     // 世界点 → 镜面坐标系（Mei 假定相机系原点即镜面中心，此处直接用）
@@ -184,6 +185,7 @@ bool MeiProjectPoint(const double X[3], const CameraIntrinsics& K, double out_uv
     return true;
 }
 
+// Mei 反投影：像素 → 归一化像面 → 牛顿解 θ → 重建球面单位方向向量
 bool MeiUnprojectPixel(double u, double v, const CameraIntrinsics& K, double out_dir[3])
 {
     if (K.fx < 1e-12 || K.fy < 1e-12)
@@ -217,6 +219,7 @@ bool MeiUnprojectPixel(double u, double v, const CameraIntrinsics& K, double out
     return true;
 }
 
+// 鱼眼去畸变：Mei 像素 → 方向 → 理想针孔像素（ξ=0 等价投影）
 bool MeiUndistortPixel(double u, double v, const CameraIntrinsics& K, double out_uv[2])
 {
     // 鱼眼像素 → 方向 → 理想针孔（xi=0 的等价针孔投影）
@@ -231,6 +234,7 @@ bool MeiUndistortPixel(double u, double v, const CameraIntrinsics& K, double out
     return true;
 }
 
+// 针孔 → 鱼眼重投影（去畸变逆映射）：理想针孔方向 → 球面 → Mei 投影
 bool MeiDistortPixel(double u_undist, double v_undist, const CameraIntrinsics& K, double out_uv[2])
 {
     // 理想针孔像素 → 方向 → Mei 像素
@@ -263,6 +267,7 @@ bool MeiDistortPixel(double u_undist, double v_undist, const CameraIntrinsics& K
 // 标定板
 // =====================================================================
 
+// 标定板内角点世界坐标：Z=0 平面按行列 × 方格边长生成（行主序）
 std::vector<cv::Point3f> CalibBoardWorldPoints(cv::Size corners, double squareSize)
 {
     std::vector<cv::Point3f> out;
@@ -348,7 +353,6 @@ bool SolveLM(ResidualFn fn, Eigen::VectorXd& params, int maxIter = 200, double l
                 break;
         }
     }
-    std::fprintf(stderr, "  [LM end] cost=%.3e\n", cost);
     return true;
 }
 
@@ -535,6 +539,8 @@ bool ExtrinsicsFromH(const cv::Mat& H, const CameraIntrinsics& K,
 // 单目标定
 // =====================================================================
 
+// 单目标定：DLT 单应 → Zhang 闭式初值 → 多候选 LM（缩放起点 + 阶段A外参先行）
+// → 最优候选长程精化，重投影 RMS 回传 outRms
 bool CalibrateMono(
     const std::vector<std::vector<cv::Point2f>>& imagePoints,
     const std::vector<cv::Point3f>& worldPoints,
@@ -748,6 +754,8 @@ bool CalibrateMono(
 }
 
 
+// 鱼眼 Mei 单目标定：DLT 单应 → 多候选初值（外部初值 / Zhang 度量修正 / 图宽启发式）
+// → 盒约束 LM（ξ∈[0,0.999]、f>0），按重投影成本择优
 bool CalibrateFisheyeMei(
     const std::vector<std::vector<cv::Point2f>>& imagePoints,
     const std::vector<cv::Point3f>& worldPoints,
@@ -959,6 +967,8 @@ bool CalibrateFisheyeMei(
 // 双目标定 + 立体校正
 // =====================================================================
 
+// 双目标定：左右各自 CalibrateMono → 逐帧相对位姿平均 → Bouguet 半旋转校正
+// → P1/P2（基线入 P2[0][3]）与 Q 矩阵
 bool CalibrateStereo(
     const std::vector<std::vector<cv::Point2f>>& leftPoints,
     const std::vector<std::vector<cv::Point2f>>& rightPoints,
@@ -1055,6 +1065,7 @@ bool CalibrateStereo(
 // 持久化
 // =====================================================================
 
+// 标定结果持久化：key=value 文本逐段写出（内参 / 可选外参 / 可选校正段）
 bool CalibSave(const char* path, const CameraIntrinsics& K,
                const StereoExtrinsics* ext, const StereoRectify* rect)
 {
@@ -1105,6 +1116,7 @@ bool CalibSave(const char* path, const CameraIntrinsics& K,
     return CommonAlg_WriteFile(path, std::string(buf, (size_t)n));
 }
 
+// 标定结果加载：逐行 key=value 解析（缺段保持默认），成功要求 fx/fy > 0
 bool CalibLoad(const char* path, CameraIntrinsics& K,
                StereoExtrinsics* ext, StereoRectify* rect)
 {

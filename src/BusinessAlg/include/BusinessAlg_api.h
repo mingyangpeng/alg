@@ -31,7 +31,8 @@ extern "C" {
 // 参数：xyz/count  点云交错数组 [x0,y0,z0,...] 与点数（z 为高度）
 //       min_z / max_z 高度区间；roi_x/y/w/h 感兴趣区域矩形
 // 输出：defect_ratio（ROI 内有效点投影面积 / ROI 面积）、area（有效投影面积，mm²）
-// 返回：0 成功；-1 空指针/参数非法（count<=0、roi_w/h<=0）；2 ROI 内无有效投影
+// 返回：0 成功；-1 空指针/参数非法（count<=0、roi_w/h<=0）；2 高度带内无有效点
+//       （filterByZRange 后 projectTo2D 为空；凸包与 ROI 无交集不报错，面积 0 仍返回 0）
 //       （本接口沿用历史正值约定，非全局 -N 错误码族）
 BUSINESSALG_EXPORT int BusinessAlg_ComputeRegionRatio(const float* xyz, int count,
                                                       double min_z, double max_z,
